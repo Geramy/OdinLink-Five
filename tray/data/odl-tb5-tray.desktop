@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=OdinLink TB5
+Comment=OdinLink Thunderbolt 5 System Tray
+Exec=odl_tb5_tray
+Icon=odl_tb5_connected
+Terminal=false
+Categories=System;Monitor;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true

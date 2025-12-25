@@ -1,0 +1,13 @@
+add_executable(odl_tb5_test
+    odl_tb5_test_main.c
+    odl_tb5_test_device.c
+    odl_tb5_test_lib_api.c
+    odl_tb5_test_plugin.c
+)
+
+target_include_directories(odl_tb5_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/lib/include
+    ${CMAKE_SOURCE_DIR}/driver/uapi
+    ${CMAKE_SOURCE_DIR}/third_party/rccl
+)
+target_link_libraries(odl_tb5_test odl_tb5 rccl_net_odl_tb5 dl)

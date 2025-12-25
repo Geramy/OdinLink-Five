@@ -1,0 +1,13 @@
+[Unit]
+Description=OdinLink Thunderbolt 5 Daemon
+Documentation=https://github.com/OdinLink/OdinLink-Five
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/odl_tb5_daemon --foreground
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,128 @@
+<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS Object Introspection 1.0//EN"
+ "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
+<node>
+  <interface name="com.odinlink.Tb5Daemon">
+
+    <!-- ===== Device / Peer Discovery ===== -->
+
+    <method name="GetDevices">
+      <arg name="devices" type="a(iss)" direction="out"/>
+      <!-- Array of (device_index, state_string, device_name) -->
+    </method>
+
+    <method name="GetPeerInfo">
+      <arg name="device_index" type="i" direction="in"/>
+      <arg name="uuid" type="s" direction="out"/>
+      <arg name="link_speed_gbps" type="u" direction="out"/>
+      <arg name="link_width" type="u" direction="out"/>
+      <arg name="state" type="s" direction="out"/>
+      <arg name="vendor_name" type="s" direction="out"/>
+      <arg name="device_name" type="s" direction="out"/>
+    </method>
+
+    <!-- ===== Test Execution ===== -->
+
+    <method name="RunTest">
+      <arg name="device_index" type="i" direction="in"/>
+      <arg name="test_type" type="s" direction="in"/>
+      <arg name="test_id" type="s" direction="out"/>
+    </method>
+
+    <method name="CancelTest">
+      <arg name="test_id" type="s" direction="in"/>
+      <arg name="success" type="b" direction="out"/>
+    </method>
+
+    <method name="GetTestStatus">
+      <arg name="test_id" type="s" direction="in"/>
+      <arg name="state" type="s" direction="out"/>
+      <arg name="progress_pct" type="u" direction="out"/>
+      <arg name="current_subtest" type="s" direction="out"/>
+    </method>
+
+    <method name="GetTestResult">
+      <arg name="test_id" type="s" direction="in"/>
+      <arg name="result_json" type="s" direction="out"/>
+    </method>
+
+    <!-- ===== File Sync ===== -->
+
+    <method name="SetSyncFolder">
+      <arg name="path" type="s" direction="in"/>
+      <arg name="success" type="b" direction="out"/>
+    </method>
+
+    <method name="GetSyncFolder">
+      <arg name="path" type="s" direction="out"/>
+    </method>
+
+    <method name="GetSyncStatus">
+      <arg name="enabled" type="b" direction="out"/>
+      <arg name="files_pending" type="u" direction="out"/>
+      <arg name="bytes_transferred" type="t" direction="out"/>
+      <arg name="last_sync_time" type="s" direction="out"/>
+    </method>
+
+    <method name="SetSyncEnabled">
+      <arg name="enabled" type="b" direction="in"/>
+    </method>
+
+    <!-- ===== RCCL Stats ===== -->
+
+    <method name="GetRcclStats">
+      <arg name="stats_json" type="s" direction="out"/>
+    </method>
+
+    <!-- ===== Daemon Control ===== -->
+
+    <method name="GetVersion">
+      <arg name="version" type="s" direction="out"/>
+    </method>
+
+    <!-- ===== Signals ===== -->
+
+    <signal name="DeviceAdded">
+      <arg name="device_index" type="i"/>
+      <arg name="device_name" type="s"/>
+    </signal>
+
+    <signal name="DeviceRemoved">
+      <arg name="device_index" type="i"/>
+    </signal>
+
+    <signal name="PeerStateChanged">
+      <arg name="device_index" type="i"/>
+      <arg name="new_state" type="s"/>
+    </signal>
+
+    <signal name="TestProgress">
+      <arg name="test_id" type="s"/>
+      <arg name="progress_pct" type="u"/>
+      <arg name="current_subtest" type="s"/>
+    </signal>
+
+    <signal name="TestCompleted">
+      <arg name="test_id" type="s"/>
+      <arg name="success" type="b"/>
+      <arg name="summary" type="s"/>
+    </signal>
+
+    <signal name="SyncFileTransferred">
+      <arg name="filename" type="s"/>
+      <arg name="direction" type="s"/>
+      <arg name="bytes" type="t"/>
+    </signal>
+
+    <signal name="SyncConflict">
+      <arg name="filename" type="s"/>
+      <arg name="resolution" type="s"/>
+    </signal>
+
+    <!-- ===== Properties ===== -->
+
+    <property name="DaemonState" type="s" access="read"/>
+    <property name="ConnectedPeerCount" type="u" access="read"/>
+    <property name="SyncEnabled" type="b" access="readwrite"/>
+
+  </interface>
+</node>

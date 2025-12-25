@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- OdinLink TB5 Connected (green thunderbolt) -->
+  <path d="M13 2L4.5 13.5h5L8 22l8.5-11.5h-5L13 2z"
+        fill="#4CAF50" stroke="#2E7D32" stroke-width="0.5"
+        stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,3 @@
+[D-BUS Service]
+Name=com.odinlink.Tb5Daemon
+Exec=/usr/bin/odl_tb5_daemon --foreground

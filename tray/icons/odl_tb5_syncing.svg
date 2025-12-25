@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- OdinLink TB5 Syncing (blue thunderbolt with arrows) -->
+  <path d="M13 2L4.5 13.5h5L8 22l8.5-11.5h-5L13 2z"
+        fill="#2196F3" stroke="#1565C0" stroke-width="0.5"
+        stroke-linejoin="round"/>
+  <!-- Sync arrows -->
+  <path d="M2 8l2-2 2 2" fill="none" stroke="#1565C0" stroke-width="1.2"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M22 16l-2 2-2-2" fill="none" stroke="#1565C0" stroke-width="1.2"
+        stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

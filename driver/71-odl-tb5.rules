@@ -1,0 +1,7 @@
+# OdinLink Thunderbolt 5 - udev rules
+
+# Grant all users read/write access to OdinLink devices (MODE instead of uaccess for headless/SSH).
+KERNEL=="odl_tb5_*", MODE="0666"
+
+# Disable runtime PM on NHI controllers so XDomain hotplug events are not missed.
+ACTION!="remove", SUBSYSTEM=="pci", DRIVER=="thunderbolt", ATTR{power/control}="on"
