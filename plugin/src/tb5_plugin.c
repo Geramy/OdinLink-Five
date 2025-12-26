@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 struct tb5_comm {
     tb5_ring_t ring;
@@ -15,6 +16,16 @@ struct tb5_request {
     bool done;
     int size;
 };
+
+struct tb5_handle {
+    int dev_id;
+    char hw_id[64];
+};
+
+// Global array to store hardware IDs for each device
+#define MAX_DEVICES 16
+static char hardware_ids[MAX_DEVICES][64];
+static int num_devices = 0;
 
 static ncclDebugLogger_t logger = NULL;
 
@@ -28,17 +39,36 @@ static ncclResult_t tb5_devices(int* ndev) {
     DIR *dir = opendir("/sys/bus/thunderbolt/devices");
     if (!dir) {
         *ndev = 0;
+        num_devices = 0;
         return ncclSuccess;
     }
     struct dirent *entry;
     int count = 0;
-    while ((entry = readdir(dir))) {
+    while ((entry = readdir(dir)) && count < MAX_DEVICES) {
         if (strstr(entry->d_name, "domain")) {
+            // Read the hardware ID (UUID) from the domain's root device
+            char path[256];
+            char root_dev[32];
+            snprintf(root_dev, sizeof(root_dev), "%s-0", entry->d_name + 6); // Remove "domain" prefix, add "-0"
+            snprintf(path, sizeof(path), "/sys/bus/thunderbolt/devices/%s/%s/unique_id", entry->d_name, root_dev);
+            FILE *fp = fopen(path, "r");
+            if (fp) {
+                if (fgets(hardware_ids[count], sizeof(hardware_ids[count]), fp)) {
+                    // Remove newline
+                    char *newline = strchr(hardware_ids[count], '\n');
+                    if (newline) *newline = '\0';
+                }
+                fclose(fp);
+            } else {
+                // Fallback: use domain name as ID
+                strcpy(hardware_ids[count], entry->d_name);
+            }
             count++;
         }
     }
     closedir(dir);
     *ndev = count;
+    num_devices = count;
     return ncclSuccess;
 }
 
@@ -55,16 +85,26 @@ static ncclResult_t tb5_getProperties(int dev, ncclNetProperties_v7_t* props) {
 }
 
 static ncclResult_t tb5_listen(int dev, void* handle, void** listenComm) {
-    // For simplicity, handle is dev id
-    int *dev_ptr = malloc(sizeof(int));
-    *dev_ptr = dev;
-    *listenComm = dev_ptr;
+    // Create handle with device ID and hardware ID
+    struct tb5_handle *handle_ptr = malloc(sizeof(struct tb5_handle));
+    handle_ptr->dev_id = dev;
+    if (dev < num_devices) {
+        strcpy(handle_ptr->hw_id, hardware_ids[dev]);
+    } else {
+        strcpy(handle_ptr->hw_id, "unknown");
+    }
+    *listenComm = handle_ptr;
     return ncclSuccess;
 }
 
 static ncclResult_t tb5_connect(int dev, void* handle, void** sendComm, void** recvComm) {
-    int remote_dev = handle ? *(int*)handle : 0;  // Default to device 0 if no handle (for accept)
-    printf("Connecting from device %d to device %d\n", dev, remote_dev);
+    struct tb5_handle* remote_handle = (struct tb5_handle*)handle;
+    int remote_dev = remote_handle ? remote_handle->dev_id : 0;  // Default to device 0 if no handle (for accept)
+
+    // Get hardware IDs - remote HW ID comes from handle (provided by remote device)
+    const char* local_hw_id = (dev < num_devices) ? hardware_ids[dev] : "unknown";
+    const char* remote_hw_id = remote_handle ? remote_handle->hw_id : "unknown";
+    printf("Connected: Local hardware ID: %s, Remote hardware ID: %s (provided by remote device via handle)\n", local_hw_id, remote_hw_id);
 
     struct tb5_comm* comm = malloc(sizeof(struct tb5_comm));
     if (tb5_ring_open(&comm->ring) != 0) {
@@ -78,7 +118,8 @@ static ncclResult_t tb5_connect(int dev, void* handle, void** sendComm, void** r
 }
 
 static ncclResult_t tb5_accept(void* listenComm, void** recvComm, void** sendComm) {
-    int dev = *(int*)listenComm;
+    struct tb5_handle* listen_handle = (struct tb5_handle*)listenComm;
+    int dev = listen_handle->dev_id;
     return tb5_connect(dev, NULL, sendComm, recvComm);
 }
 
