@@ -192,7 +192,6 @@ export RCCL_DEBUG=INFO
 ### Code Style
 - Follow Linux kernel coding standards for C code
 - Add comprehensive tests for new features
-- Update documentation for API changes
 
 ### Kernel Compatibility
 Tested on Linux 6.14.0-1018-oem with GCC 13.3.0 and CMake 3.28.3
