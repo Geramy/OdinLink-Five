@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.10)
 project(tb5-rccl-project)
 
 # Include third_party headers
-include_directories(third_party)
+include_directories(third_party/rccl)
 
 # Build kernel module
 add_custom_target(kernel_module ALL
@@ -17,5 +17,5 @@ add_subdirectory(plugin)
 
 # Build test program
 add_executable(tb5_test test_main.c)
-target_include_directories(tb5_test PRIVATE ${CMAKE_SOURCE_DIR}/third_party)
+target_include_directories(tb5_test PRIVATE ${CMAKE_SOURCE_DIR}/third_party/rccl ${CMAKE_SOURCE_DIR}/userspace/include)
 target_link_libraries(tb5_test tb5_ring rccl_net_tb5 dl)

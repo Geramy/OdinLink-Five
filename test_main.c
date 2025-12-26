@@ -8,10 +8,10 @@
 #include <errno.h>
 #include <sys/syscall.h>
 #include <tb5/tb5_ring.h>
-#include <nccl/net_v7.h>
+#include <net_v7.h>
 
 // Extern declaration for the plugin
-extern ncclNet_v7_t ncclNetPlugin_v7;
+extern rcclNet_v7_t rcclNetPlugin_v7;
 
 // Fallback memfd_create for older systems
 #ifndef MFD_CLOEXEC
@@ -69,39 +69,39 @@ int test_userspace_ring(void) {
     return 0;
 }
 
-int test_nccl_plugin(void) {
-    printf("Testing NCCL plugin interface...\n");
+int test_rccl_plugin(void) {
+    printf("Testing RCCL plugin interface...\n");
 
-    ncclNet_v7_t *plugin = &ncclNetPlugin_v7;
-    ncclDebugLogger_t logger = NULL;
+    rcclNet_v7_t *plugin = &rcclNetPlugin_v7;
+    rcclDebugLogger_t logger = NULL;
     int ret;
 
     // Initialize plugin
     ret = plugin->init(logger);
-    if (ret != ncclSuccess) {
+    if (ret != rcclSuccess) {
         printf("ERROR: Plugin init failed: %d\n", ret);
         return -1;
     }
-    printf("✓ NCCL plugin initialized\n");
+    printf("✓ RCCL plugin initialized\n");
 
     // Get device count
     int ndev;
     ret = plugin->devices(&ndev);
-    if (ret != ncclSuccess) {
+    if (ret != rcclSuccess) {
         printf("ERROR: Plugin devices failed: %d\n", ret);
         return -1;
     }
-    printf("✓ Found %d NCCL devices\n", ndev);
+    printf("✓ Found %d RCCL devices\n", ndev);
 
     if (ndev == 0) {
-        printf("WARNING: No NCCL devices found - Thunderbolt may not be connected\n");
-        return 0; // Not an error, just no devices
+        printf("WARNING: No RCCL devices found - Thunderbolt may not be connected\n");
+        return 0; // Not an error, just devices
     }
 
     // Get properties of first device
-    ncclNetProperties_v7_t props;
+    rcclNetProperties_v7_t props;
     ret = plugin->getProperties(0, &props);
-    if (ret != ncclSuccess) {
+    if (ret != rcclSuccess) {
         printf("ERROR: Plugin getProperties failed: %d\n", ret);
         return -1;
     }
@@ -115,7 +115,7 @@ int test_nccl_plugin(void) {
         // Listen on device 0
         void* listenComm;
         ret = plugin->listen(0, NULL, &listenComm);
-        if (ret != ncclSuccess) {
+        if (ret != rcclSuccess) {
             printf("ERROR: Plugin listen failed: %d\n", ret);
             return -1;
         }
@@ -124,7 +124,7 @@ int test_nccl_plugin(void) {
         // Connect from device 1 to device 0
         void* sendComm, *recvComm;
         ret = plugin->connect(1, listenComm, &sendComm, &recvComm);
-        if (ret != ncclSuccess) {
+        if (ret != rcclSuccess) {
             printf("ERROR: Plugin connect failed: %d\n", ret);
             plugin->closeListen(listenComm);
             return -1;
@@ -180,7 +180,7 @@ int test_thunderbolt_communication(void) {
 }
 
 int main(int argc, char *argv[]) {
-    printf("TB5 NCCL Plugin Test Program\n");
+    printf("TB5 RCCL Plugin Test Program\n");
     printf("============================\n\n");
 
     int result = 0;
@@ -195,8 +195,8 @@ int main(int argc, char *argv[]) {
         result = -1;
     }
 
-    // Test 3: NCCL plugin interface
-    if (test_nccl_plugin() != 0) {
+    // Test 3: RCCL plugin interface
+    if (test_rccl_plugin() != 0) {
         result = -1;
     }
 
@@ -207,7 +207,7 @@ int main(int argc, char *argv[]) {
 
     printf("\n============================\n");
     if (result == 0) {
-        printf("✓ All tests passed! TB5 NCCL plugin is working correctly.\n");
+        printf("✓ All tests passed! TB5 RCCL plugin is working correctly.\n");
     } else {
         printf("✗ Some tests failed. Check Thunderbolt connection and kernel module.\n");
     }
