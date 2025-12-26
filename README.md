@@ -40,23 +40,6 @@ sudo apt update
 sudo apt install build-essential cmake linux-headers-$(uname -r)
 ```
 
-Testing kernel module...
-✓ Kernel device opened successfully
-Testing userspace ring API...
-✓ Userspace ring opened successfully
-✓ Completion check works (completed: 0)
-✓ Userspace ring closed successfully
-Testing NCCL plugin interface...
-✓ NCCL plugin initialized
-✓ Found 3 NCCL devices
-✓ Device properties: Thunderbolt 5 DMA Ring, speed: 80 Gbps, ptrSupport: 1
-Testing Thunderbolt communication interface...
-✓ Thunderbolt ring interface opened successfully
-✓ Completion check interface works (completed: 0)
-✓ Thunderbolt communication interface test completed successfully
-  (Note: Full DMA buffer testing requires GPU driver integration)
-✓ All tests passed! TB5 NCCL plugin is working correctly.
-```
 ### Build & Test
 ```bash
 # Clone and build
