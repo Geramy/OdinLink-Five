@@ -108,6 +108,38 @@ int test_nccl_plugin(void) {
     printf("✓ Device properties: %s, speed: %d Gbps, ptrSupport: %d\n",
            props.name, props.speed/1000, props.ptrSupport);
 
+    // Test listen/connect functionality if we have at least 2 devices
+    if (ndev >= 2) {
+        printf("Testing listen/connect with device IDs...\n");
+
+        // Listen on device 0
+        void* listenComm;
+        ret = plugin->listen(0, NULL, &listenComm);
+        if (ret != ncclSuccess) {
+            printf("ERROR: Plugin listen failed: %d\n", ret);
+            return -1;
+        }
+        printf("✓ Listening on device 0\n");
+
+        // Connect from device 1 to device 0
+        void* sendComm, *recvComm;
+        ret = plugin->connect(1, listenComm, &sendComm, &recvComm);
+        if (ret != ncclSuccess) {
+            printf("ERROR: Plugin connect failed: %d\n", ret);
+            plugin->closeListen(listenComm);
+            return -1;
+        }
+        printf("✓ Connected successfully\n");
+
+        // Close connections
+        plugin->closeSend(sendComm);
+        plugin->closeRecv(recvComm);
+        plugin->closeListen(listenComm);
+        printf("✓ Connections closed\n");
+    } else {
+        printf("Skipping listen/connect test (need at least 2 devices)\n");
+    }
+
     return 0;
 }
 

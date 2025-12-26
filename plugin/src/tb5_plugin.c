@@ -8,7 +8,7 @@
 
 struct tb5_comm {
     tb5_ring_t ring;
-    // other state
+    int refcount; // Reference count for send/recv comms
 };
 
 struct tb5_request {
@@ -63,11 +63,15 @@ static ncclResult_t tb5_listen(int dev, void* handle, void** listenComm) {
 }
 
 static ncclResult_t tb5_connect(int dev, void* handle, void** sendComm, void** recvComm) {
+    int remote_dev = handle ? *(int*)handle : 0;  // Default to device 0 if no handle (for accept)
+    printf("Connecting from device %d to device %d\n", dev, remote_dev);
+
     struct tb5_comm* comm = malloc(sizeof(struct tb5_comm));
     if (tb5_ring_open(&comm->ring) != 0) {
         free(comm);
         return ncclSystemError;
     }
+    comm->refcount = 2; // Both send and recv reference this comm
     *sendComm = comm;
     *recvComm = comm;
     return ncclSuccess;
@@ -132,13 +136,16 @@ static ncclResult_t tb5_test(void* request, int* done, int* size) {
 
 static ncclResult_t tb5_closeSend(void* sendComm) {
     struct tb5_comm* comm = (struct tb5_comm*)sendComm;
-    tb5_ring_close(comm->ring);
-    free(comm);
+    comm->refcount--;
+    if (comm->refcount == 0) {
+        tb5_ring_close(comm->ring);
+        free(comm);
+    }
     return ncclSuccess;
 }
 
 static ncclResult_t tb5_closeRecv(void* recvComm) {
-    // Same as send
+    // Same as send - both decrement the same refcount
     return tb5_closeSend(recvComm);
 }
 
