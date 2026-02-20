@@ -327,6 +327,7 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 		dev->tx.ring->hop, dev->rx.ring->hop,
 		dev->tx.ring_size);
 
+	schedule_delayed_work(&dev->rx_poll_work, msecs_to_jiffies(1));
 	schedule_work(&dev->verify_work);
 
 	return 0;
@@ -473,7 +474,7 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 			pr_info("OdinLink: DMA ping attempt %d, "
 				"still waiting for pong\n", attempt + 1);
 
-		flush_work(&dev->rx_poll_work);
+		flush_delayed_work(&dev->rx_poll_work);
 		tb_ring_stop(dev->rx.ring);
 		tb_ring_start(dev->rx.ring);
 		dev->rx.frames_posted = false;
@@ -492,7 +493,7 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 	pr_info("OdinLink: DMA path verified, resetting rings for userspace\n");
 
 	flush_work(&dev->ctrl_reply_work);
-	cancel_work_sync(&dev->rx_poll_work);
+	cancel_delayed_work_sync(&dev->rx_poll_work);
 	odl_tb5_rings_reset(dev);
 
 	/* Allocate frame pool for stream multiplexing */
@@ -520,7 +521,7 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 	return;
 
 out_reset:
-	cancel_work_sync(&dev->rx_poll_work);
+	cancel_delayed_work_sync(&dev->rx_poll_work);
 	odl_tb5_rings_reset(dev);
 }
 
@@ -530,7 +531,7 @@ static void odl_tb5_restart_work_fn(struct work_struct *work)
 	struct odl_tb5_device *dev =
 		container_of(work, struct odl_tb5_device, restart_work);
 
-	cancel_work_sync(&dev->rx_poll_work);
+	cancel_delayed_work_sync(&dev->rx_poll_work);
 	cancel_work_sync(&dev->verify_work);
 	cancel_work_sync(&dev->ctrl_reply_work);
 	cancel_work_sync(&dev->connect_work);
@@ -618,7 +619,7 @@ int odl_tb5_proto_init(struct odl_tb5_device *dev)
 	INIT_WORK(&dev->restart_work, odl_tb5_restart_work_fn);
 	INIT_WORK(&dev->verify_work, odl_tb5_verify_work_fn);
 	INIT_WORK(&dev->ctrl_reply_work, odl_tb5_ctrl_reply_work_fn);
-	INIT_WORK(&dev->rx_poll_work, odl_tb5_rx_poll_work_fn);
+	INIT_DELAYED_WORK(&dev->rx_poll_work, odl_tb5_rx_poll_work_fn);
 	init_waitqueue_head(&dev->verify_waitq);
 
 	dev->login_retries  = 0;
@@ -638,7 +639,7 @@ int odl_tb5_proto_init(struct odl_tb5_device *dev)
 /* Tear down the protocol layer for a device. */
 void odl_tb5_proto_exit(struct odl_tb5_device *dev)
 {
-	cancel_work_sync(&dev->rx_poll_work);
+	cancel_delayed_work_sync(&dev->rx_poll_work);
 	cancel_work_sync(&dev->verify_work);
 	cancel_work_sync(&dev->ctrl_reply_work);
 	cancel_work_sync(&dev->restart_work);

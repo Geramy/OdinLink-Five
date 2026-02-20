@@ -23,13 +23,13 @@ static void odl_tb5_rx_start_poll(void *data)
 {
 	struct odl_tb5_device *dev = data;
 
-	schedule_work(&dev->rx_poll_work);
+	mod_delayed_work(system_wq, &dev->rx_poll_work, 0);
 }
 
 void odl_tb5_rx_poll_work_fn(struct work_struct *work)
 {
 	struct odl_tb5_device *dev =
-		container_of(work, struct odl_tb5_device, rx_poll_work);
+		container_of(work, struct odl_tb5_device, rx_poll_work.work);
 	struct ring_frame *frame;
 
 	if (!dev->rx.ring || !dev->rx.started)
@@ -40,6 +40,9 @@ void odl_tb5_rx_poll_work_fn(struct work_struct *work)
 
 	if (dev->rx.started)
 		tb_ring_poll_complete(dev->rx.ring);
+
+	if (dev->state >= ODL_TB5_STATE_CONNECTED && dev->rx.started)
+		schedule_delayed_work(&dev->rx_poll_work, msecs_to_jiffies(1));
 }
 
 /* Find which odl_tb5_device owns a given tb_ring and return its ring_ctx. */
