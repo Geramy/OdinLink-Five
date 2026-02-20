@@ -432,7 +432,13 @@ static void odl_tb5_ctrl_reply_work_fn(struct work_struct *work)
 }
 
 
-/* Post-connection DMA verification via ping/pong exchange. */
+/* Post-connection DMA verification via ping/pong exchange.
+ *
+ * IMPORTANT: We must NOT stop/start the RX ring between attempts.
+ * Each ring stop cancels all pending RX frames, creating a dead
+ * window where incoming PONGs are lost.  Instead, post enough RX
+ * frames up front and just keep sending PINGs until a PONG arrives.
+ */
 static void odl_tb5_verify_work_fn(struct work_struct *work)
 {
 	struct odl_tb5_device *dev =
@@ -443,7 +449,9 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 
 	dev->pong_received = false;
 
-	buf_size = (size_t)ODL_TB5_FRAME_SIZE * 16;
+	/* Post 128 RX frames — enough to absorb remote PINGs while
+	 * we wait for a PONG (remote sends ~1 PING/sec). */
+	buf_size = (size_t)ODL_TB5_FRAME_SIZE * 128;
 	ret = odl_tb5_submit_rx(dev, 0, buf_size);
 	if (ret) {
 		pr_warn("OdinLink: DMA verify: failed to post RX (%ld)\n",
@@ -451,7 +459,7 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 		goto out_reset;
 	}
 
-	for (attempt = 0; ; attempt++) {
+	for (attempt = 0; attempt < 300; attempt++) {
 		if (dev->state != ODL_TB5_STATE_CONNECTED)
 			goto out_reset;
 
@@ -471,31 +479,25 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 		ret = wait_event_interruptible_timeout(
 				dev->verify_waitq,
 				dev->pong_received,
-				msecs_to_jiffies(1000));
+				msecs_to_jiffies(100));
 		if (ret > 0)
 			break;
 
 		if (ret < 0)
 			goto out_reset;
 
-		if ((attempt + 1) % 10 == 0)
+		if ((attempt + 1) % 50 == 0)
 			pr_info("OdinLink: DMA ping attempt %d, "
 				"still waiting for pong\n", attempt + 1);
 
-		flush_delayed_work(&dev->rx_poll_work);
-		tb_ring_stop(dev->rx.ring);
-		tb_ring_start(dev->rx.ring);
-		dev->rx.frames_posted = false;
-		dev->rx.swapped_since_post = false;
-		atomic_set(&dev->rx.completed, 0);
-		atomic_set(&dev->rx.submitted, 0);
+		/* Do NOT reset the RX ring here — that kills in-flight
+		 * frames and creates dead windows where PONGs are lost. */
+	}
 
-		ret = odl_tb5_submit_rx(dev, 0, buf_size);
-		if (ret) {
-			pr_warn("OdinLink: DMA verify: re-post RX failed "
-				"(%ld)\n", ret);
-			goto out_reset;
-		}
+	if (!dev->pong_received) {
+		pr_err("OdinLink: DMA verify failed after %d attempts\n",
+		       attempt);
+		goto out_reset;
 	}
 
 	pr_info("OdinLink: DMA path verified, resetting rings for userspace\n");
