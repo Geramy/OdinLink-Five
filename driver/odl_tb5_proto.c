@@ -517,6 +517,11 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 	dev->rx_target = 0;
 	atomic_set(&dev->rx_posted, 0);
 
+	/* Restart the fallback poll timer for stream data — NHI
+	 * interrupts are unreliable on Barlow Ridge, so we need this
+	 * running continuously to kick both TX and RX ring_work. */
+	schedule_delayed_work(&dev->rx_poll_work, msecs_to_jiffies(1));
+
 	pr_info("OdinLink: entering READY state\n");
 	return;
 

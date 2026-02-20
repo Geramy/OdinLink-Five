@@ -19,29 +19,30 @@
 /* Forward declarations for functions defined later in this file */
 static void odl_tb5_stream_free(struct kref *ref);
 
-static void odl_tb5_rx_start_poll(void *data)
-{
-	struct odl_tb5_device *dev = data;
-
-	mod_delayed_work(system_wq, &dev->rx_poll_work, 0);
-}
-
+/*
+ * Fallback polling timer — kicks both TX and RX ring_work every 1 ms.
+ *
+ * The NHI hardware on Intel Barlow Ridge (TB5) does not reliably fire
+ * MSI-X completion interrupts for either TX or RX.  Without this
+ * fallback, TX callbacks never fire (blocking ctrl_reply_work for 5 s)
+ * and RX frames are never delivered to our callback.
+ *
+ * When interrupts DO fire, the ISR also calls schedule_work(&ring->work),
+ * so the two paths are safely additive (schedule_work is idempotent).
+ */
 void odl_tb5_rx_poll_work_fn(struct work_struct *work)
 {
 	struct odl_tb5_device *dev =
 		container_of(work, struct odl_tb5_device, rx_poll_work.work);
-	struct ring_frame *frame;
 
-	if (!dev->rx.ring || !dev->rx.started)
-		return;
+	if (dev->tx.ring && dev->tx.started)
+		schedule_work(&dev->tx.ring->work);
 
-	while ((frame = tb_ring_poll(dev->rx.ring)) != NULL)
-		odl_tb5_rx_callback(dev->rx.ring, frame, false);
+	if (dev->rx.ring && dev->rx.started)
+		schedule_work(&dev->rx.ring->work);
 
-	if (dev->rx.started)
-		tb_ring_poll_complete(dev->rx.ring);
-
-	if (dev->state >= ODL_TB5_STATE_CONNECTED && dev->rx.started)
+	if (dev->state >= ODL_TB5_STATE_CONNECTED &&
+	    (dev->tx.started || dev->rx.started))
 		schedule_delayed_work(&dev->rx_poll_work, msecs_to_jiffies(1));
 }
 
@@ -338,7 +339,7 @@ int odl_tb5_rings_alloc(struct odl_tb5_device *dev)
 					RING_FLAG_FRAME,
 					0,
 					sof_mask, eof_mask,
-					odl_tb5_rx_start_poll, dev);
+					NULL, NULL);
 	if (!dev->rx.ring) {
 		pr_err("odl_tb5: failed to allocate RX ring\n");
 		ret = -ENOMEM;
