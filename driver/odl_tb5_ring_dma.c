@@ -133,6 +133,53 @@ void odl_tb5_tx_callback(struct tb_ring *ring,
 	}
 }
 
+void odl_tb5_tx_batch_callback(struct tb_ring *ring,
+			       struct ring_frame *frame, bool canceled)
+{
+	struct odl_tb5_ring_ctx *ctx;
+	struct odl_tb5_device *dev;
+	struct odl_tb5_batch_buf *batch = NULL;
+	struct odl_tb5_tx_msg *msg;
+	int b;
+
+	ctx = odl_tb5_ring_to_ctx(ring);
+	if (WARN_ON_ONCE(!ctx))
+		return;
+
+	dev = container_of(ctx, struct odl_tb5_device, tx);
+
+	/* Identify which batch buffer owns this frame (8 entries max) */
+	for (b = 0; b < ODL_TB5_BATCH_BUF_COUNT; b++) {
+		struct odl_tb5_batch_buf *candidate = &dev->batch_pool.bufs[b];
+
+		if (frame >= &candidate->frames[0] &&
+		    frame < &candidate->frames[ODL_TB5_BATCH_FRAMES]) {
+			batch = candidate;
+			break;
+		}
+	}
+
+	if (WARN_ON_ONCE(!batch))
+		return;
+
+	msg = batch->tx_msg;
+
+	/* Return batch buffer to pool when all its frames complete */
+	if (atomic_dec_and_test(&batch->frames_pending))
+		odl_tb5_batch_pool_put(&dev->batch_pool, batch);
+
+	/* Complete the message when all batches are done */
+	if (msg && atomic_dec_and_test(&msg->frames_pending) &&
+	    msg->sent == msg->len) {
+		struct odl_tb5_stream *s = msg->stream;
+
+		atomic_inc(&s->tx_completed);
+		atomic_dec(&s->tx_in_flight);
+		wake_up_interruptible(&s->tx_waitq);
+		kfree(msg);
+	}
+}
+
 void odl_tb5_rx_callback(struct tb_ring *ring,
 			 struct ring_frame *frame, bool canceled)
 {
@@ -1052,6 +1099,153 @@ void odl_tb5_frame_pool_put(struct odl_tb5_frame_pool *pool,
 	wake_up_interruptible(&pool->avail_waitq);
 }
 
+/* Batch allocation: get up to @requested slots with a single spinlock. */
+int odl_tb5_frame_pool_get_batch(struct odl_tb5_frame_pool *pool,
+				 struct odl_tb5_frame_slot **slots,
+				 int requested)
+{
+	unsigned long flags;
+	int allocated = 0;
+	int idx = 0;
+
+	spin_lock_irqsave(&pool->lock, flags);
+
+	while (allocated < requested &&
+	       pool->free_count > ODL_TB5_TX_POOL_RESERVE) {
+		idx = find_next_zero_bit(pool->bitmap, pool->size, idx);
+		if (idx >= pool->size)
+			break;
+
+		set_bit(idx, pool->bitmap);
+		pool->free_count--;
+		pool->slots[idx].in_use = true;
+		pool->slots[idx].tx_msg = NULL;
+		slots[allocated++] = &pool->slots[idx];
+		idx++;
+	}
+
+	spin_unlock_irqrestore(&pool->lock, flags);
+	return allocated;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * SG Batch Buffer Pool (throughput mode)
+ * ══════════════════════════════════════════════════════════════════════ */
+
+int odl_tb5_batch_pool_alloc(struct odl_tb5_device *dev)
+{
+	struct odl_tb5_batch_pool *pool = &dev->batch_pool;
+	struct device *dma_dev = tb_ring_dma_device(dev->tx.ring);
+	int i;
+
+	INIT_LIST_HEAD(&pool->free_list);
+	spin_lock_init(&pool->lock);
+	init_waitqueue_head(&pool->avail_waitq);
+	pool->free_count = 0;
+
+	for (i = 0; i < ODL_TB5_BATCH_BUF_COUNT; i++) {
+		struct odl_tb5_batch_buf *buf = &pool->bufs[i];
+
+		buf->virt = dma_alloc_coherent(dma_dev,
+					       ODL_TB5_BATCH_BUF_SIZE,
+					       &buf->phys, GFP_KERNEL);
+		if (!buf->virt) {
+			pr_err("odl_tb5: batch buf alloc failed at %d\n", i);
+			goto err_free;
+		}
+
+		buf->in_use = false;
+		buf->tx_msg = NULL;
+		atomic_set(&buf->frames_pending, 0);
+		INIT_LIST_HEAD(&buf->list);
+		list_add_tail(&buf->list, &pool->free_list);
+		pool->free_count++;
+	}
+
+	pr_info("odl_tb5: batch pool allocated: %d x %d KB (%d MB total)\n",
+		ODL_TB5_BATCH_BUF_COUNT,
+		ODL_TB5_BATCH_BUF_SIZE >> 10,
+		(ODL_TB5_BATCH_BUF_COUNT * ODL_TB5_BATCH_BUF_SIZE) >> 20);
+	return 0;
+
+err_free:
+	while (--i >= 0) {
+		dma_free_coherent(dma_dev, ODL_TB5_BATCH_BUF_SIZE,
+				  pool->bufs[i].virt, pool->bufs[i].phys);
+		pool->bufs[i].virt = NULL;
+	}
+	INIT_LIST_HEAD(&pool->free_list);
+	pool->free_count = 0;
+	return -ENOMEM;
+}
+
+void odl_tb5_batch_pool_free(struct odl_tb5_device *dev)
+{
+	struct odl_tb5_batch_pool *pool = &dev->batch_pool;
+	struct device *dma_dev;
+	int i;
+
+	if (!pool->bufs[0].virt)
+		return;
+
+	if (dev->tx.ring)
+		dma_dev = tb_ring_dma_device(dev->tx.ring);
+	else if (dev->rx.ring)
+		dma_dev = tb_ring_dma_device(dev->rx.ring);
+	else
+		return;
+
+	for (i = 0; i < ODL_TB5_BATCH_BUF_COUNT; i++) {
+		if (pool->bufs[i].virt)
+			dma_free_coherent(dma_dev, ODL_TB5_BATCH_BUF_SIZE,
+					  pool->bufs[i].virt,
+					  pool->bufs[i].phys);
+		pool->bufs[i].virt = NULL;
+	}
+
+	INIT_LIST_HEAD(&pool->free_list);
+	pool->free_count = 0;
+}
+
+struct odl_tb5_batch_buf *
+odl_tb5_batch_pool_get(struct odl_tb5_batch_pool *pool)
+{
+	struct odl_tb5_batch_buf *buf;
+	unsigned long flags;
+
+	spin_lock_irqsave(&pool->lock, flags);
+
+	if (list_empty(&pool->free_list)) {
+		spin_unlock_irqrestore(&pool->lock, flags);
+		return NULL;
+	}
+
+	buf = list_first_entry(&pool->free_list,
+			       struct odl_tb5_batch_buf, list);
+	list_del_init(&buf->list);
+	buf->in_use = true;
+	pool->free_count--;
+
+	spin_unlock_irqrestore(&pool->lock, flags);
+	return buf;
+}
+
+void odl_tb5_batch_pool_put(struct odl_tb5_batch_pool *pool,
+			    struct odl_tb5_batch_buf *buf)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&pool->lock, flags);
+
+	buf->in_use = false;
+	buf->tx_msg = NULL;
+	list_add_tail(&buf->list, &pool->free_list);
+	pool->free_count++;
+
+	spin_unlock_irqrestore(&pool->lock, flags);
+	wake_up_interruptible(&pool->avail_waitq);
+}
+
 /* ══════════════════════════════════════════════════════════════════════
  * Stream Lifecycle
  * ══════════════════════════════════════════════════════════════════════ */
@@ -1196,20 +1390,75 @@ struct odl_tb5_stream *odl_tb5_stream_lookup(struct odl_tb5_device *dev,
 }
 
 /* ══════════════════════════════════════════════════════════════════════
- * Stream TX Path
+ * Stream TX Path — Adaptive Latency / Throughput Mode
  * ══════════════════════════════════════════════════════════════════════ */
 
 /*
- * Stream send — frame-by-frame with pool backpressure.
+ * Evaluate whether to use latency or throughput TX mode.
+ *
+ * Throughput mode uses pre-allocated 256KB batch buffers for reduced
+ * per-frame overhead (fewer pool locks, larger copy_from_user calls).
+ * Latency mode uses per-frame pool slots for minimal single-frame delay.
+ */
+static enum odl_tb5_tx_mode
+odl_tb5_evaluate_tx_mode(struct odl_tb5_device *dev, size_t msg_len)
+{
+	unsigned int pool_used;
+	unsigned int nframes;
+
+	/* Batch pool not available — latency only */
+	if (!dev->batch_pool.bufs[0].virt)
+		return ODL_TB5_TX_LATENCY;
+
+	/* Large messages always use throughput mode */
+	if (msg_len > ODL_TB5_THROUGHPUT_THRESH) {
+		dev->tx_adaptive.consecutive_low = 0;
+		dev->tx_adaptive.mode = ODL_TB5_TX_THROUGHPUT;
+		return ODL_TB5_TX_THROUGHPUT;
+	}
+
+	pool_used = dev->frame_pool.size - dev->frame_pool.free_count;
+	nframes = DIV_ROUND_UP(msg_len, ODL_TB5_STREAM_PAYLOAD_MAX);
+
+	if (dev->tx_adaptive.mode == ODL_TB5_TX_LATENCY) {
+		/* Transition up: load + new msg exceeds high watermark */
+		if (pool_used + nframes > dev->tx_adaptive.high_watermark) {
+			dev->tx_adaptive.consecutive_low = 0;
+			dev->tx_adaptive.mode = ODL_TB5_TX_THROUGHPUT;
+			pr_debug("odl_tb5: TX mode → THROUGHPUT "
+				 "(pool_used=%u nframes=%u)\n",
+				 pool_used, nframes);
+		}
+	} else {
+		/* Transition down: load below low watermark for N sends */
+		if (pool_used < dev->tx_adaptive.low_watermark) {
+			if (++dev->tx_adaptive.consecutive_low >=
+			    ODL_TB5_MODE_HYSTERESIS) {
+				dev->tx_adaptive.mode = ODL_TB5_TX_LATENCY;
+				dev->tx_adaptive.consecutive_low = 0;
+				pr_debug("odl_tb5: TX mode → LATENCY "
+					 "(pool_used=%u)\n", pool_used);
+			}
+		} else {
+			dev->tx_adaptive.consecutive_low = 0;
+		}
+	}
+
+	return dev->tx_adaptive.mode;
+}
+
+/*
+ * Latency-mode send — per-frame pool slots with backpressure.
  *
  * Each frame-sized chunk is copied directly from userspace into a DMA
  * pool slot, submitted to the NHI TX ring, and the slot is recycled by
  * the TX callback.  If the pool runs low, we block until a TX callback
- * frees a slot — this provides natural flow control and prevents pool
- * exhaustion that would starve the RX path.
+ * frees a slot — this provides natural flow control.
  */
-int odl_tb5_stream_send(struct odl_tb5_stream *stream,
-			u8 dst_id, const void __user *data, size_t len)
+static int odl_tb5_stream_send_latency(struct odl_tb5_stream *stream,
+					u8 dst_id,
+					const void __user *data,
+					size_t len)
 {
 	struct odl_tb5_device *dev = stream->dev;
 	struct odl_tb5_frame_pool *pool = &dev->frame_pool;
@@ -1218,20 +1467,11 @@ int odl_tb5_stream_send(struct odl_tb5_stream *stream,
 	struct odl_tb5_stream_hdr *hdr;
 	long ret;
 
-	if (dev->state != ODL_TB5_STATE_READY)
-		return -ENOTCONN;
-
-	if (len == 0 || len > (size_t)ODL_TB5_STREAM_PAYLOAD_MAX * 4096)
-		return -EINVAL;
-
-	/* Lightweight msg struct — only for TX completion tracking,
-	 * no bulk data copy.  TX callback uses msg->frames_pending
-	 * and msg->sent/len to know when to set msg->done. */
 	msg = kzalloc(sizeof(*msg), GFP_KERNEL);
 	if (!msg)
 		return -ENOMEM;
 
-	msg->data = NULL;	/* no bulk copy — we copy_from_user per frame */
+	msg->data = NULL;
 	msg->dst_id = dst_id;
 	msg->len = len;
 	msg->sent = 0;
@@ -1249,7 +1489,6 @@ int odl_tb5_stream_send(struct odl_tb5_stream *stream,
 		bool first = (msg->sent == 0);
 		bool last  = (msg->sent + payload == len);
 
-		/* Wait for a free pool slot, keeping a reserve for RX */
 		ret = wait_event_interruptible_timeout(pool->avail_waitq,
 			pool->free_count > ODL_TB5_TX_POOL_RESERVE,
 			msecs_to_jiffies(5000));
@@ -1261,9 +1500,8 @@ int odl_tb5_stream_send(struct odl_tb5_stream *stream,
 
 		slot = odl_tb5_frame_pool_get(pool);
 		if (!slot)
-			continue;	/* spurious wakeup, retry */
+			continue;
 
-		/* Build frame: 5-byte stream header + payload */
 		hdr = slot->virt;
 		hdr->src_id = stream->id;
 		hdr->dst_id = dst_id;
@@ -1302,14 +1540,9 @@ int odl_tb5_stream_send(struct odl_tb5_stream *stream,
 		}
 	}
 
-	/* All frames submitted — return immediately.  TX callback will
-	 * kfree(msg) when the last frame completes.  Pool back-pressure
-	 * (waiting for free slots above) provides natural flow control. */
 	return 0;
 
 wait_pending:
-	/* Error during submission — some frames may be in flight.
-	 * Wait briefly for them, then let TX callback handle cleanup. */
 	if (atomic_read(&msg->frames_pending) > 0) {
 		wait_event_interruptible_timeout(stream->tx_waitq,
 			atomic_read(&msg->frames_pending) == 0,
@@ -1320,8 +1553,186 @@ wait_pending:
 		wake_up_interruptible(&stream->tx_waitq);
 		kfree(msg);
 	}
-	/* else: leaked — TX callback will free pool slots and kfree msg. */
 	return (int)ret;
+}
+
+/*
+ * Throughput-mode send — uses pre-allocated 256KB contiguous DMA batch
+ * buffers to reduce per-frame overhead.  Each batch holds up to 64
+ * frames (64 × 4091 = 261,824 bytes of payload).  Benefits:
+ *   - 1 batch buffer allocation vs. 64 pool slot allocations
+ *   - Copy data in larger chunks (vs. 4KB per frame)
+ *   - Frames are pre-staged before submission
+ */
+static int odl_tb5_stream_send_throughput(struct odl_tb5_stream *stream,
+					   u8 dst_id,
+					   const void __user *data,
+					   size_t len)
+{
+	struct odl_tb5_device *dev = stream->dev;
+	struct odl_tb5_batch_pool *bpool = &dev->batch_pool;
+	struct odl_tb5_tx_msg *msg;
+	size_t total_sent = 0;
+	long ret;
+
+	msg = kzalloc(sizeof(*msg), GFP_KERNEL);
+	if (!msg)
+		return -ENOMEM;
+
+	msg->data = NULL;
+	msg->dst_id = dst_id;
+	msg->len = len;
+	msg->sent = 0;
+	atomic_set(&msg->frames_pending, 0);
+	msg->done = false;
+	msg->stream = stream;
+	INIT_LIST_HEAD(&msg->list);
+
+	atomic_inc(&stream->tx_in_flight);
+
+	while (total_sent < len) {
+		struct odl_tb5_batch_buf *batch;
+		size_t batch_payload_cap;
+		size_t batch_payload;
+		int nframes, i;
+
+		/* Wait for a free batch buffer */
+		ret = wait_event_interruptible_timeout(bpool->avail_waitq,
+			bpool->free_count > 0,
+			msecs_to_jiffies(5000));
+		if (ret <= 0) {
+			if (ret == 0)
+				ret = -ETIMEDOUT;
+			goto wait_pending;
+		}
+
+		batch = odl_tb5_batch_pool_get(bpool);
+		if (!batch)
+			continue; /* spurious wakeup */
+
+		/* How much user data fits in one batch buffer? */
+		batch_payload_cap = (size_t)ODL_TB5_BATCH_FRAMES *
+				    ODL_TB5_STREAM_PAYLOAD_MAX;
+		batch_payload = min_t(size_t, len - total_sent,
+				      batch_payload_cap);
+		nframes = DIV_ROUND_UP(batch_payload,
+				       ODL_TB5_STREAM_PAYLOAD_MAX);
+
+		/* Fill each frame within the batch buffer */
+		for (i = 0; i < nframes; i++) {
+			void *frame_base = batch->virt +
+					   ((size_t)i * ODL_TB5_FRAME_SIZE);
+			struct odl_tb5_stream_hdr *hdr = frame_base;
+			size_t offset = (size_t)i * ODL_TB5_STREAM_PAYLOAD_MAX;
+			size_t payload = min_t(size_t,
+					       batch_payload - offset,
+					       ODL_TB5_STREAM_PAYLOAD_MAX);
+			bool first = (total_sent == 0 && i == 0);
+			bool last  = (total_sent + offset + payload == len);
+
+			/* Stream header */
+			hdr->src_id = stream->id;
+			hdr->dst_id = dst_id;
+			if (first && last)
+				hdr->flags = ODL_TB5_SHDR_F_SINGLE;
+			else if (first)
+				hdr->flags = ODL_TB5_SHDR_F_MSG_START;
+			else if (last)
+				hdr->flags = ODL_TB5_SHDR_F_MSG_END;
+			else
+				hdr->flags = 0;
+			hdr->payload_len = cpu_to_le16(payload);
+
+			/* Copy payload from userspace */
+			if (copy_from_user(frame_base +
+					   ODL_TB5_STREAM_HDR_SIZE,
+					   data + total_sent + offset,
+					   payload)) {
+				odl_tb5_batch_pool_put(bpool, batch);
+				ret = -EFAULT;
+				goto wait_pending;
+			}
+
+			/* Set up ring descriptor */
+			batch->frames[i].buffer_phy = batch->phys +
+				((size_t)i * ODL_TB5_FRAME_SIZE);
+			batch->frames[i].size = ODL_TB5_STREAM_HDR_SIZE +
+						payload;
+			batch->frames[i].sof = ODL_TB5_PDF_SOF_DATA;
+			batch->frames[i].eof = ODL_TB5_PDF_EOF_DATA;
+			batch->frames[i].callback =
+				odl_tb5_tx_batch_callback;
+		}
+
+		/* Arm completion tracking before submission */
+		batch->tx_msg = msg;
+		batch->total_frames = nframes;
+		atomic_set(&batch->frames_pending, nframes);
+		atomic_add(nframes, &msg->frames_pending);
+		msg->sent += batch_payload;
+
+		/* Submit all frames in this batch to the ring */
+		for (i = 0; i < nframes; i++) {
+			if (tb_ring_tx(dev->tx.ring,
+				       &batch->frames[i]) < 0) {
+				int unsub = nframes - i;
+
+				atomic_sub(unsub, &batch->frames_pending);
+				atomic_sub(unsub, &msg->frames_pending);
+				msg->sent -= (size_t)unsub *
+					     ODL_TB5_STREAM_PAYLOAD_MAX;
+				batch->total_frames = i;
+				if (i == 0)
+					odl_tb5_batch_pool_put(bpool,
+							       batch);
+				ret = -EIO;
+				goto wait_pending;
+			}
+		}
+
+		total_sent += batch_payload;
+	}
+
+	return 0;
+
+wait_pending:
+	if (atomic_read(&msg->frames_pending) > 0) {
+		wait_event_interruptible_timeout(stream->tx_waitq,
+			atomic_read(&msg->frames_pending) == 0,
+			msecs_to_jiffies(1000));
+	}
+	if (atomic_read(&msg->frames_pending) == 0) {
+		atomic_dec(&stream->tx_in_flight);
+		wake_up_interruptible(&stream->tx_waitq);
+		kfree(msg);
+	}
+	return (int)ret;
+}
+
+/*
+ * Stream send — adaptive dispatcher.
+ *
+ * Evaluates TX mode (latency vs throughput) based on message size and
+ * current load, then dispatches to the appropriate send path.
+ */
+int odl_tb5_stream_send(struct odl_tb5_stream *stream,
+			u8 dst_id, const void __user *data, size_t len)
+{
+	struct odl_tb5_device *dev = stream->dev;
+	enum odl_tb5_tx_mode mode;
+
+	if (dev->state != ODL_TB5_STATE_READY)
+		return -ENOTCONN;
+
+	if (len == 0 || len > (size_t)ODL_TB5_STREAM_PAYLOAD_MAX * 4096)
+		return -EINVAL;
+
+	mode = odl_tb5_evaluate_tx_mode(dev, len);
+
+	if (mode == ODL_TB5_TX_THROUGHPUT)
+		return odl_tb5_stream_send_throughput(stream, dst_id,
+						      data, len);
+	return odl_tb5_stream_send_latency(stream, dst_id, data, len);
 }
 
 void odl_tb5_tx_drain_work_fn(struct work_struct *work)

@@ -339,6 +339,15 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 				"verify will use legacy path\n", pool_ret);
 	}
 
+	/* Allocate batch buffer pool for throughput-mode TX. */
+	if (!dev->batch_pool.bufs[0].virt) {
+		int bret = odl_tb5_batch_pool_alloc(dev);
+
+		if (bret)
+			pr_warn("OdinLink: batch pool alloc failed (%d), "
+				"throughput mode disabled\n", bret);
+	}
+
 	hrtimer_start(&dev->rx_poll_timer,
 		      ns_to_ktime(ODL_TB5_POLL_INTERVAL_NS),
 		      HRTIMER_MODE_REL);

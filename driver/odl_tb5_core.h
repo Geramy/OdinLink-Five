@@ -56,6 +56,14 @@ struct odl_tb5_stream_hdr {
 #define ODL_TB5_TX_POOL_RESERVE		64  /* keep free for RX repost */
 #define ODL_TB5_POLL_INTERVAL_NS	(10 * 1000)  /* 10 us */
 
+/* ── SG batch buffer pool (throughput mode) ──────────────────────────── */
+
+#define ODL_TB5_BATCH_BUF_SIZE		(256 * 1024)
+#define ODL_TB5_BATCH_FRAMES		(ODL_TB5_BATCH_BUF_SIZE / ODL_TB5_FRAME_SIZE)
+#define ODL_TB5_BATCH_BUF_COUNT		8
+#define ODL_TB5_THROUGHPUT_THRESH	65536	/* bytes: msg > 64KB → throughput */
+#define ODL_TB5_MODE_HYSTERESIS		4	/* consecutive low polls to downshift */
+
 struct odl_tb5_frame_slot {
 	void			*virt;
 	dma_addr_t		phys;
@@ -72,6 +80,32 @@ struct odl_tb5_frame_pool {
 	int			size;
 	int			free_count;
 	wait_queue_head_t	avail_waitq;
+};
+
+/* ── SG batch buffer (contiguous DMA region for throughput mode) ──────── */
+
+struct odl_tb5_batch_buf {
+	void			*virt;
+	dma_addr_t		phys;
+	struct ring_frame	frames[ODL_TB5_BATCH_FRAMES];
+	struct odl_tb5_tx_msg	*tx_msg;
+	atomic_t		frames_pending;
+	int			total_frames;
+	struct list_head	list;
+	bool			in_use;
+};
+
+struct odl_tb5_batch_pool {
+	struct odl_tb5_batch_buf bufs[ODL_TB5_BATCH_BUF_COUNT];
+	struct list_head	free_list;
+	spinlock_t		lock;
+	int			free_count;
+	wait_queue_head_t	avail_waitq;
+};
+
+enum odl_tb5_tx_mode {
+	ODL_TB5_TX_LATENCY    = 0,
+	ODL_TB5_TX_THROUGHPUT = 1,
 };
 
 /* ── Per-stream TX/RX queue entries ──────────────────────────────────── */
@@ -214,6 +248,15 @@ struct odl_tb5_device {
 	/* DMA frame pool */
 	struct odl_tb5_frame_pool frame_pool;
 
+	/* SG batch buffer pool (throughput mode) */
+	struct odl_tb5_batch_pool batch_pool;
+	struct {
+		enum odl_tb5_tx_mode	mode;
+		unsigned int		consecutive_low;
+		unsigned int		high_watermark;
+		unsigned int		low_watermark;
+	} tx_adaptive;
+
 	/* TX drain worker */
 	struct work_struct	tx_drain_work;
 
@@ -248,6 +291,18 @@ void odl_tb5_frame_pool_free(struct odl_tb5_device *dev);
 struct odl_tb5_frame_slot *odl_tb5_frame_pool_get(struct odl_tb5_frame_pool *pool);
 void odl_tb5_frame_pool_put(struct odl_tb5_frame_pool *pool,
 			    struct odl_tb5_frame_slot *slot);
+int  odl_tb5_frame_pool_get_batch(struct odl_tb5_frame_pool *pool,
+				  struct odl_tb5_frame_slot **slots,
+				  int requested);
+
+/* ── SG batch buffer pool ────────────────────────────────────────────── */
+
+int  odl_tb5_batch_pool_alloc(struct odl_tb5_device *dev);
+void odl_tb5_batch_pool_free(struct odl_tb5_device *dev);
+struct odl_tb5_batch_buf *odl_tb5_batch_pool_get(
+				struct odl_tb5_batch_pool *pool);
+void odl_tb5_batch_pool_put(struct odl_tb5_batch_pool *pool,
+			    struct odl_tb5_batch_buf *buf);
 
 /* ── Legacy DMA buffer management (kept for proto layer) ─────────────── */
 
@@ -298,6 +353,8 @@ enum hrtimer_restart odl_tb5_rx_poll_timer_fn(struct hrtimer *timer);
 
 void odl_tb5_tx_callback(struct tb_ring *ring,
 			 struct ring_frame *frame, bool canceled);
+void odl_tb5_tx_batch_callback(struct tb_ring *ring,
+			       struct ring_frame *frame, bool canceled);
 void odl_tb5_rx_callback(struct tb_ring *ring,
 			 struct ring_frame *frame, bool canceled);
 

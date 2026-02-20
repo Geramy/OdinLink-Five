@@ -74,6 +74,12 @@ static int odl_tb5_probe(struct tb_service *svc,
 	atomic_set(&dev->rx_posted, 0);
 	dev->rx_target = 0;
 
+	/* Adaptive TX mode defaults */
+	dev->tx_adaptive.mode = ODL_TB5_TX_LATENCY;
+	dev->tx_adaptive.consecutive_low = 0;
+	dev->tx_adaptive.high_watermark = odl_ring_size * 3 / 4;
+	dev->tx_adaptive.low_watermark  = odl_ring_size / 4;
+
 	ret = odl_tb5_chardev_create(dev);
 	if (ret) {
 		pr_err("odl_tb5: chardev create failed for index %d: %d\n",
@@ -160,6 +166,7 @@ static void odl_tb5_remove(struct tb_service *svc)
 
 	/* Clean up stream infrastructure */
 	cancel_work_sync(&dev->tx_drain_work);
+	odl_tb5_batch_pool_free(dev);
 	odl_tb5_frame_pool_free(dev);
 	ida_destroy(&dev->stream_ida);
 
