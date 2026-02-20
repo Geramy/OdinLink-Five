@@ -443,20 +443,29 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 {
 	struct odl_tb5_device *dev =
 		container_of(work, struct odl_tb5_device, verify_work);
-	size_t buf_size;
 	long ret;
 	int attempt;
 
 	dev->pong_received = false;
 
-	/* Post 128 RX frames — enough to absorb remote PINGs while
-	 * we wait for a PONG (remote sends ~1 PING/sec). */
-	buf_size = (size_t)ODL_TB5_FRAME_SIZE * 128;
-	ret = odl_tb5_submit_rx(dev, 0, buf_size);
-	if (ret) {
-		pr_warn("OdinLink: DMA verify: failed to post RX (%ld)\n",
-			ret);
-		goto out_reset;
+	/* Use frame pool for RX during verify — each pool slot is
+	 * independent and auto-reposts after consumption, so we never
+	 * run out of RX frames.  The legacy submit_rx only posts 16
+	 * frames and can't repost without a ring reset. */
+	if (dev->frame_pool.slots) {
+		dev->rx_target = dev->frame_pool.size / 2;
+		odl_tb5_rx_repost(dev);
+		pr_info("OdinLink: verify using pool RX (target=%d)\n",
+			dev->rx_target);
+	} else {
+		size_t buf_size = (size_t)ODL_TB5_FRAME_SIZE * 16;
+
+		ret = odl_tb5_submit_rx(dev, 0, buf_size);
+		if (ret) {
+			pr_warn("OdinLink: DMA verify: failed to post RX "
+				"(%ld)\n", ret);
+			goto out_reset;
+		}
 	}
 
 	for (attempt = 0; attempt < 300; attempt++) {

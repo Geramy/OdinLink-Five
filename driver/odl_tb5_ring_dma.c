@@ -170,34 +170,37 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 				return;
 			}
 
+			/* First check for raw DMA control message
+			 * (no stream header — used during verify). */
+			if (frame->size >= sizeof(struct odl_tb5_dma_hdr)) {
+				__le32 raw_magic;
+
+				memcpy(&raw_magic, data, sizeof(raw_magic));
+				if (le32_to_cpu(raw_magic) == ODL_TB5_DMA_MAGIC) {
+					struct odl_tb5_dma_hdr *dhdr = data;
+					u32 type = le32_to_cpu(dhdr->type);
+
+					if (type == ODL_TB5_DMA_PONG) {
+						pr_info("OdinLink: DMA pong received (pool)\n");
+						dev->pong_received = true;
+						wake_up_interruptible(&dev->verify_waitq);
+					} else {
+						dev->verify_rx_type = type;
+						schedule_work(&dev->ctrl_reply_work);
+					}
+
+					odl_tb5_frame_pool_put(&dev->frame_pool, slot);
+					odl_tb5_rx_repost(dev);
+					return;
+				}
+			}
+
 			/* Check for stream header */
 			if (frame->size >= ODL_TB5_STREAM_HDR_SIZE) {
 				struct odl_tb5_stream_hdr *shdr = data;
 				u8 dst_id = shdr->dst_id;
 
-				if (dst_id == ODL_TB5_STREAM_ID_CTRL) {
-					/* Control frame — check for DMA magic */
-					void *payload = data + ODL_TB5_STREAM_HDR_SIZE;
-					__le32 magic;
-
-					if (frame->size >= ODL_TB5_STREAM_HDR_SIZE +
-							   sizeof(struct odl_tb5_dma_hdr)) {
-						memcpy(&magic, payload, sizeof(magic));
-						if (le32_to_cpu(magic) == ODL_TB5_DMA_MAGIC) {
-							struct odl_tb5_dma_hdr *dhdr = payload;
-							u32 type = le32_to_cpu(dhdr->type);
-
-							if (type == ODL_TB5_DMA_PONG) {
-								pr_info("OdinLink: DMA pong received\n");
-								dev->pong_received = true;
-								wake_up_interruptible(&dev->verify_waitq);
-							} else {
-								dev->verify_rx_type = type;
-								schedule_work(&dev->ctrl_reply_work);
-							}
-						}
-					}
-				} else {
+				if (dst_id != ODL_TB5_STREAM_ID_CTRL) {
 					/* Userspace stream — route to RX queue */
 					struct odl_tb5_stream *stream;
 					u16 payload_len = le16_to_cpu(shdr->payload_len);
