@@ -108,22 +108,11 @@ void odl_tb5_tx_callback(struct tb_ring *ring,
 			msg->frames_pending--;
 			if (msg->frames_pending == 0 &&
 			    msg->sent == msg->len) {
-				struct odl_tb5_stream *stream = msg->stream;
-				unsigned long flags;
-
-				spin_lock_irqsave(&stream->tx_lock, flags);
-				list_del_init(&msg->list);
-				stream->tx_queue_len--;
-				spin_unlock_irqrestore(&stream->tx_lock, flags);
-
 				WRITE_ONCE(msg->done, true);
-				atomic_inc(&stream->tx_completed);
-				wake_up_interruptible(&stream->tx_waitq);
+				atomic_inc(&msg->stream->tx_completed);
+				wake_up_interruptible(&msg->stream->tx_waitq);
 			}
 		}
-
-		/* Re-schedule drain in case more messages are queued */
-		schedule_work(&dev->tx_drain_work);
 
 		if (canceled)
 			return;
@@ -201,47 +190,106 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 				u8 dst_id = shdr->dst_id;
 
 				if (dst_id != ODL_TB5_STREAM_ID_CTRL) {
-					/* Userspace stream — route to RX queue */
 					struct odl_tb5_stream *stream;
 					u16 payload_len = le16_to_cpu(shdr->payload_len);
 
 					stream = odl_tb5_stream_lookup(dev, dst_id);
 					if (stream && payload_len > 0) {
-						struct odl_tb5_rx_msg *msg;
-						unsigned long flags;
+						const void *payload =
+							data + ODL_TB5_STREAM_HDR_SIZE;
+						u8 flags = shdr->flags;
 
-						msg = kzalloc(sizeof(*msg), GFP_ATOMIC);
-						if (msg) {
-							msg->data = kvmalloc(payload_len, GFP_ATOMIC);
-							if (msg->data) {
-								memcpy(msg->data,
-								       data + ODL_TB5_STREAM_HDR_SIZE,
-								       payload_len);
-								msg->len = payload_len;
-								msg->src_id = shdr->src_id;
-							msg->flags = shdr->flags;
+						/* Start of new message — reset assembly */
+						if (flags & ODL_TB5_SHDR_F_MSG_START) {
+							kvfree(stream->rx_asm_buf);
+							stream->rx_asm_buf = NULL;
+							stream->rx_asm_len = 0;
+							stream->rx_asm_cap = 0;
+							stream->rx_asm_src_id = shdr->src_id;
+						}
 
-								spin_lock_irqsave(&stream->rx_lock, flags);
-								if (stream->rx_queue_len < stream->rx_queue_max) {
-									list_add_tail(&msg->list,
-										      &stream->rx_queue);
-									stream->rx_queue_len++;
-									spin_unlock_irqrestore(&stream->rx_lock,
-											       flags);
-									if (shdr->flags & ODL_TB5_SHDR_F_MSG_END) {
-										atomic_inc(&stream->rx_complete);
-										wake_up_interruptible(&stream->rx_waitq);
-									}
-								} else {
-									spin_unlock_irqrestore(&stream->rx_lock,
-											       flags);
-									kvfree(msg->data);
-									kfree(msg);
-								}
-							} else {
-								kfree(msg);
+						/* Append payload to assembly buffer */
+						if (stream->rx_asm_len + payload_len >
+						    stream->rx_asm_cap) {
+							size_t new_cap = max_t(size_t,
+								8192,
+								max(stream->rx_asm_cap * 2,
+								    stream->rx_asm_len +
+								    payload_len));
+							void *nb = kvmalloc(new_cap,
+									    GFP_KERNEL);
+							if (nb) {
+								if (stream->rx_asm_buf)
+									memcpy(nb,
+									       stream->rx_asm_buf,
+									       stream->rx_asm_len);
+								kvfree(stream->rx_asm_buf);
+								stream->rx_asm_buf = nb;
+								stream->rx_asm_cap = new_cap;
 							}
 						}
+						if (stream->rx_asm_buf &&
+						    stream->rx_asm_len + payload_len <=
+						    stream->rx_asm_cap) {
+							memcpy(stream->rx_asm_buf +
+							       stream->rx_asm_len,
+							       payload, payload_len);
+							stream->rx_asm_len += payload_len;
+						}
+
+						/* End of message — enqueue complete msg */
+						if (flags & ODL_TB5_SHDR_F_MSG_END) {
+							struct odl_tb5_rx_msg *rxm;
+							unsigned long rxflags;
+
+							rxm = kzalloc(sizeof(*rxm),
+								      GFP_KERNEL);
+							if (rxm && stream->rx_asm_buf) {
+								rxm->data = stream->rx_asm_buf;
+								rxm->len = stream->rx_asm_len;
+								rxm->src_id =
+									stream->rx_asm_src_id;
+								rxm->flags =
+									ODL_TB5_SHDR_F_MSG_END;
+
+								spin_lock_irqsave(
+									&stream->rx_lock,
+									rxflags);
+								if (stream->rx_queue_len <
+								    stream->rx_queue_max) {
+									list_add_tail(
+										&rxm->list,
+										&stream->rx_queue);
+									stream->rx_queue_len++;
+									spin_unlock_irqrestore(
+										&stream->rx_lock,
+										rxflags);
+									atomic_inc(
+										&stream->rx_complete);
+									wake_up_interruptible(
+										&stream->rx_waitq);
+								} else {
+									spin_unlock_irqrestore(
+										&stream->rx_lock,
+										rxflags);
+									kvfree(rxm->data);
+									kfree(rxm);
+								}
+
+								/* Buffer ownership transferred
+								 * to rx_msg (or freed above) */
+								stream->rx_asm_buf = NULL;
+								stream->rx_asm_len = 0;
+								stream->rx_asm_cap = 0;
+							} else {
+								kfree(rxm);
+								kvfree(stream->rx_asm_buf);
+								stream->rx_asm_buf = NULL;
+								stream->rx_asm_len = 0;
+								stream->rx_asm_cap = 0;
+							}
+						}
+
 						kref_put(&stream->refcount,
 							 odl_tb5_stream_free);
 					}
@@ -1025,6 +1073,7 @@ static void odl_tb5_stream_free(struct kref *ref)
 		kfree(rx);
 	}
 
+	kvfree(stream->rx_asm_buf);
 	kfree(stream);
 }
 
@@ -1386,77 +1435,38 @@ int odl_tb5_stream_recv(struct odl_tb5_stream *stream,
 			void __user *buf, size_t buf_len,
 			u8 *src_id, u32 *actual_len)
 {
-	struct odl_tb5_rx_msg *msg, *tmp;
+	struct odl_tb5_rx_msg *msg;
 	unsigned long flags;
-	size_t total_len = 0;
-	void *assembled = NULL;
-	LIST_HEAD(frames);
-	int ret = 0, n = 0;
+	int ret = 0;
 
-	/* Wait for a complete message (MSG_END received) */
+	/* Wait for a complete assembled message */
 	ret = wait_event_interruptible(stream->rx_waitq,
 		atomic_read(&stream->rx_complete) > 0);
 	if (ret)
 		return -EINTR;
 
-	/* Dequeue all frames up to and including MSG_END */
+	/* Dequeue one complete message */
 	spin_lock_irqsave(&stream->rx_lock, flags);
-	list_for_each_entry_safe(msg, tmp, &stream->rx_queue, list) {
+	msg = list_first_entry_or_null(&stream->rx_queue,
+				       struct odl_tb5_rx_msg, list);
+	if (msg) {
 		list_del(&msg->list);
 		stream->rx_queue_len--;
-		list_add_tail(&msg->list, &frames);
-		total_len += msg->len;
-		n++;
-		if (msg->flags & ODL_TB5_SHDR_F_MSG_END)
-			break;
 	}
 	spin_unlock_irqrestore(&stream->rx_lock, flags);
 
-	if (n == 0)
+	if (!msg)
 		return -EAGAIN;
 
 	atomic_dec(&stream->rx_complete);
 
-	/* Get src_id from first frame */
-	msg = list_first_entry(&frames, struct odl_tb5_rx_msg, list);
 	*src_id = msg->src_id;
-
-	/* Single-frame fast path: skip concatenation */
-	if (n == 1) {
-		*actual_len = min_t(size_t, msg->len, buf_len);
-		if (copy_to_user(buf, msg->data, *actual_len))
-			ret = -EFAULT;
-		kvfree(msg->data);
-		kfree(msg);
-		return ret;
-	}
-
-	/* Multi-frame: assemble into contiguous buffer */
-	assembled = kvmalloc(total_len, GFP_KERNEL);
-	if (!assembled) {
-		list_for_each_entry_safe(msg, tmp, &frames, list) {
-			kvfree(msg->data);
-			kfree(msg);
-		}
-		return -ENOMEM;
-	}
-
-	{
-		size_t off = 0;
-
-		list_for_each_entry_safe(msg, tmp, &frames, list) {
-			memcpy(assembled + off, msg->data, msg->len);
-			off += msg->len;
-			kvfree(msg->data);
-			kfree(msg);
-		}
-	}
-
-	*actual_len = min_t(size_t, total_len, buf_len);
-	if (copy_to_user(buf, assembled, *actual_len))
+	*actual_len = min_t(size_t, msg->len, buf_len);
+	if (copy_to_user(buf, msg->data, *actual_len))
 		ret = -EFAULT;
 
-	kvfree(assembled);
+	kvfree(msg->data);
+	kfree(msg);
 	return ret;
 }
 

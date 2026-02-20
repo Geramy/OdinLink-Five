@@ -117,6 +117,13 @@ struct odl_tb5_stream {
 	atomic_t		rx_complete;
 	wait_queue_head_t	rx_waitq;
 
+	/* RX message assembly — accumulates frames in callback context,
+	 * enqueues only complete messages to rx_queue. */
+	void			*rx_asm_buf;
+	size_t			rx_asm_len;
+	size_t			rx_asm_cap;
+	u8			rx_asm_src_id;
+
 	struct kref		refcount;
 	struct hlist_node	node;
 };

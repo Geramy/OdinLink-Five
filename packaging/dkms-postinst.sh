@@ -16,12 +16,17 @@ for uid_dir in /run/user/*; do
 done
 pkill -x odl_tb5_tray 2>/dev/null || true
 pkill -x odl_tb5_daemon 2>/dev/null || true
+pkill -x odl_tb5_cli 2>/dev/null || true
 sleep 1
 pkill -9 -x odl_tb5_tray 2>/dev/null || true
 pkill -9 -x odl_tb5_daemon 2>/dev/null || true
+pkill -9 -x odl_tb5_cli 2>/dev/null || true
 
-# Unload old module if present
-rmmod odl_tb5 2>/dev/null || true
+# Unload old module — retry up to 5 times waiting for refcount 0
+for i in 1 2 3 4 5; do
+    rmmod odl_tb5 2>/dev/null && break
+    sleep 1
+done
 
 # Add and build the DKMS module
 if [ -x /usr/sbin/dkms ]; then
