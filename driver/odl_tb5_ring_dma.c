@@ -70,12 +70,19 @@ void odl_tb5_tx_callback(struct tb_ring *ring,
 		msg = slot->tx_msg;
 		odl_tb5_frame_pool_put(&dev->frame_pool, slot);
 
+		pr_info("odl_tb5: TX callback: stream slot %d, "
+			"canceled=%d, msg=%px\n",
+			slot->slot_idx, canceled, msg);
+
 		if (msg) {
 			msg->frames_pending--;
 			if (msg->frames_pending == 0 &&
 			    msg->sent == msg->len) {
 				struct odl_tb5_stream *stream = msg->stream;
 				unsigned long flags;
+
+				pr_info("odl_tb5: TX complete: stream %u, "
+					"len=%zu\n", stream->id, msg->len);
 
 				spin_lock_irqsave(&stream->tx_lock, flags);
 				list_del(&msg->list);
@@ -1117,7 +1124,7 @@ int odl_tb5_stream_send(struct odl_tb5_stream *stream,
 	struct odl_tb5_device *dev = stream->dev;
 	struct odl_tb5_tx_msg *msg;
 	unsigned long flags;
-	int ret;
+	long ret;
 
 	if (dev->state != ODL_TB5_STATE_READY)
 		return -ENOTCONN;
@@ -1160,11 +1167,48 @@ int odl_tb5_stream_send(struct odl_tb5_stream *stream,
 
 	schedule_work(&dev->tx_drain_work);
 
-	/* Block until this message is fully transmitted */
-	ret = wait_event_interruptible(stream->tx_waitq,
-		msg->frames_pending == 0 && msg->sent == msg->len);
-	if (ret)
+	/* Block until this message is fully transmitted (5s timeout) */
+	ret = wait_event_interruptible_timeout(stream->tx_waitq,
+		msg->frames_pending == 0 && msg->sent == msg->len,
+		msecs_to_jiffies(5000));
+
+	if (ret == 0) {
+		/* Timeout — remove message from queue if still there */
+		pr_warn("odl_tb5: stream %u TX timeout (sent=%zu/%zu, "
+			"pending=%d)\n",
+			stream->id, msg->sent, msg->len,
+			msg->frames_pending);
+		spin_lock_irqsave(&stream->tx_lock, flags);
+		if (!list_empty(&msg->list)) {
+			list_del(&msg->list);
+			stream->tx_queue_len--;
+		}
+		spin_unlock_irqrestore(&stream->tx_lock, flags);
+		if (msg->frames_pending == 0) {
+			kvfree(msg->data);
+			kfree(msg);
+		}
+		/* else: in-flight frames still reference msg — leaked
+		 * intentionally to avoid use-after-free in TX callback.
+		 * This is a rare error path.
+		 */
+		return -ETIMEDOUT;
+	}
+
+	if (ret < 0) {
+		/* Interrupted by signal — same cleanup */
+		spin_lock_irqsave(&stream->tx_lock, flags);
+		if (msg->frames_pending == 0 && !list_empty(&msg->list)) {
+			list_del(&msg->list);
+			stream->tx_queue_len--;
+			spin_unlock_irqrestore(&stream->tx_lock, flags);
+			kvfree(msg->data);
+			kfree(msg);
+		} else {
+			spin_unlock_irqrestore(&stream->tx_lock, flags);
+		}
 		return -EINTR;
+	}
 
 	return 0;
 }
@@ -1236,12 +1280,20 @@ void odl_tb5_tx_drain_work_fn(struct work_struct *work)
 			}
 
 			if (tb_ring_tx(dev->tx.ring, &slot->frame) < 0) {
+				pr_warn("odl_tb5: tb_ring_tx failed for "
+					"stream %u (sent=%zu/%zu)\n",
+					stream->id, msg->sent, msg->len);
 				msg->sent -= le16_to_cpu(hdr->payload_len);
 				msg->frames_pending--;
 				odl_tb5_frame_pool_put(&dev->frame_pool, slot);
+				/* Wake waiter so timeout can fire */
+				wake_up_interruptible(&stream->tx_waitq);
 				goto out;
 			}
 
+			pr_info("odl_tb5: drain: stream %u frame "
+				"submitted (sent=%zu/%zu)\n",
+				stream->id, msg->sent, msg->len);
 			did_work = true;
 		}
 out:

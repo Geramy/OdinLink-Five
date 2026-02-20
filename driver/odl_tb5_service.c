@@ -278,7 +278,7 @@ static void __exit odl_tb5_exit(void)
 module_init(odl_tb5_init);
 module_exit(odl_tb5_exit);
 
-MODULE_LICENSE("MIT");
+MODULE_LICENSE("GPL");
 MODULE_AUTHOR("OdinLink Team");
 MODULE_DESCRIPTION("OdinLink Thunderbolt 5 DMA Ring Driver");
 MODULE_IMPORT_NS("DMA_BUF");
