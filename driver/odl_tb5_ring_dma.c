@@ -107,9 +107,12 @@ void odl_tb5_tx_callback(struct tb_ring *ring,
 		if (msg) {
 			if (atomic_dec_and_test(&msg->frames_pending) &&
 			    msg->sent == msg->len) {
-				WRITE_ONCE(msg->done, true);
-				atomic_inc(&msg->stream->tx_completed);
-				wake_up_interruptible(&msg->stream->tx_waitq);
+				struct odl_tb5_stream *s = msg->stream;
+
+				atomic_inc(&s->tx_completed);
+				atomic_dec(&s->tx_in_flight);
+				wake_up_interruptible(&s->tx_waitq);
+				kfree(msg);
 			}
 		}
 
@@ -1115,6 +1118,7 @@ struct odl_tb5_stream *odl_tb5_stream_create(struct odl_tb5_device *dev,
 	stream->tx_queue_len = 0;
 	stream->tx_queue_max = 64;
 	atomic_set(&stream->tx_completed, 0);
+	atomic_set(&stream->tx_in_flight, 0);
 	init_waitqueue_head(&stream->tx_waitq);
 
 	INIT_LIST_HEAD(&stream->rx_queue);
@@ -1232,8 +1236,11 @@ int odl_tb5_stream_send(struct odl_tb5_stream *stream,
 	msg->len = len;
 	msg->sent = 0;
 	atomic_set(&msg->frames_pending, 0);
+	msg->done = false;
 	msg->stream = stream;
 	INIT_LIST_HEAD(&msg->list);
+
+	atomic_inc(&stream->tx_in_flight);
 
 	while (msg->sent < len) {
 		size_t remain = len - msg->sent;
@@ -1295,31 +1302,25 @@ int odl_tb5_stream_send(struct odl_tb5_stream *stream,
 		}
 	}
 
-	/* All frames submitted — wait for TX callbacks to complete them. */
-	ret = wait_event_interruptible_timeout(stream->tx_waitq,
-		READ_ONCE(msg->done),
-		msecs_to_jiffies(5000));
-
-	if (ret > 0) {
-		kfree(msg);
-		return 0;
-	}
-	if (ret == 0)
-		ret = -ETIMEDOUT;
-	/* fall through to wait_pending */
+	/* All frames submitted — return immediately.  TX callback will
+	 * kfree(msg) when the last frame completes.  Pool back-pressure
+	 * (waiting for free slots above) provides natural flow control. */
+	return 0;
 
 wait_pending:
-	/* Error or timeout — wait briefly for in-flight frames, then
-	 * abandon.  The TX callback will still free pool slots. */
+	/* Error during submission — some frames may be in flight.
+	 * Wait briefly for them, then let TX callback handle cleanup. */
 	if (atomic_read(&msg->frames_pending) > 0) {
 		wait_event_interruptible_timeout(stream->tx_waitq,
 			atomic_read(&msg->frames_pending) == 0,
 			msecs_to_jiffies(1000));
 	}
-	if (atomic_read(&msg->frames_pending) == 0)
+	if (atomic_read(&msg->frames_pending) == 0) {
+		atomic_dec(&stream->tx_in_flight);
+		wake_up_interruptible(&stream->tx_waitq);
 		kfree(msg);
-	/* else: leaked — TX callback will eventually see frames_pending==0
-	 * but msg is orphaned.  This only happens on hard errors. */
+	}
+	/* else: leaked — TX callback will free pool slots and kfree msg. */
 	return (int)ret;
 }
 
@@ -1414,10 +1415,10 @@ int odl_tb5_stream_wait_tx(struct odl_tb5_stream *stream, u32 timeout_ms)
 
 	if (timeout_ms == 0) {
 		ret = wait_event_interruptible(stream->tx_waitq,
-			stream->tx_queue_len == 0);
+			atomic_read(&stream->tx_in_flight) == 0);
 	} else {
 		ret = wait_event_interruptible_timeout(stream->tx_waitq,
-			stream->tx_queue_len == 0,
+			atomic_read(&stream->tx_in_flight) == 0,
 			msecs_to_jiffies(timeout_ms));
 		if (ret == 0)
 			return -ETIMEDOUT;

@@ -26,6 +26,7 @@ extern GDBusProxy    *g_daemon_proxy;
 extern GtkWidget     *g_peers_window;
 extern GtkWidget     *g_test_window;
 extern GtkWidget     *g_rccl_window;
+extern GtkWidget     *g_overview_window;
 
 /* D-Bus client (odl_tb5_tray_dbus.c) */
 int  odl_tray_dbus_init(void);
@@ -47,6 +48,9 @@ void odl_tray_sync_choose_folder(void);
 
 /* RCCL stats window (odl_tb5_tray_rccl.c) */
 void odl_tray_rccl_show(void);
+
+/* Test overview dashboard (odl_tb5_tray_test_overview.c) */
+void odl_tray_overview_show(void);
 
 /* File browser window (odl_tb5_tray_files.c) */
 extern GtkWidget *g_files_window;

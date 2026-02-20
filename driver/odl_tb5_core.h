@@ -52,9 +52,9 @@ struct odl_tb5_stream_hdr {
 
 /* ── DMA frame pool (replaces old double-buffer scheme) ─────────────── */
 
-#define ODL_TB5_FRAME_POOL_SIZE		256
-#define ODL_TB5_TX_POOL_RESERVE		32  /* keep free for RX repost */
-#define ODL_TB5_POLL_INTERVAL_NS	(50 * 1000)  /* 50 us */
+#define ODL_TB5_FRAME_POOL_SIZE		1024
+#define ODL_TB5_TX_POOL_RESERVE		64  /* keep free for RX repost */
+#define ODL_TB5_POLL_INTERVAL_NS	(10 * 1000)  /* 10 us */
 
 struct odl_tb5_frame_slot {
 	void			*virt;
@@ -108,6 +108,7 @@ struct odl_tb5_stream {
 	int			tx_queue_len;
 	int			tx_queue_max;
 	atomic_t		tx_completed;
+	atomic_t		tx_in_flight;
 	wait_queue_head_t	tx_waitq;
 
 	struct list_head	rx_queue;

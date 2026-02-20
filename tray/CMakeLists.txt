@@ -26,6 +26,7 @@ add_executable(odl_tb5_tray
     src/odl_tb5_tray_tests.c
     src/odl_tb5_tray_test_parse.c
     src/odl_tb5_tray_test_charts.c
+    src/odl_tb5_tray_test_overview.c
     src/odl_tb5_tray_sync.c
     src/odl_tb5_tray_rccl.c
     src/odl_tb5_tray_files.c

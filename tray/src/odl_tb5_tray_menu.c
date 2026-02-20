@@ -27,6 +27,7 @@ static void on_toggle_sync(GtkMenuItem *item, gpointer user_data);
 static void on_open_folder(GtkMenuItem *item, gpointer user_data);
 static void on_test_item(GtkMenuItem *item, gpointer user_data);
 static void on_test_all(GtkMenuItem *item, gpointer user_data);
+static void on_test_overview(GtkMenuItem *item, gpointer user_data);
 static void on_peer_details(GtkMenuItem *item, gpointer user_data);
 
 static const char *test_types[] = {
@@ -144,6 +145,12 @@ void odl_tray_menu_init(void)
 
 	gtk_menu_shell_append(GTK_MENU_SHELL(s_menu),
 	                      gtk_separator_menu_item_new());
+
+	GtkWidget *overview_item =
+		gtk_menu_item_new_with_label("Test Overview");
+	g_signal_connect(overview_item, "activate",
+	                 G_CALLBACK(on_test_overview), NULL);
+	gtk_menu_shell_append(GTK_MENU_SHELL(s_menu), overview_item);
 
 	GtkWidget *tests_item = gtk_menu_item_new_with_label("Run Tests");
 	gtk_menu_item_set_submenu(GTK_MENU_ITEM(tests_item),
@@ -491,6 +498,13 @@ static void on_test_all(GtkMenuItem *item, gpointer user_data)
 		return;
 	}
 	odl_tray_tests_show(dev_idx, "all");
+}
+
+static void on_test_overview(GtkMenuItem *item, gpointer user_data)
+{
+	(void)item;
+	(void)user_data;
+	odl_tray_overview_show();
 }
 
 static void on_peer_details(GtkMenuItem *item, gpointer user_data)
