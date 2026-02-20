@@ -53,6 +53,7 @@ struct odl_tb5_stream_hdr {
 /* ── DMA frame pool (replaces old double-buffer scheme) ─────────────── */
 
 #define ODL_TB5_FRAME_POOL_SIZE		256
+#define ODL_TB5_TX_POOL_RESERVE		32  /* keep free for RX repost */
 #define ODL_TB5_POLL_INTERVAL_NS	(50 * 1000)  /* 50 us */
 
 struct odl_tb5_frame_slot {

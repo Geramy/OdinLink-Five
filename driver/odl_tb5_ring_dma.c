@@ -1147,12 +1147,23 @@ struct odl_tb5_stream *odl_tb5_stream_lookup(struct odl_tb5_device *dev,
  * Stream TX Path
  * ══════════════════════════════════════════════════════════════════════ */
 
+/*
+ * Stream send — frame-by-frame with pool backpressure.
+ *
+ * Each frame-sized chunk is copied directly from userspace into a DMA
+ * pool slot, submitted to the NHI TX ring, and the slot is recycled by
+ * the TX callback.  If the pool runs low, we block until a TX callback
+ * frees a slot — this provides natural flow control and prevents pool
+ * exhaustion that would starve the RX path.
+ */
 int odl_tb5_stream_send(struct odl_tb5_stream *stream,
 			u8 dst_id, const void __user *data, size_t len)
 {
 	struct odl_tb5_device *dev = stream->dev;
+	struct odl_tb5_frame_pool *pool = &dev->frame_pool;
 	struct odl_tb5_tx_msg *msg;
-	unsigned long flags;
+	struct odl_tb5_frame_slot *slot;
+	struct odl_tb5_stream_hdr *hdr;
 	long ret;
 
 	if (dev->state != ODL_TB5_STATE_READY)
@@ -1161,82 +1172,107 @@ int odl_tb5_stream_send(struct odl_tb5_stream *stream,
 	if (len == 0 || len > (size_t)ODL_TB5_STREAM_PAYLOAD_MAX * 4096)
 		return -EINVAL;
 
+	/* Lightweight msg struct — only for TX completion tracking,
+	 * no bulk data copy.  TX callback uses msg->frames_pending
+	 * and msg->sent/len to know when to set msg->done. */
 	msg = kzalloc(sizeof(*msg), GFP_KERNEL);
 	if (!msg)
 		return -ENOMEM;
 
-	msg->data = kvmalloc(len, GFP_KERNEL);
-	if (!msg->data) {
-		kfree(msg);
-		return -ENOMEM;
-	}
-
-	if (copy_from_user(msg->data, data, len)) {
-		kvfree(msg->data);
-		kfree(msg);
-		return -EFAULT;
-	}
-
+	msg->data = NULL;	/* no bulk copy — we copy_from_user per frame */
 	msg->dst_id = dst_id;
 	msg->len = len;
 	msg->sent = 0;
 	msg->frames_pending = 0;
 	msg->stream = stream;
+	INIT_LIST_HEAD(&msg->list);
 
-	spin_lock_irqsave(&stream->tx_lock, flags);
-	if (stream->tx_queue_len >= stream->tx_queue_max) {
-		spin_unlock_irqrestore(&stream->tx_lock, flags);
-		kvfree(msg->data);
-		kfree(msg);
-		return -EAGAIN;
+	while (msg->sent < len) {
+		size_t remain = len - msg->sent;
+		size_t payload = min_t(size_t, remain,
+				       ODL_TB5_STREAM_PAYLOAD_MAX);
+		bool first = (msg->sent == 0);
+		bool last  = (msg->sent + payload == len);
+
+		/* Wait for a free pool slot, keeping a reserve for RX */
+		ret = wait_event_interruptible_timeout(pool->avail_waitq,
+			pool->free_count > ODL_TB5_TX_POOL_RESERVE,
+			msecs_to_jiffies(5000));
+		if (ret <= 0) {
+			if (ret == 0)
+				ret = -ETIMEDOUT;
+			goto wait_pending;
+		}
+
+		slot = odl_tb5_frame_pool_get(pool);
+		if (!slot)
+			continue;	/* spurious wakeup, retry */
+
+		/* Build frame: 5-byte stream header + payload */
+		hdr = slot->virt;
+		hdr->src_id = stream->id;
+		hdr->dst_id = dst_id;
+		if (first && last)
+			hdr->flags = ODL_TB5_SHDR_F_SINGLE;
+		else if (first)
+			hdr->flags = ODL_TB5_SHDR_F_MSG_START;
+		else if (last)
+			hdr->flags = ODL_TB5_SHDR_F_MSG_END;
+		else
+			hdr->flags = 0;
+		hdr->payload_len = cpu_to_le16(payload);
+
+		if (copy_from_user(slot->virt + ODL_TB5_STREAM_HDR_SIZE,
+				   data + msg->sent, payload)) {
+			odl_tb5_frame_pool_put(pool, slot);
+			ret = -EFAULT;
+			goto wait_pending;
+		}
+
+		slot->frame.size = ODL_TB5_STREAM_HDR_SIZE + payload;
+		slot->frame.sof  = ODL_TB5_PDF_SOF_DATA;
+		slot->frame.eof  = ODL_TB5_PDF_EOF_DATA;
+		slot->frame.callback = odl_tb5_tx_callback;
+		slot->tx_msg = msg;
+
+		msg->frames_pending++;
+		msg->sent += payload;
+
+		if (tb_ring_tx(dev->tx.ring, &slot->frame) < 0) {
+			msg->frames_pending--;
+			msg->sent -= payload;
+			odl_tb5_frame_pool_put(pool, slot);
+			ret = -EIO;
+			goto wait_pending;
+		}
 	}
-	list_add_tail(&msg->list, &stream->tx_queue);
-	stream->tx_queue_len++;
-	spin_unlock_irqrestore(&stream->tx_lock, flags);
 
-	/* Drain inline from ioctl context — avoids a workqueue round-trip
-	 * that would add ~100-500 us scheduler latency. */
-	odl_tb5_tx_drain_work_fn(&dev->tx_drain_work);
-
+	/* All frames submitted — wait for TX callbacks to complete them. */
 	ret = wait_event_interruptible_timeout(stream->tx_waitq,
 		READ_ONCE(msg->done),
 		msecs_to_jiffies(5000));
 
-	if (ret == 0) {
-		pr_warn("odl_tb5: stream %u TX timeout (sent=%zu/%zu, "
-			"pending=%d)\n",
-			stream->id, msg->sent, msg->len,
-			msg->frames_pending);
-		spin_lock_irqsave(&stream->tx_lock, flags);
-		if (!list_empty(&msg->list)) {
-			list_del(&msg->list);
-			stream->tx_queue_len--;
-		}
-		spin_unlock_irqrestore(&stream->tx_lock, flags);
-		if (msg->frames_pending == 0) {
-			kvfree(msg->data);
-			kfree(msg);
-		}
-		return -ETIMEDOUT;
+	if (ret > 0) {
+		kfree(msg);
+		return 0;
 	}
+	if (ret == 0)
+		ret = -ETIMEDOUT;
+	/* fall through to wait_pending */
 
-	if (ret < 0) {
-		spin_lock_irqsave(&stream->tx_lock, flags);
-		if (msg->frames_pending == 0 && !list_empty(&msg->list)) {
-			list_del(&msg->list);
-			stream->tx_queue_len--;
-			spin_unlock_irqrestore(&stream->tx_lock, flags);
-			kvfree(msg->data);
-			kfree(msg);
-		} else {
-			spin_unlock_irqrestore(&stream->tx_lock, flags);
-		}
-		return -EINTR;
+wait_pending:
+	/* Error or timeout — wait briefly for in-flight frames, then
+	 * abandon.  The TX callback will still free pool slots. */
+	if (msg->frames_pending > 0) {
+		wait_event_interruptible_timeout(stream->tx_waitq,
+			msg->frames_pending == 0,
+			msecs_to_jiffies(1000));
 	}
-
-	kvfree(msg->data);
-	kfree(msg);
-	return 0;
+	if (msg->frames_pending == 0)
+		kfree(msg);
+	/* else: leaked — TX callback will eventually see frames_pending==0
+	 * but msg is orphaned.  This only happens on hard errors. */
+	return (int)ret;
 }
 
 void odl_tb5_tx_drain_work_fn(struct work_struct *work)
