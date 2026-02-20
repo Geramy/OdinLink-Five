@@ -339,7 +339,9 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 				"verify will use legacy path\n", pool_ret);
 	}
 
-	schedule_delayed_work(&dev->rx_poll_work, msecs_to_jiffies(1));
+	hrtimer_start(&dev->rx_poll_timer,
+		      ns_to_ktime(ODL_TB5_POLL_INTERVAL_NS),
+		      HRTIMER_MODE_REL);
 	schedule_work(&dev->verify_work);
 
 	return 0;
@@ -512,7 +514,7 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 	pr_info("OdinLink: DMA path verified, resetting rings for userspace\n");
 
 	flush_work(&dev->ctrl_reply_work);
-	cancel_delayed_work_sync(&dev->rx_poll_work);
+	hrtimer_cancel(&dev->rx_poll_timer);
 	odl_tb5_rings_reset(dev);
 
 	mutex_lock(&dev->state_lock);
@@ -527,16 +529,18 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 	dev->rx_target = 0;
 	atomic_set(&dev->rx_posted, 0);
 
-	/* Restart the fallback poll timer for stream data — NHI
-	 * interrupts are unreliable on Barlow Ridge, so we need this
-	 * running continuously to kick both TX and RX ring_work. */
-	schedule_delayed_work(&dev->rx_poll_work, msecs_to_jiffies(1));
+	/* Restart the hrtimer poll for stream data — NHI MSI-X
+	 * interrupts fire but descriptor write-back can lag, so we poll
+	 * at 50 us to keep latency low. */
+	hrtimer_start(&dev->rx_poll_timer,
+		      ns_to_ktime(ODL_TB5_POLL_INTERVAL_NS),
+		      HRTIMER_MODE_REL);
 
 	pr_info("OdinLink: entering READY state\n");
 	return;
 
 out_reset:
-	cancel_delayed_work_sync(&dev->rx_poll_work);
+	hrtimer_cancel(&dev->rx_poll_timer);
 	odl_tb5_rings_reset(dev);
 }
 
@@ -546,7 +550,7 @@ static void odl_tb5_restart_work_fn(struct work_struct *work)
 	struct odl_tb5_device *dev =
 		container_of(work, struct odl_tb5_device, restart_work);
 
-	cancel_delayed_work_sync(&dev->rx_poll_work);
+	hrtimer_cancel(&dev->rx_poll_timer);
 	cancel_work_sync(&dev->verify_work);
 	cancel_work_sync(&dev->ctrl_reply_work);
 	cancel_work_sync(&dev->connect_work);
@@ -634,7 +638,8 @@ int odl_tb5_proto_init(struct odl_tb5_device *dev)
 	INIT_WORK(&dev->restart_work, odl_tb5_restart_work_fn);
 	INIT_WORK(&dev->verify_work, odl_tb5_verify_work_fn);
 	INIT_WORK(&dev->ctrl_reply_work, odl_tb5_ctrl_reply_work_fn);
-	INIT_DELAYED_WORK(&dev->rx_poll_work, odl_tb5_rx_poll_work_fn);
+	hrtimer_setup(&dev->rx_poll_timer, odl_tb5_rx_poll_timer_fn,
+		      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	init_waitqueue_head(&dev->verify_waitq);
 
 	dev->login_retries  = 0;
@@ -654,7 +659,7 @@ int odl_tb5_proto_init(struct odl_tb5_device *dev)
 /* Tear down the protocol layer for a device. */
 void odl_tb5_proto_exit(struct odl_tb5_device *dev)
 {
-	cancel_delayed_work_sync(&dev->rx_poll_work);
+	hrtimer_cancel(&dev->rx_poll_timer);
 	cancel_work_sync(&dev->verify_work);
 	cancel_work_sync(&dev->ctrl_reply_work);
 	cancel_work_sync(&dev->restart_work);

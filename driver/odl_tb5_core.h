@@ -18,6 +18,7 @@
 #include <linux/wait.h>
 #include <linux/atomic.h>
 #include <linux/mutex.h>
+#include <linux/hrtimer.h>
 #include <linux/spinlock.h>
 #include <linux/workqueue.h>
 #include <linux/list.h>
@@ -51,7 +52,8 @@ struct odl_tb5_stream_hdr {
 
 /* ── DMA frame pool (replaces old double-buffer scheme) ─────────────── */
 
-#define ODL_TB5_FRAME_POOL_SIZE  256
+#define ODL_TB5_FRAME_POOL_SIZE		256
+#define ODL_TB5_POLL_INTERVAL_NS	(50 * 1000)  /* 50 us */
 
 struct odl_tb5_frame_slot {
 	void			*virt;
@@ -179,7 +181,7 @@ struct odl_tb5_device {
 	/* DMA verification (ping/pong) */
 	struct work_struct	verify_work;
 	struct work_struct	ctrl_reply_work;
-	struct delayed_work	rx_poll_work;
+	struct hrtimer		rx_poll_timer;
 	wait_queue_head_t	verify_waitq;
 	bool			pong_received;
 	int			verify_rx_type;
@@ -281,7 +283,7 @@ void odl_tb5_tx_drain_work_fn(struct work_struct *work);
 
 /* ── RX poll worker (start_poll callback mechanism) ──────────────────── */
 
-void odl_tb5_rx_poll_work_fn(struct work_struct *work);
+enum hrtimer_restart odl_tb5_rx_poll_timer_fn(struct hrtimer *timer);
 
 /* ── Ring callbacks ──────────────────────────────────────────────────── */
 

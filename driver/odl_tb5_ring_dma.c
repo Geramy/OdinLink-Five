@@ -20,20 +20,22 @@
 static void odl_tb5_stream_free(struct kref *ref);
 
 /*
- * Fallback polling timer — kicks both TX and RX ring_work every 1 ms.
+ * High-resolution fallback poll timer — kicks both TX and RX ring_work
+ * every 50 us.
  *
- * The NHI hardware on Intel Barlow Ridge (TB5) does not reliably fire
- * MSI-X completion interrupts for either TX or RX.  Without this
- * fallback, TX callbacks never fire (blocking ctrl_reply_work for 5 s)
- * and RX frames are never delivered to our callback.
+ * NHI MSI-X interrupts DO fire, but ring_work triggered by the ISR
+ * sometimes doesn't see completions yet (descriptor write-back delay).
+ * This timer ensures completions are processed within ~50 us instead of
+ * waiting for the next jiffy tick.
  *
- * When interrupts DO fire, the ISR also calls schedule_work(&ring->work),
- * so the two paths are safely additive (schedule_work is idempotent).
+ * schedule_work is idempotent, so ISR-driven and timer-driven kicks
+ * are safely additive.
  */
-void odl_tb5_rx_poll_work_fn(struct work_struct *work)
+
+enum hrtimer_restart odl_tb5_rx_poll_timer_fn(struct hrtimer *timer)
 {
 	struct odl_tb5_device *dev =
-		container_of(work, struct odl_tb5_device, rx_poll_work.work);
+		container_of(timer, struct odl_tb5_device, rx_poll_timer);
 
 	if (dev->tx.ring && dev->tx.started)
 		schedule_work(&dev->tx.ring->work);
@@ -42,8 +44,13 @@ void odl_tb5_rx_poll_work_fn(struct work_struct *work)
 		schedule_work(&dev->rx.ring->work);
 
 	if (dev->state >= ODL_TB5_STATE_CONNECTED &&
-	    (dev->tx.started || dev->rx.started))
-		schedule_delayed_work(&dev->rx_poll_work, msecs_to_jiffies(1));
+	    (dev->tx.started || dev->rx.started)) {
+		hrtimer_forward_now(timer,
+				    ns_to_ktime(ODL_TB5_POLL_INTERVAL_NS));
+		return HRTIMER_RESTART;
+	}
+
+	return HRTIMER_NORESTART;
 }
 
 /* Find which odl_tb5_device owns a given tb_ring and return its ring_ctx. */
@@ -97,19 +104,12 @@ void odl_tb5_tx_callback(struct tb_ring *ring,
 		msg = slot->tx_msg;
 		odl_tb5_frame_pool_put(&dev->frame_pool, slot);
 
-		pr_info("odl_tb5: TX callback: stream slot %d, "
-			"canceled=%d, msg=%px\n",
-			slot->slot_idx, canceled, msg);
-
 		if (msg) {
 			msg->frames_pending--;
 			if (msg->frames_pending == 0 &&
 			    msg->sent == msg->len) {
 				struct odl_tb5_stream *stream = msg->stream;
 				unsigned long flags;
-
-				pr_info("odl_tb5: TX complete: stream %u, "
-					"len=%zu\n", stream->id, msg->len);
 
 				spin_lock_irqsave(&stream->tx_lock, flags);
 				list_del_init(&msg->list);
@@ -1194,7 +1194,9 @@ int odl_tb5_stream_send(struct odl_tb5_stream *stream,
 	stream->tx_queue_len++;
 	spin_unlock_irqrestore(&stream->tx_lock, flags);
 
-	schedule_work(&dev->tx_drain_work);
+	/* Drain inline from ioctl context — avoids a workqueue round-trip
+	 * that would add ~100-500 us scheduler latency. */
+	odl_tb5_tx_drain_work_fn(&dev->tx_drain_work);
 
 	ret = wait_event_interruptible_timeout(stream->tx_waitq,
 		READ_ONCE(msg->done),
@@ -1315,9 +1317,6 @@ void odl_tb5_tx_drain_work_fn(struct work_struct *work)
 				goto out;
 			}
 
-			pr_info("odl_tb5: drain: stream %u frame "
-				"submitted (sent=%zu/%zu)\n",
-				stream->id, msg->sent, msg->len);
 			did_work = true;
 		}
 out:
