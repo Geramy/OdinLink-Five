@@ -19,6 +19,29 @@
 /* Forward declarations for functions defined later in this file */
 static void odl_tb5_stream_free(struct kref *ref);
 
+static void odl_tb5_rx_start_poll(void *data)
+{
+	struct odl_tb5_device *dev = data;
+
+	schedule_work(&dev->rx_poll_work);
+}
+
+void odl_tb5_rx_poll_work_fn(struct work_struct *work)
+{
+	struct odl_tb5_device *dev =
+		container_of(work, struct odl_tb5_device, rx_poll_work);
+	struct ring_frame *frame;
+
+	if (!dev->rx.ring || !dev->rx.started)
+		return;
+
+	while ((frame = tb_ring_poll(dev->rx.ring)) != NULL)
+		odl_tb5_rx_callback(dev->rx.ring, frame, false);
+
+	if (dev->rx.started)
+		tb_ring_poll_complete(dev->rx.ring);
+}
+
 /* Find which odl_tb5_device owns a given tb_ring and return its ring_ctx. */
 static struct odl_tb5_ring_ctx *
 odl_tb5_ring_to_ctx(struct tb_ring *ring)
@@ -312,7 +335,7 @@ int odl_tb5_rings_alloc(struct odl_tb5_device *dev)
 					RING_FLAG_FRAME,
 					0,
 					sof_mask, eof_mask,
-					NULL, NULL);
+					odl_tb5_rx_start_poll, dev);
 	if (!dev->rx.ring) {
 		pr_err("odl_tb5: failed to allocate RX ring\n");
 		ret = -ENOMEM;

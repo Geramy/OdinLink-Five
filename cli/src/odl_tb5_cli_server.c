@@ -45,13 +45,17 @@ int odl_cli_run_server(const struct odl_cli_params *params)
 	}
 
 	printf("Waiting for client handshake...\n");
-	ret = odl_cli_recv_msg(handle, sid, msg_buf, sizeof(msg_buf),
-			       &type, &seq, &src_id);
-	if (ret < 0) {
-		fprintf(stderr, "Handshake failed: %s\n", strerror(-ret));
-		goto out_stream;
-	}
-	if (type != ODL_CLI_MSG_HELLO && type != ODL_CLI_MSG_HELLO_ACK) {
+	for (;;) {
+		ret = odl_cli_recv_msg(handle, sid, msg_buf, sizeof(msg_buf),
+				       &type, &seq, &src_id);
+		if (ret == -ETIMEDOUT)
+			continue;
+		if (ret < 0) {
+			fprintf(stderr, "Handshake failed: %s\n", strerror(-ret));
+			goto out_stream;
+		}
+		if (type == ODL_CLI_MSG_HELLO || type == ODL_CLI_MSG_HELLO_ACK)
+			break;
 		fprintf(stderr, "Expected HELLO, got type 0x%x\n", type);
 		ret = -EPROTO;
 		goto out_stream;

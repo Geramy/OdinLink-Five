@@ -179,7 +179,7 @@ struct odl_tb5_device {
 	/* DMA verification (ping/pong) */
 	struct work_struct	verify_work;
 	struct work_struct	ctrl_reply_work;
-	struct delayed_work	rx_poll_work;
+	struct work_struct	rx_poll_work;
 	wait_queue_head_t	verify_waitq;
 	bool			pong_received;
 	int			verify_rx_type;
@@ -278,6 +278,10 @@ int  odl_tb5_stream_wait_rx(struct odl_tb5_stream *stream, u32 timeout_ms);
 /* ── TX drain worker ─────────────────────────────────────────────────── */
 
 void odl_tb5_tx_drain_work_fn(struct work_struct *work);
+
+/* ── RX poll worker (start_poll callback mechanism) ──────────────────── */
+
+void odl_tb5_rx_poll_work_fn(struct work_struct *work);
 
 /* ── Ring callbacks ──────────────────────────────────────────────────── */
 
