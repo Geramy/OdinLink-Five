@@ -80,6 +80,7 @@ struct odl_tb5_tx_msg {
 	size_t			len;
 	size_t			sent;
 	int			frames_pending;
+	bool			done;
 	struct odl_tb5_stream	*stream;
 };
 

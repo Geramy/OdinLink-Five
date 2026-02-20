@@ -85,12 +85,11 @@ void odl_tb5_tx_callback(struct tb_ring *ring,
 					"len=%zu\n", stream->id, msg->len);
 
 				spin_lock_irqsave(&stream->tx_lock, flags);
-				list_del(&msg->list);
+				list_del_init(&msg->list);
 				stream->tx_queue_len--;
 				spin_unlock_irqrestore(&stream->tx_lock, flags);
 
-				kvfree(msg->data);
-				kfree(msg);
+				WRITE_ONCE(msg->done, true);
 				atomic_inc(&stream->tx_completed);
 				wake_up_interruptible(&stream->tx_waitq);
 			}
@@ -1167,13 +1166,11 @@ int odl_tb5_stream_send(struct odl_tb5_stream *stream,
 
 	schedule_work(&dev->tx_drain_work);
 
-	/* Block until this message is fully transmitted (5s timeout) */
 	ret = wait_event_interruptible_timeout(stream->tx_waitq,
-		msg->frames_pending == 0 && msg->sent == msg->len,
+		READ_ONCE(msg->done),
 		msecs_to_jiffies(5000));
 
 	if (ret == 0) {
-		/* Timeout — remove message from queue if still there */
 		pr_warn("odl_tb5: stream %u TX timeout (sent=%zu/%zu, "
 			"pending=%d)\n",
 			stream->id, msg->sent, msg->len,
@@ -1188,15 +1185,10 @@ int odl_tb5_stream_send(struct odl_tb5_stream *stream,
 			kvfree(msg->data);
 			kfree(msg);
 		}
-		/* else: in-flight frames still reference msg — leaked
-		 * intentionally to avoid use-after-free in TX callback.
-		 * This is a rare error path.
-		 */
 		return -ETIMEDOUT;
 	}
 
 	if (ret < 0) {
-		/* Interrupted by signal — same cleanup */
 		spin_lock_irqsave(&stream->tx_lock, flags);
 		if (msg->frames_pending == 0 && !list_empty(&msg->list)) {
 			list_del(&msg->list);
@@ -1210,6 +1202,8 @@ int odl_tb5_stream_send(struct odl_tb5_stream *stream,
 		return -EINTR;
 	}
 
+	kvfree(msg->data);
+	kfree(msg);
 	return 0;
 }
 
