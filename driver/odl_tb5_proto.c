@@ -327,6 +327,18 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 		dev->tx.ring->hop, dev->rx.ring->hop,
 		dev->tx.ring_size);
 
+	/* Allocate frame pool early so verify uses the non-blocking
+	 * pool path for PING/PONG instead of the legacy submit_tx
+	 * which blocks waiting for TX completion (unreliable on
+	 * Barlow Ridge). */
+	if (!dev->frame_pool.slots) {
+		int pool_ret = odl_tb5_frame_pool_alloc(dev);
+
+		if (pool_ret)
+			pr_warn("OdinLink: frame pool alloc failed (%d), "
+				"verify will use legacy path\n", pool_ret);
+	}
+
 	schedule_delayed_work(&dev->rx_poll_work, msecs_to_jiffies(1));
 	schedule_work(&dev->verify_work);
 
@@ -495,15 +507,6 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 	flush_work(&dev->ctrl_reply_work);
 	cancel_delayed_work_sync(&dev->rx_poll_work);
 	odl_tb5_rings_reset(dev);
-
-	/* Allocate frame pool for stream multiplexing */
-	if (!dev->frame_pool.slots) {
-		int pool_ret = odl_tb5_frame_pool_alloc(dev);
-
-		if (pool_ret)
-			pr_warn("OdinLink: frame pool alloc failed (%d), "
-				"streams unavailable\n", pool_ret);
-	}
 
 	mutex_lock(&dev->state_lock);
 	dev->state = ODL_TB5_STATE_READY;
