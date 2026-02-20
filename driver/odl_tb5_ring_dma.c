@@ -105,8 +105,7 @@ void odl_tb5_tx_callback(struct tb_ring *ring,
 		odl_tb5_frame_pool_put(&dev->frame_pool, slot);
 
 		if (msg) {
-			msg->frames_pending--;
-			if (msg->frames_pending == 0 &&
+			if (atomic_dec_and_test(&msg->frames_pending) &&
 			    msg->sent == msg->len) {
 				WRITE_ONCE(msg->done, true);
 				atomic_inc(&msg->stream->tx_completed);
@@ -1232,7 +1231,7 @@ int odl_tb5_stream_send(struct odl_tb5_stream *stream,
 	msg->dst_id = dst_id;
 	msg->len = len;
 	msg->sent = 0;
-	msg->frames_pending = 0;
+	atomic_set(&msg->frames_pending, 0);
 	msg->stream = stream;
 	INIT_LIST_HEAD(&msg->list);
 
@@ -1284,11 +1283,11 @@ int odl_tb5_stream_send(struct odl_tb5_stream *stream,
 		slot->frame.callback = odl_tb5_tx_callback;
 		slot->tx_msg = msg;
 
-		msg->frames_pending++;
+		atomic_inc(&msg->frames_pending);
 		msg->sent += payload;
 
 		if (tb_ring_tx(dev->tx.ring, &slot->frame) < 0) {
-			msg->frames_pending--;
+			atomic_dec(&msg->frames_pending);
 			msg->sent -= payload;
 			odl_tb5_frame_pool_put(pool, slot);
 			ret = -EIO;
@@ -1312,12 +1311,12 @@ int odl_tb5_stream_send(struct odl_tb5_stream *stream,
 wait_pending:
 	/* Error or timeout — wait briefly for in-flight frames, then
 	 * abandon.  The TX callback will still free pool slots. */
-	if (msg->frames_pending > 0) {
+	if (atomic_read(&msg->frames_pending) > 0) {
 		wait_event_interruptible_timeout(stream->tx_waitq,
-			msg->frames_pending == 0,
+			atomic_read(&msg->frames_pending) == 0,
 			msecs_to_jiffies(1000));
 	}
-	if (msg->frames_pending == 0)
+	if (atomic_read(&msg->frames_pending) == 0)
 		kfree(msg);
 	/* else: leaked — TX callback will eventually see frames_pending==0
 	 * but msg is orphaned.  This only happens on hard errors. */
@@ -1387,7 +1386,7 @@ void odl_tb5_tx_drain_work_fn(struct work_struct *work)
 				slot->tx_msg = msg;
 
 				msg->sent += payload;
-				msg->frames_pending++;
+				atomic_inc(&msg->frames_pending);
 			}
 
 			if (tb_ring_tx(dev->tx.ring, &slot->frame) < 0) {
@@ -1395,7 +1394,7 @@ void odl_tb5_tx_drain_work_fn(struct work_struct *work)
 					"stream %u (sent=%zu/%zu)\n",
 					stream->id, msg->sent, msg->len);
 				msg->sent -= le16_to_cpu(hdr->payload_len);
-				msg->frames_pending--;
+				atomic_dec(&msg->frames_pending);
 				odl_tb5_frame_pool_put(&dev->frame_pool, slot);
 				/* Wake waiter so timeout can fire */
 				wake_up_interruptible(&stream->tx_waitq);

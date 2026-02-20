@@ -82,7 +82,7 @@ struct odl_tb5_tx_msg {
 	void			*data;
 	size_t			len;
 	size_t			sent;
-	int			frames_pending;
+	atomic_t		frames_pending;
 	bool			done;
 	struct odl_tb5_stream	*stream;
 };
