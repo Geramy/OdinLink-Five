@@ -322,7 +322,7 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 	pr_info("OdinLink: connected to peer "
 		"(local_tx_hopid=%d, remote_tx_hopid=%d, "
 		"tx_ring_hop=%d, rx_ring_hop=%d, "
-		"ring_size=%d, no E2E)\n",
+		"ring_size=%d, E2E enabled)\n",
 		dev->local_tx_hopid, dev->remote_tx_hopid,
 		dev->tx.ring->hop, dev->rx.ring->hop,
 		dev->tx.ring_size);
@@ -370,28 +370,24 @@ static void odl_tb5_connect_work_fn(struct work_struct *work)
 static int odl_tb5_send_dma_msg(struct odl_tb5_device *dev, u32 type)
 {
 	struct odl_tb5_frame_slot *slot;
-	struct odl_tb5_stream_hdr *shdr;
 	struct odl_tb5_dma_hdr *dhdr;
 	int ret;
 
-	/* Try frame pool path first (new stream model) */
+	/* Use frame pool for non-blocking send (each msg gets its own
+	 * slot, no drain wait).  Write raw DMA header at offset 0
+	 * (no stream header) — the RX side uses legacy frames during
+	 * verify and expects DMA magic at offset 0. */
 	if (dev->frame_pool.slots) {
 		slot = odl_tb5_frame_pool_get(&dev->frame_pool);
 		if (!slot)
 			return -ENOMEM;
 
-		shdr = slot->virt;
-		shdr->src_id = ODL_TB5_STREAM_ID_CTRL;
-		shdr->dst_id = ODL_TB5_STREAM_ID_CTRL;
-		shdr->flags  = ODL_TB5_SHDR_F_SINGLE;
-		shdr->payload_len = cpu_to_le16(sizeof(*dhdr));
-
-		dhdr = slot->virt + ODL_TB5_STREAM_HDR_SIZE;
+		dhdr = slot->virt;
 		memset(dhdr, 0, sizeof(*dhdr));
 		dhdr->magic = cpu_to_le32(ODL_TB5_DMA_MAGIC);
 		dhdr->type  = cpu_to_le32(type);
 
-		slot->frame.size = ODL_TB5_STREAM_HDR_SIZE + sizeof(*dhdr);
+		slot->frame.size = sizeof(*dhdr);
 		slot->frame.sof = ODL_TB5_PDF_SOF_CTRL;
 		slot->frame.eof = ODL_TB5_PDF_EOF_CTRL;
 		slot->frame.callback = odl_tb5_tx_callback;

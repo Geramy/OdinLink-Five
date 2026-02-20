@@ -44,8 +44,8 @@ typedef int64_t  __s64;
 #define ODL_TB5_PROTOCOL_VER   1
 
 #define ODL_TB5_PDF_SOF_DATA   0x01
-#define ODL_TB5_PDF_EOF_DATA   0x01
-#define ODL_TB5_PDF_SOF_CTRL   0x02
+#define ODL_TB5_PDF_EOF_DATA   0x02
+#define ODL_TB5_PDF_SOF_CTRL   0x01
 #define ODL_TB5_PDF_EOF_CTRL   0x02
 
 /* ── Stream header (5 bytes, prepended to every DMA frame) ──────────── */

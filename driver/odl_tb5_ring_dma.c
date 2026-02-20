@@ -324,20 +324,20 @@ int odl_tb5_rings_alloc(struct odl_tb5_device *dev)
 
 	dev->tx.ring = tb_ring_alloc_tx(xd->tb->nhi, -1,
 					rs,
-					RING_FLAG_FRAME);
+					RING_FLAG_FRAME | RING_FLAG_E2E);
 	if (!dev->tx.ring) {
 		pr_err("odl_tb5: failed to allocate TX ring\n");
 		ret = -ENOMEM;
 		goto err_free_hopid;
 	}
 
-	sof_mask = 0xffff;
-	eof_mask = 0xffff;
+	sof_mask = BIT(ODL_TB5_PDF_SOF_DATA);
+	eof_mask = BIT(ODL_TB5_PDF_EOF_DATA);
 
 	dev->rx.ring = tb_ring_alloc_rx(xd->tb->nhi, -1,
 					rs,
-					RING_FLAG_FRAME,
-					0,
+					RING_FLAG_FRAME | RING_FLAG_E2E,
+					dev->tx.ring->hop,
 					sof_mask, eof_mask,
 					NULL, NULL);
 	if (!dev->rx.ring) {
@@ -347,9 +347,9 @@ int odl_tb5_rings_alloc(struct odl_tb5_device *dev)
 	}
 
 	pr_info("odl_tb5: rings allocated: TX hop=%d, RX hop=%d, "
-		"local_tx_hopid=%d (no E2E)\n",
+		"local_tx_hopid=%d (E2E enabled, e2e_tx_hop=%d)\n",
 		dev->tx.ring->hop, dev->rx.ring->hop,
-		dev->local_tx_hopid);
+		dev->local_tx_hopid, dev->tx.ring->hop);
 
 	spin_lock_init(&dev->tx.lock);
 	spin_lock_init(&dev->rx.lock);
