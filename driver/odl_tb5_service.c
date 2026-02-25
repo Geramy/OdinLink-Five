@@ -52,6 +52,7 @@ static int odl_tb5_probe(struct tb_service *svc,
 		return ret;
 	}
 	dev->index = ret;
+	dev->local_tx_hopid = -1;
 
 	dev->state = ODL_TB5_STATE_DISCONNECTED;
 
@@ -139,10 +140,6 @@ static void odl_tb5_remove(struct tb_service *svc)
 	if (!dev)
 		return;
 
-	mutex_lock(&odl_tb5_devices_lock);
-	list_del(&dev->list);
-	mutex_unlock(&odl_tb5_devices_lock);
-
 	mutex_lock(&dev->state_lock);
 	saved_state = dev->state;
 	dev->state = ODL_TB5_STATE_DISCONNECTED;
@@ -164,13 +161,19 @@ static void odl_tb5_remove(struct tb_service *svc)
 		tb_xdomain_release_in_hopid(dev->xd, dev->remote_tx_hopid);
 	}
 
-	/* Clean up stream infrastructure */
 	cancel_work_sync(&dev->tx_drain_work);
-	odl_tb5_batch_pool_free(dev);
-	odl_tb5_frame_pool_free(dev);
-	ida_destroy(&dev->stream_ida);
 
 	odl_tb5_rings_stop(dev);
+
+	mutex_lock(&odl_tb5_devices_lock);
+	list_del(&dev->list);
+	mutex_unlock(&odl_tb5_devices_lock);
+
+	odl_tb5_batch_pool_free(dev);
+	odl_tb5_frame_pool_free(dev);
+	odl_tb5_streams_destroy_all(dev);
+	ida_destroy(&dev->stream_ida);
+
 	odl_tb5_dma_bufs_free(dev);
 	odl_tb5_rings_free(dev);
 

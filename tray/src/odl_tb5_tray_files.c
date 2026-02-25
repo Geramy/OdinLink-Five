@@ -332,8 +332,8 @@ static void on_context_menu(struct files_window_ctx *ctx,
 
 	GtkWidget *menu = gtk_menu_new();
 
-	g_object_set_data_full(G_OBJECT(menu), "rel_path", rel_path,
-	                       (GDestroyNotify)g_free);
+	g_object_set_data_full(G_OBJECT(menu), "rel_path",
+	                       g_strdup(rel_path), (GDestroyNotify)g_free);
 
 	if (strcmp(loc_raw, "remote") == 0) {
 		GtkWidget *mi = gtk_menu_item_new_with_label("Download Locally");

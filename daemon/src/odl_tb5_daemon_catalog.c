@@ -253,17 +253,23 @@ void odl_catalog_remove(const char *rel_path)
 	g_rw_lock_writer_unlock(&g_catalog.lock);
 }
 
-const struct odl_catalog_entry *odl_catalog_lookup(const char *rel_path)
+struct odl_catalog_entry *odl_catalog_lookup(const char *rel_path)
 {
 	if (!rel_path)
 		return NULL;
 
+	struct odl_catalog_entry *copy = NULL;
+
 	g_rw_lock_reader_lock(&g_catalog.lock);
 	const struct odl_catalog_entry *ent =
 		g_hash_table_lookup(g_catalog.entries, rel_path);
+	if (ent) {
+		copy = g_malloc(sizeof(*copy));
+		memcpy(copy, ent, sizeof(*copy));
+	}
 	g_rw_lock_reader_unlock(&g_catalog.lock);
 
-	return ent;
+	return copy;
 }
 
 GList *odl_catalog_list_dir(const char *dir_path)

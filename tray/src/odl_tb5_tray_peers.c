@@ -141,7 +141,7 @@ static void peer_window_populate(struct peer_window_ctx *ctx)
 		guint32 link_speed = 0, link_width = 0;
 		const gchar *state = NULL, *vendor = NULL, *devname = NULL;
 
-		g_variant_get(result, "(suuss)",
+		g_variant_get(result, "(suusss)",
 		              &uuid, &link_speed, &link_width,
 		              &state, &vendor, &devname);
 

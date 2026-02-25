@@ -327,6 +327,7 @@ struct odl_tb5_stream *odl_tb5_stream_create(struct odl_tb5_device *dev,
 					     struct odl_tb5_file_ctx *owner,
 					     u8 filter_id);
 void odl_tb5_stream_destroy(struct odl_tb5_stream *stream);
+void odl_tb5_streams_destroy_all(struct odl_tb5_device *dev);
 void odl_tb5_stream_put(struct odl_tb5_stream *stream);
 struct odl_tb5_stream *odl_tb5_stream_lookup(struct odl_tb5_device *dev,
 					     u8 stream_id);
