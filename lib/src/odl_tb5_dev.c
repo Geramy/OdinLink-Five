@@ -50,11 +50,17 @@ static int odl_tb5_mmap_buffers(odl_tb5_t h)
 	return 0;
 
 err_unmap_rx0:
+	{ int saved = errno;
 	munmap(h->rx_bufs[0], h->rx_buf_size);
+	errno = saved; }
 err_unmap_tx1:
+	{ int saved = errno;
 	munmap(h->tx_bufs[1], h->tx_buf_size);
+	errno = saved; }
 err_unmap_tx0:
+	{ int saved = errno;
 	munmap(h->tx_bufs[0], h->tx_buf_size);
+	errno = saved; }
 	return -errno;
 }
 

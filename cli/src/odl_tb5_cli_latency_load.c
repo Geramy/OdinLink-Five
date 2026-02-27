@@ -179,11 +179,6 @@ int odl_cli_latency_load_client(odl_tb5_t handle, uint8_t sid, uint8_t dst,
 	ret = 0;
 
 out_load:
-	free(bg_data);
-	odl_stats_free(&load_stats);
-out_idle:
-	odl_stats_free(&idle_stats);
-
 	odl_cli_send_msg(handle, sid, dst, ODL_CLI_MSG_TEST_STOP, 0, NULL, 0);
 
 	{
@@ -203,6 +198,11 @@ out_idle:
 				 &result.bytes_transferred,
 				 sizeof(result) - sizeof(result.hdr));
 	}
+
+	free(bg_data);
+	odl_stats_free(&load_stats);
+out_idle:
+	odl_stats_free(&idle_stats);
 
 	return ret;
 }

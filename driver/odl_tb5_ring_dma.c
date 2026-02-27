@@ -250,7 +250,7 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 
 						/* Start of new message — reset assembly */
 						if (flags & ODL_TB5_SHDR_F_MSG_START) {
-							kvfree(stream->rx_asm_buf);
+							kfree(stream->rx_asm_buf);
 							stream->rx_asm_buf = NULL;
 							stream->rx_asm_len = 0;
 							stream->rx_asm_cap = 0;
@@ -265,14 +265,14 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 								max(stream->rx_asm_cap * 2,
 								    stream->rx_asm_len +
 								    payload_len));
-							void *nb = kvmalloc(new_cap,
-									    GFP_KERNEL);
+							void *nb = kmalloc(new_cap,
+									   GFP_ATOMIC);
 							if (nb) {
 								if (stream->rx_asm_buf)
 									memcpy(nb,
 									       stream->rx_asm_buf,
 									       stream->rx_asm_len);
-								kvfree(stream->rx_asm_buf);
+								kfree(stream->rx_asm_buf);
 								stream->rx_asm_buf = nb;
 								stream->rx_asm_cap = new_cap;
 							}
@@ -292,7 +292,7 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 							unsigned long rxflags;
 
 							rxm = kzalloc(sizeof(*rxm),
-								      GFP_KERNEL);
+								      GFP_ATOMIC);
 							if (rxm && stream->rx_asm_buf) {
 								rxm->data = stream->rx_asm_buf;
 								rxm->len = stream->rx_asm_len;
@@ -321,7 +321,7 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 									spin_unlock_irqrestore(
 										&stream->rx_lock,
 										rxflags);
-									kvfree(rxm->data);
+									kfree(rxm->data);
 									kfree(rxm);
 								}
 
@@ -332,7 +332,7 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 								stream->rx_asm_cap = 0;
 							} else {
 								kfree(rxm);
-								kvfree(stream->rx_asm_buf);
+								kfree(stream->rx_asm_buf);
 								stream->rx_asm_buf = NULL;
 								stream->rx_asm_len = 0;
 								stream->rx_asm_cap = 0;
@@ -1265,11 +1265,11 @@ static void odl_tb5_stream_free(struct kref *ref)
 
 	list_for_each_entry_safe(rx, rx_tmp, &stream->rx_queue, list) {
 		list_del(&rx->list);
-		kvfree(rx->data);
+		kfree(rx->data);
 		kfree(rx);
 	}
 
-	kvfree(stream->rx_asm_buf);
+	kfree(stream->rx_asm_buf);
 	kfree(stream);
 }
 
@@ -1370,6 +1370,26 @@ void odl_tb5_stream_destroy(struct odl_tb5_stream *stream)
 void odl_tb5_stream_put(struct odl_tb5_stream *stream)
 {
 	kref_put(&stream->refcount, odl_tb5_stream_free);
+}
+
+void odl_tb5_streams_destroy_all(struct odl_tb5_device *dev)
+{
+	struct odl_tb5_stream *stream;
+	struct hlist_node *tmp;
+	int bkt;
+
+	mutex_lock(&dev->stream_lock);
+	hash_for_each_safe(dev->streams, bkt, tmp, stream, node) {
+		hash_del(&stream->node);
+		if (stream->owner) {
+			spin_lock(&stream->owner->lock);
+			list_del(&stream->owner_list);
+			spin_unlock(&stream->owner->lock);
+		}
+		ida_free(&dev->stream_ida, stream->id);
+		kref_put(&stream->refcount, odl_tb5_stream_free);
+	}
+	mutex_unlock(&dev->stream_lock);
 }
 
 struct odl_tb5_stream *odl_tb5_stream_lookup(struct odl_tb5_device *dev,
@@ -1876,7 +1896,7 @@ int odl_tb5_stream_recv(struct odl_tb5_stream *stream,
 	if (copy_to_user(buf, msg->data, *actual_len))
 		ret = -EFAULT;
 
-	kvfree(msg->data);
+	kfree(msg->data);
 	kfree(msg);
 	return ret;
 }

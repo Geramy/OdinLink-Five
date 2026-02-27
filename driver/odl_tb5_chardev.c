@@ -465,7 +465,7 @@ int odl_tb5_chardev_init(void)
 		return ret;
 	}
 
-	odl_tb5_class = class_create(ODL_TB5_DEVICE_NAME);
+	odl_tb5_class = class_create_compat(ODL_TB5_DEVICE_NAME);
 	if (IS_ERR(odl_tb5_class)) {
 		ret = PTR_ERR(odl_tb5_class);
 		pr_err("odl_tb5: class_create failed: %d\n", ret);

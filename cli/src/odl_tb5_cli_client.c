@@ -51,21 +51,12 @@ static int run_single_test(odl_tb5_t handle, uint8_t sid, uint8_t dst,
 
 	switch (test_type) {
 	case ODL_TEST_BANDWIDTH:
-		for (int i = 0; i < params->num_block_sizes; i++) {
-			char buf[32];
-			printf("\n--- Bandwidth Test (block=%s%s) ---\n",
-			       odl_format_size(params->block_sizes[i], buf, sizeof(buf)),
-			       params->bidir ? ", bidirectional" : "");
+		ret = send_test_request(handle, sid, dst, params, test_type,
+					params->block_sizes[0]);
+		if (ret < 0)
+			return ret;
 
-			ret = send_test_request(handle, sid, dst, params, test_type,
-						params->block_sizes[i]);
-			if (ret < 0)
-				return ret;
-
-			ret = odl_cli_bandwidth_client(handle, sid, dst, params);
-			if (ret < 0)
-				return ret;
-		}
+		ret = odl_cli_bandwidth_client(handle, sid, dst, params);
 		break;
 
 	case ODL_TEST_LATENCY:

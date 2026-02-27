@@ -458,6 +458,7 @@ static void inotify_send_file_removed(struct odl_sync_engine *eng,
 		} else {
 			odl_catalog_remove(rel_path);
 		}
+		g_free((void *)ce);
 	}
 
 	g_mutex_lock(&eng->tx_lock);
@@ -1023,6 +1024,7 @@ static void sync_handle_listing_end(struct odl_sync_engine *eng)
 			if (!ce->is_dir)
 				sync_create_remote_symlink(eng, ce->rel_path);
 		}
+		g_free((void *)existing);
 	}
 
 	g_list_free_full(eng->peer_listing, g_free);
@@ -1052,8 +1054,11 @@ static void sync_handle_fetch_req(struct odl_sync_engine *eng,
 		g_mutex_unlock(&eng->tx_lock);
 		g_printerr(SYNC_LOG_PREFIX
 			   "fetch_req: %s not found locally\n", rel_path);
+		g_free((void *)ce);
 		return;
 	}
+
+	g_free((void *)ce);
 
 	char *abs_path = sync_shared_path(eng, rel_path);
 	struct stat st;
@@ -1446,6 +1451,8 @@ static void sync_handle_file_delete(struct odl_sync_engine *eng,
 		sync_remove_remote_symlink(eng, del->rel_path);
 		odl_catalog_remove(del->rel_path);
 	}
+
+	g_free((void *)ce);
 }
 
 static void sync_handle_dir_create(struct odl_sync_engine *eng,
@@ -1518,6 +1525,8 @@ static void sync_handle_remove_req(struct odl_sync_engine *eng,
 		return;
 	}
 
+	g_free((void *)ce);
+
 	sync_suppress_add(eng, req->rel_path);
 
 	int ret = odl_catalog_remove_local_copy(req->rel_path);
@@ -1561,6 +1570,7 @@ static void sync_handle_remove_ack(struct odl_sync_engine *eng,
 							   ack->rel_path);
 				odl_catalog_remove(ack->rel_path);
 			}
+			g_free((void *)ce);
 		}
 	}
 }
@@ -1591,6 +1601,8 @@ static void sync_handle_file_changed(struct odl_sync_engine *eng,
 	} else {
 		ce.location = ODL_FILE_REMOTE;
 	}
+
+	g_free((void *)existing);
 
 	odl_catalog_set(msg->rel_path, &ce);
 
@@ -1649,6 +1661,8 @@ static void sync_handle_file_removed(struct odl_sync_engine *eng,
 		odl_catalog_remove(msg->rel_path);
 	}
 
+	g_free((void *)ce);
+
 	odl_daemon_fuse_invalidate(msg->rel_path);
 }
 
@@ -1673,6 +1687,8 @@ static int fuse_cb_getattr(const char *rel_path, struct stat *st)
 	st->st_mtim.tv_nsec = (long)(ce->mtime_ns % 1000000000ULL);
 	st->st_atim = st->st_mtim;
 	st->st_ctim = st->st_mtim;
+
+	g_free((void *)ce);
 
 	return 0;
 }
@@ -1722,20 +1738,27 @@ static char *fuse_cb_get_local_path(const char *rel_path)
 	if (!ce)
 		return NULL;
 
+	char *result = NULL;
+
 	switch (ce->location) {
 	case ODL_FILE_LOCAL:
 	case ODL_FILE_BOTH:
-		return g_build_filename(g_engine.shared_folder,
-					rel_path, NULL);
+		result = g_build_filename(g_engine.shared_folder,
+					  rel_path, NULL);
+		break;
 
 	case ODL_FILE_CACHED:
-		return g_build_filename(g_engine.cache_dir,
-					rel_path, NULL);
+		result = g_build_filename(g_engine.cache_dir,
+					  rel_path, NULL);
+		break;
 
 	case ODL_FILE_REMOTE:
 	default:
-		return NULL;
+		break;
 	}
+
+	g_free((void *)ce);
+	return result;
 }
 
 static int fuse_cb_fetch_remote(const char *rel_path)
@@ -2249,11 +2272,16 @@ int odl_daemon_sync_fetch_file(const char *rel_path)
 	const struct odl_catalog_entry *ce = odl_catalog_lookup(rel_path);
 	if (ce && (ce->location == ODL_FILE_LOCAL ||
 		   ce->location == ODL_FILE_BOTH)) {
+		g_free((void *)ce);
 		return 0;
 	}
 
-	if (ce && ce->location == ODL_FILE_CACHED)
+	if (ce && ce->location == ODL_FILE_CACHED) {
+		g_free((void *)ce);
 		return 0;
+	}
+
+	g_free((void *)ce);
 
 	g_printerr(SYNC_LOG_PREFIX "fetch: requesting %s from peer\n",
 		   rel_path);
@@ -2340,8 +2368,11 @@ int odl_daemon_sync_transfer_file(const char *rel_path)
 		    ce->location != ODL_FILE_BOTH)) {
 		g_printerr(SYNC_LOG_PREFIX
 			   "transfer: %s not available locally\n", rel_path);
+		g_free((void *)ce);
 		return -ENOENT;
 	}
+
+	g_free((void *)ce);
 
 	char *abs_path = sync_shared_path(&g_engine, rel_path);
 	struct stat st;
@@ -2518,8 +2549,11 @@ int odl_daemon_sync_remove_local(const char *rel_path)
 		odl_catalog_set(rel_path, &updated);
 
 		g_free(shared_path);
+		g_free((void *)ce);
 		return 0;
 	}
+
+	g_free((void *)ce);
 
 	int ret = odl_catalog_remove_local_copy(rel_path);
 	if (ret < 0) {

@@ -104,9 +104,9 @@ static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
 
 	mutex_lock(&odl_tb5_devices_lock);
 	dev = odl_tb5_find_device_by_route(route);
-	mutex_unlock(&odl_tb5_devices_lock);
 
 	if (!dev) {
+		mutex_unlock(&odl_tb5_devices_lock);
 		pr_warn("OdinLink: incoming packet route %llx — no matching device\n",
 			route);
 		return 0;
@@ -118,8 +118,10 @@ static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
 		struct odl_tb5_login_response resp = { };
 		int ret;
 
-		if (size < sizeof(*pkg))
+		if (size < sizeof(*pkg)) {
+			mutex_unlock(&odl_tb5_devices_lock);
 			return 0;
+		}
 
 		pr_info("OdinLink: received login from peer "
 			"(version=%u, tx_path=%u)\n",
@@ -151,6 +153,7 @@ static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
 			dev->remote_tx_hopid = pkg->transmit_path;
 			dev->login_received = true;
 			mutex_unlock(&dev->state_lock);
+			mutex_unlock(&odl_tb5_devices_lock);
 			schedule_work(&dev->restart_work);
 			return 1;
 		}
@@ -161,6 +164,7 @@ static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
 			need_complete = true;
 		mutex_unlock(&dev->state_lock);
 
+		mutex_unlock(&odl_tb5_devices_lock);
 		if (need_complete)
 			schedule_work(&dev->connect_work);
 
@@ -176,11 +180,13 @@ static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
 		dev->login_sent = false;
 		mutex_unlock(&dev->state_lock);
 
+		mutex_unlock(&odl_tb5_devices_lock);
 		schedule_work(&dev->restart_work);
 
 		return 1;
 
 	default:
+		mutex_unlock(&odl_tb5_devices_lock);
 		return 0;
 	}
 }

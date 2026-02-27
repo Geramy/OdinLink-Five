@@ -46,8 +46,8 @@ void odl_catalog_set(const char *rel_path,
 /* Remove an entry. */
 void odl_catalog_remove(const char *rel_path);
 
-/* Lookup an entry (caller must NOT free). */
-const struct odl_catalog_entry *odl_catalog_lookup(const char *rel_path);
+/* Lookup an entry (caller must g_free the returned copy). */
+struct odl_catalog_entry *odl_catalog_lookup(const char *rel_path);
 
 /* List direct children of a directory (caller frees list, not entries). */
 GList *odl_catalog_list_dir(const char *dir_path);
