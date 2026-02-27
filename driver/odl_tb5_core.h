@@ -26,6 +26,23 @@
 #include <linux/idr.h>
 #include <linux/hashtable.h>
 #include <linux/kref.h>
+#include <linux/version.h>
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
+#define class_create_compat(name) class_create(THIS_MODULE, (name))
+#else
+#define class_create_compat(name) class_create((name))
+#endif
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 8, 0)
+static inline void hrtimer_setup(struct hrtimer *timer,
+				 enum hrtimer_restart (*fn)(struct hrtimer *),
+				 clockid_t clock, enum hrtimer_mode mode)
+{
+	hrtimer_init(timer, clock, mode);
+	timer->function = fn;
+}
+#endif
 
 #include "uapi/odl_tb5_uapi.h"
 
