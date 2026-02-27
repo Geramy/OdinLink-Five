@@ -14,6 +14,11 @@ udevadm trigger 2>/dev/null || true
 # ---- Reload systemd user daemon for all logged-in users ----
 systemctl --global daemon-reload 2>/dev/null || true
 
+# ---- Enable linger so user services survive without a login session ----
+if [ -n "$SUDO_USER" ]; then
+    loginctl enable-linger "$SUDO_USER" 2>/dev/null || true
+fi
+
 # ---- Restart daemon for the installing user ----
 if [ -n "$SUDO_USER" ]; then
     DAEMON_UID=$(id -u "$SUDO_USER" 2>/dev/null) || true
