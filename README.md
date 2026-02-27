@@ -2,9 +2,18 @@
 
 High-performance peer-to-peer DMA ring driver and toolchain for Thunderbolt 5, enabling GPU-to-GPU communication (via RCCL/NCCL), distributed file access, and performance testing between TB5-connected machines.
 
+## System Test on USB4v2 / Builtin - Thunderbolt 5
+### WIP
+- Firstly I would like to see if I can force TB5 to use more channels for TX on one host and RX on the other.
+- Secondly I will add high performance mode which uses CPU polling at a higher rate to reduce latency
+       The overall goal is to get latency to the level of infiniband RDMA / RoCE 2 - 5us
+       
+![OdinLink USB4 Performance Results](https://raw.githubusercontent.com/Geramy/OdinLink-Five/main/assets/Screenshot_2026-02-27_10-07-33.png)
+
+
 ## System Test on USB4 / Builtin - Thunderbolt 4
 
-![OdinLink Performance Results](https://raw.githubusercontent.com/Geramy/OdinLink-Five/main/assets/Screenshot_2026-02-20_13-50-36.png)
+![OdinLink USB4 Performance Results](https://raw.githubusercontent.com/Geramy/OdinLink-Five/main/assets/Screenshot_2026-02-20_13-50-36.png)
 
 ## System Overview
 
