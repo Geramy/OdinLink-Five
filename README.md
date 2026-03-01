@@ -2,6 +2,10 @@
 
 High-performance peer-to-peer DMA ring driver and toolchain for Thunderbolt 5, enabling GPU-to-GPU communication (via RCCL/NCCL), distributed file access, and performance testing between TB5-connected machines.
 
+# Tested Systems
+| System | USB4 | USB4v2 / TB5 | Status |
+| Minisforum MS-S1 | Working | Partially-Working | Requires power on with cable connected BIOS 1.06 |
+
 ## System Test on USB4v2 / Builtin - Thunderbolt 5
 ### WIP
 - Firstly I would like to see if I can force TB5 to use more channels for TX on one host and RX on the other.
