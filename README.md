@@ -4,6 +4,7 @@ High-performance peer-to-peer DMA ring driver and toolchain for Thunderbolt 5, e
 
 # Tested Systems
 | System | USB4 | USB4v2 / TB5 | Status |
+|-----------|----------------|-------------|-------------|
 | Minisforum MS-S1 | Working | Partially-Working | Requires power on with cable connected BIOS 1.06 |
 
 ## System Test on USB4v2 / Builtin - Thunderbolt 5
