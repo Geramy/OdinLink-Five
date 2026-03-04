@@ -372,6 +372,11 @@ export RCCL_DEBUG=INFO
 export RCCL_NET_PLUGIN=ODL_TB5
 ```
 
+Note: If you are having trouble getting the TB5 ports to work right I am seeing around that adding the following command line to the grub boot sequency will help.
+```
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash pcie_port_pm=off"
+```
+
 ## License
 
 MIT
