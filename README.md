@@ -116,7 +116,7 @@ CMake will report which components are enabled:
 
 ```bash
 # Load with default ring size (4096 entries = 16 MB per batch)
-sudo insmod driver/odl_tb5.ko
+sudo insmod driver/odl_tb5.ko odl_ring_size=1024
 
 # Or load with custom ring size (power of 2, 64-16384)
 sudo insmod driver/odl_tb5.ko ring_size=16384  # 64 MB per batch
