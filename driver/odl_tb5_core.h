@@ -282,6 +282,11 @@ struct odl_tb5_device {
 	int			rx_target;
 
 	struct list_head	list;
+
+    /* Cleanup synchronization — set to true when remove begins.
+     * Used by callbacks for early exit during module unload,
+     * preventing use-after-free after the device memory is released. */
+	atomic_t			removing;
 };
 
 extern struct list_head odl_tb5_devices_list;
