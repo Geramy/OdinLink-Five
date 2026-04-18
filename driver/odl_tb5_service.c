@@ -75,6 +75,8 @@ static int odl_tb5_probe(struct tb_service *svc,
 	atomic_set(&dev->rx_posted, 0);
 	dev->rx_target = 0;
 
+	atomic_set(&dev->removing, 0);
+
 	/* Adaptive TX mode defaults */
 	dev->tx_adaptive.mode = ODL_TB5_TX_LATENCY;
 	dev->tx_adaptive.consecutive_low = 0;
@@ -140,6 +142,8 @@ static void odl_tb5_remove(struct tb_service *svc)
 	if (!dev)
 		return;
 
+	atomic_set(&dev->removing, 1);
+
 	mutex_lock(&dev->state_lock);
 	saved_state = dev->state;
 	dev->state = ODL_TB5_STATE_DISCONNECTED;
@@ -149,33 +153,40 @@ static void odl_tb5_remove(struct tb_service *svc)
 	    saved_state == ODL_TB5_STATE_READY)
 		odl_tb5_proto_send_logout(dev);
 
-	odl_tb5_proto_exit(dev);
+	hrtimer_cancel(&dev->rx_poll_timer);
+
+	cancel_work_sync(&dev->verify_work);
+	cancel_work_sync(&dev->ctrl_reply_work);
+	cancel_work_sync(&dev->restart_work);
+	cancel_work_sync(&dev->connect_work);
+	cancel_delayed_work_sync(&dev->login_work);
+	cancel_work_sync(&dev->tx_drain_work);
+
+	odl_tb5_rings_stop(dev);
+
+	synchronize_rcu();
+
+	mutex_lock(&odl_tb5_devices_lock);
+	list_del_rcu(&dev->list);
+	mutex_unlock(&odl_tb5_devices_lock);
+
+	odl_tb5_streams_destroy_all(dev);
+	ida_destroy(&dev->stream_ida);
+
+	odl_tb5_frame_pool_free(dev);
+	odl_tb5_batch_pool_free(dev);
+	odl_tb5_dma_bufs_free(dev);
+	odl_tb5_rings_free(dev);
 
 	if (saved_state == ODL_TB5_STATE_CONNECTED ||
 	    saved_state == ODL_TB5_STATE_READY) {
 		tb_xdomain_disable_paths(dev->xd,
 					 dev->local_tx_hopid,
-					 dev->tx.ring->hop,
+					 dev->tx.ring ? dev->tx.ring->hop : -1,
 					 dev->remote_tx_hopid,
-					 dev->rx.ring->hop);
+					 dev->rx.ring ? dev->rx.ring->hop : -1);
 		tb_xdomain_release_in_hopid(dev->xd, dev->remote_tx_hopid);
 	}
-
-	cancel_work_sync(&dev->tx_drain_work);
-
-	odl_tb5_rings_stop(dev);
-
-	mutex_lock(&odl_tb5_devices_lock);
-	list_del(&dev->list);
-	mutex_unlock(&odl_tb5_devices_lock);
-
-	odl_tb5_batch_pool_free(dev);
-	odl_tb5_frame_pool_free(dev);
-	odl_tb5_streams_destroy_all(dev);
-	ida_destroy(&dev->stream_ida);
-
-	odl_tb5_dma_bufs_free(dev);
-	odl_tb5_rings_free(dev);
 
 	odl_tb5_chardev_destroy(dev);
 
@@ -275,6 +286,39 @@ err_chardev_exit:
 
 static void __exit odl_tb5_exit(void)
 {
+	struct odl_tb5_device *dev, *tmp;
+
+    /*
+     * Explicit cleanup of remaining devices.
+     * This is a safeguard in case tb_unregister_service_driver()
+     * did not remove all devices (e.g., due to a hotplug error).
+     */
+	mutex_lock(&odl_tb5_devices_lock);
+	list_for_each_entry_safe(dev, tmp, &odl_tb5_devices_list, list) {
+		pr_warn("odl_tb5: cleaning up orphaned device at exit\n");
+		list_del_rcu(&dev->list);
+		atomic_set(&dev->removing, 1);
+		hrtimer_cancel(&dev->rx_poll_timer);
+		cancel_work_sync(&dev->verify_work);
+		cancel_work_sync(&dev->ctrl_reply_work);
+		cancel_work_sync(&dev->restart_work);
+		cancel_work_sync(&dev->connect_work);
+		cancel_delayed_work_sync(&dev->login_work);
+		cancel_work_sync(&dev->tx_drain_work);
+		odl_tb5_rings_stop(dev);
+		synchronize_rcu();
+		odl_tb5_streams_destroy_all(dev);
+		ida_destroy(&dev->stream_ida);
+		odl_tb5_frame_pool_free(dev);
+		odl_tb5_batch_pool_free(dev);
+		odl_tb5_dma_bufs_free(dev);
+		odl_tb5_rings_free(dev);
+		odl_tb5_chardev_destroy(dev);
+		ida_free(&odl_tb5_ida, dev->index);
+		kfree(dev);
+	}
+	mutex_unlock(&odl_tb5_devices_lock);
+
 	tb_unregister_service_driver(&odl_tb5_driver);
 	odl_tb5_proto_unregister();
 	tb_unregister_property_dir(ODL_TB5_PROTOCOL_KEY,

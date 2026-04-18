@@ -37,6 +37,9 @@ enum hrtimer_restart odl_tb5_rx_poll_timer_fn(struct hrtimer *timer)
 	struct odl_tb5_device *dev =
 		container_of(timer, struct odl_tb5_device, rx_poll_timer);
 
+	if (atomic_read(&dev->removing))
+		return HRTIMER_NORESTART;
+
 	if (dev->tx.ring && dev->tx.started)
 		schedule_work(&dev->tx.ring->work);
 
@@ -97,6 +100,9 @@ void odl_tb5_tx_callback(struct tb_ring *ring,
 
 	/* Check if this is a frame pool slot (new stream path) */
 	dev = container_of(ctx, struct odl_tb5_device, tx);
+
+	if (atomic_read(&dev->removing))
+		return;
 	slot = container_of(frame, struct odl_tb5_frame_slot, frame);
 
 	if (slot >= dev->frame_pool.slots &&
@@ -148,6 +154,9 @@ void odl_tb5_tx_batch_callback(struct tb_ring *ring,
 
 	dev = container_of(ctx, struct odl_tb5_device, tx);
 
+	if (atomic_read(&dev->removing))
+		return;
+
 	/* Identify which batch buffer owns this frame (8 entries max) */
 	for (b = 0; b < ODL_TB5_BATCH_BUF_COUNT; b++) {
 		struct odl_tb5_batch_buf *candidate = &dev->batch_pool.bufs[b];
@@ -192,6 +201,9 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 		return;
 
 	dev = odl_tb5_rx_ring_to_dev(ring);
+
+	if (!dev || atomic_read(&dev->removing))
+		return;
 
 	/* Check if this is a frame pool slot (new stream path) */
 	if (dev && dev->frame_pool.slots) {
@@ -1354,7 +1366,8 @@ void odl_tb5_stream_destroy(struct odl_tb5_stream *stream)
 	pr_info("odl_tb5: stream %u destroying\n", stream->id);
 
 	mutex_lock(&dev->stream_lock);
-	hash_del(&stream->node);
+
+	hash_del_rcu(&stream->node);
 	mutex_unlock(&dev->stream_lock);
 
 	if (stream->owner) {
@@ -1380,7 +1393,9 @@ void odl_tb5_streams_destroy_all(struct odl_tb5_device *dev)
 
 	mutex_lock(&dev->stream_lock);
 	hash_for_each_safe(dev->streams, bkt, tmp, stream, node) {
-		hash_del(&stream->node);
+
+		hash_del_rcu(&stream->node);
+
 		if (stream->owner) {
 			spin_lock(&stream->owner->lock);
 			list_del(&stream->owner_list);
