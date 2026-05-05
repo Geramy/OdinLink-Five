@@ -1,6 +1,7 @@
 # OdinLink Thunderbolt 5, Thunderbolt 4 & USB4 / USB4v2
 
 High-performance peer-to-peer DMA ring driver and toolchain for Thunderbolt 5, enabling GPU-to-GPU communication (via RCCL/NCCL), distributed file access, and performance testing between TB5-connected machines.
+## FYI THIS IS A POC, MORE OF A HACK FOR NOW.
 
 # Tested Systems
 | System | USB4 | USB4v2 / TB5 | Status | Tester |
