@@ -82,11 +82,13 @@ set(DAEMON_LIBS
     m
 )
 
-# Add FUSE3 support if available
+# Add FUSE3 support if available, otherwise use stubs
 if(FUSE3_FOUND)
     list(APPEND DAEMON_SOURCES src/odl_tb5_daemon_fuse.c)
     list(APPEND DAEMON_INCLUDES ${FUSE3_INCLUDE_DIRS})
     list(APPEND DAEMON_LIBS ${FUSE3_LIBRARIES})
+else()
+    list(APPEND DAEMON_SOURCES src/odl_tb5_daemon_fuse_stubs.c)
 endif()
 
 # Add OpenSSL if available

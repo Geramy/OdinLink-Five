@@ -21,14 +21,22 @@ if(NOT PKG_CONFIG_EXE)
     list(APPEND ODL_MISSING_DEPS "pkg-config")
 endif()
 
+# gdbus-codegen is required only when building the daemon (checked in daemon/CMakeLists.txt)
+# We still probe it here for the missing deps warning, but don't fail on it unless
+# BUILD_DAEMON is ON.
+option(BUILD_DAEMON "Build OdinLink TB5 system daemon" ON)
+option(BUILD_TRAY   "Build OdinLink TB5 tray application" ON)
 find_program(GDBUS_CODEGEN_EXE NAMES gdbus-codegen QUIET)
-if(NOT GDBUS_CODEGEN_EXE)
+if(NOT GDBUS_CODEGEN_EXE AND BUILD_DAEMON)
     list(APPEND ODL_MISSING_DEPS "libglib2.0-dev-bin")
 endif()
 
-execute_process(COMMAND uname -r OUTPUT_VARIABLE KERNEL_RELEASE OUTPUT_STRIP_TRAILING_WHITESPACE)
-if(NOT EXISTS "/lib/modules/${KERNEL_RELEASE}/build")
-    list(APPEND ODL_MISSING_DEPS "linux-headers-${KERNEL_RELEASE}")
+# Only check for kernel headers on Linux (required for kernel module build)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    execute_process(COMMAND uname -r OUTPUT_VARIABLE KERNEL_RELEASE OUTPUT_STRIP_TRAILING_WHITESPACE)
+    if(NOT EXISTS "/lib/modules/${KERNEL_RELEASE}/build")
+        list(APPEND ODL_MISSING_DEPS "linux-headers-${KERNEL_RELEASE}")
+    endif()
 endif()
 
 if(PKG_CONFIG_EXE)
@@ -74,9 +82,16 @@ if(ODL_MISSING_DEPS)
         "  Then re-run cmake.\n"
         "============================================================\n")
     # Fail only if a required dep is missing (not optional fuse3/openssl)
-    if(NOT KERNEL_GCC OR NOT PKG_CONFIG_EXE OR NOT GDBUS_CODEGEN_EXE
-       OR NOT EXISTS "/lib/modules/${KERNEL_RELEASE}/build")
-        message(FATAL_ERROR "Cannot continue without required dependencies.")
+    # On macOS, skip linux-headers check (kernel module not built there)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        if(NOT KERNEL_GCC OR NOT PKG_CONFIG_EXE OR NOT GDBUS_CODEGEN_EXE
+           OR NOT EXISTS "/lib/modules/${KERNEL_RELEASE}/build")
+            message(FATAL_ERROR "Cannot continue without required dependencies.")
+        endif()
+    else()
+        if(NOT PKG_CONFIG_EXE OR NOT GDBUS_CODEGEN_EXE)
+            message(FATAL_ERROR "Cannot continue without required dependencies.")
+        endif()
     endif()
 endif()
 if(NOT ODL_MISSING_DEPS)
@@ -112,9 +127,7 @@ add_subdirectory(cli)
 # Test suite (odl_tb5_test)
 add_subdirectory(tests)
 
-# Optional: System daemon and tray application
-option(BUILD_DAEMON "Build OdinLink TB5 system daemon" ON)
-option(BUILD_TRAY   "Build OdinLink TB5 tray application" ON)
+# Optional: System daemon and tray application (options defined above)
 
 # Auto-disable if dependencies not found
 if(BUILD_DAEMON AND NOT _CHK_GLIB2_FOUND)
