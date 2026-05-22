@@ -102,8 +102,9 @@ endif()
 # Kernel module
 # =============================================================================
 
-# Build kernel module (odl_tb5.ko)
-add_custom_target(driver ALL
+# Build kernel module (odl_tb5.ko) — not part of ALL so CPack preinstall
+# doesn't try to rebuild it. Build explicitly with: make driver
+add_custom_target(driver
     COMMAND make all CC=${KERNEL_GCC}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/driver
     COMMENT "Building OdinLink TB5 kernel module (odl_tb5.ko)"

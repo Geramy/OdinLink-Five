@@ -8,6 +8,7 @@ mkdir build && cd build && cmake .. && make -j$(nproc)
 
 - **GCC version must match kernel build compiler** (`cat /proc/version`). CMake probes `gcc-15`, `gcc-14`, then `gcc`.
 - Kernel module (`driver/odl_tb5.ko`) is built via CMake custom target — not `add_subdirectory`. It runs `make` inside `driver/`.
+- Kernel module is NOT part of `ALL` (excluded from default `make`). Build explicitly with `make driver` or `cmake --build . --target driver`.
 - Daemon and tray are **auto-disabled** if dependency `pkg-config` checks fail. Run `cmake ..` to see which components are ON.
 - `gdbus-codegen` (from `libglib2.0-dev-bin`) is required at build time — generates D-Bus C bindings from XML.
 - .deb packages: `cpack` (individual), `make meta-packages` (bundled: minimal/server/desktop/full).

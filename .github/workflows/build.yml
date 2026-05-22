@@ -38,7 +38,9 @@ jobs:
         run: cd build && make -j$(nproc) driver 2>&1 | tail -10
       - name: Package .deb
         run: |
-          cd build && sudo cpack -G DEB -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=amd64 && ls *.deb
+          cd build
+          sudo cpack -G DEB -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=amd64 2>&1 | tail -20
+          ls *.deb
       - name: Upload packages
         uses: actions/upload-artifact@v4
         with:
