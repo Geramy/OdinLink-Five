@@ -11,6 +11,7 @@
  */
 
 #include "odl_tb5_verbs.h"
+#define _GNU_SOURCE
 #include <dlfcn.h>
 
 /* The struct _compat_ibv_port_attr definition from rdma-core:
@@ -124,41 +125,193 @@ static int odl_compat_destroy_comp_channel(
     return 0;
 }
 
-/* ── Symbol Interposition: ibv_query_device / ibv_query_port ─────────── */
-
-/* These dispatch through the internal verbs_context struct on modern
- * rdma-core, not ibv_context_ops. We intercept both via symbol interposition.
- * Note: ibv_query_port is a macro in verbs.h — undef it before defining. */
+/* ── Symbol Interposition ──────────────────────────────────────────────
+ *
+ * Modern rdma-core (≥ 50) dispatches many ibv_* functions through the
+ * internal verbs_context struct rather than ibv_context_ops. Since our
+ * standalone library creates ibv_context without a verbs_context wrapper,
+ * we intercept these functions via symbol interposition.
+ *
+ * For manual ODL contexts: dispatch directly to our implementation.
+ * For all other contexts: chain to the real libibverbs function.
+ *
+ * Note: some libibverbs functions are declared as static inline in verbs.h
+ * (poll_cq, post_send, post_recv, req_notify_cq). These dispatch through
+ * ibv_context_ops which we set up — no interposition needed. Others are
+ * real libibverbs symbols that need interposition. Undef them below. */
 #undef ibv_query_port
+#undef ibv_reg_mr
+#undef ibv_dereg_mr
+#undef ibv_create_cq
+#undef ibv_destroy_cq
+#undef ibv_create_qp
+#undef ibv_destroy_qp
+#undef ibv_modify_qp
+#undef ibv_query_qp
+#undef ibv_alloc_pd
+#undef ibv_dealloc_pd
+
+/* Helper: check if an ibv_context or ibv_pd/ibv_cq/ibv_qp belongs to us */
+static bool is_odl_ctx(struct ibv_context *ctx)
+{
+    return ctx && ctx->device && ctx->device->name &&
+           strncmp(ctx->device->name, "odl_tb5_", 8) == 0;
+}
+static bool is_odl_pd(struct ibv_pd *pd)
+{
+    return pd && is_odl_ctx(pd->context);
+}
+static bool is_odl_cq(struct ibv_cq *cq)
+{
+    return cq && is_odl_ctx(cq->context);
+}
+static bool is_odl_qp(struct ibv_qp *qp)
+{
+    return qp && is_odl_ctx(qp->context);
+}
+
+/* Resolve a real libibverbs function via dlsym(RTLD_NEXT) */
+/* Note: only use for functions that return int and have a matching signature.
+ * The typeof() approach fails on ARM64 with some GCC versions. */
+static void *resolve_verbs_func(const char *name)
+{
+    static void *(*dlsym_fn)(void *, const char *) = NULL;
+    if (!dlsym_fn) dlsym_fn = dlsym;
+    return dlsym_fn(RTLD_NEXT, name);
+}
+
+/* ── ibv_query_device ───────────────────────────────────────────────── */
 
 int ibv_query_device(struct ibv_context *context,
                       struct ibv_device_attr *device_attr)
 {
     ODL_TRACE_ENTRY();
-
-    /* Check if this is an OdinLink-Five context */
-    if (context && context->device &&
-        context->device->name &&
-        strncmp(context->device->name, "odl_tb5_", 8) == 0) {
+    if (is_odl_ctx(context))
         return odl_compat_query_device(context, device_attr);
-    }
-
-    /* Chain to real libibverbs */
-    static int (*real_fn)(struct ibv_context *, struct ibv_device_attr *);
-    if (!real_fn) {
-        real_fn = dlsym(RTLD_NEXT, "ibv_query_device");
-        if (!real_fn) return -ENOSYS;
-    }
-    return real_fn(context, device_attr);
+    int (*real_fn)(struct ibv_context *, struct ibv_device_attr *) = resolve_verbs_func("ibv_query_device");
+    return real_fn ? real_fn(context, device_attr) : -ENOSYS;
 }
 
-/* ── Symbol Interposition: ibv_query_port ───────────────────────────── */
+/* ── ibv_query_port ─────────────────────────────────────────────────── */
 
 int ibv_query_port(struct ibv_context *context, uint8_t port_num,
                     struct _compat_ibv_port_attr *port_attr)
 {
     ODL_TRACE_ENTRY();
-    return odl_compat_query_port(context, port_num, port_attr);
+    if (is_odl_ctx(context))
+        return odl_compat_query_port(context, port_num, port_attr);
+    int (*real_fn)(struct ibv_context *, uint8_t, struct _compat_ibv_port_attr *) = resolve_verbs_func("ibv_query_port");
+    return real_fn ? real_fn(context, port_num, port_attr) : -ENOSYS;
+}
+
+/* ── ibv_alloc_pd / ibv_dealloc_pd ──────────────────────────────────── */
+
+struct ibv_pd *ibv_alloc_pd(struct ibv_context *context)
+{
+    ODL_TRACE_ENTRY();
+    if (is_odl_ctx(context))
+        return odl_alloc_pd(context);
+    static struct ibv_pd *(*real_fn)(struct ibv_context *);
+    if (!real_fn) { real_fn = dlsym(RTLD_NEXT, "ibv_alloc_pd"); }
+    return real_fn ? real_fn(context) : NULL;
+}
+
+int ibv_dealloc_pd(struct ibv_pd *pd)
+{
+    ODL_TRACE_ENTRY();
+    if (is_odl_pd(pd))
+        return odl_dealloc_pd(pd);
+    int (*real_fn)(struct ibv_pd *) = resolve_verbs_func("ibv_dealloc_pd");
+    return real_fn ? real_fn(pd) : -ENOSYS;
+}
+
+/* ── ibv_reg_mr / ibv_dereg_mr ──────────────────────────────────────── */
+
+struct ibv_mr *ibv_reg_mr(struct ibv_pd *pd, void *addr, size_t length,
+                           int access)
+{
+    ODL_TRACE_ENTRY();
+    if (is_odl_pd(pd))
+        return odl_reg_mr(pd, addr, length, 0, access);
+    static struct ibv_mr *(*real_fn)(struct ibv_pd *, void *, size_t, int);
+    if (!real_fn) { real_fn = dlsym(RTLD_NEXT, "ibv_reg_mr"); }
+    return real_fn ? real_fn(pd, addr, length, access) : NULL;
+}
+
+int ibv_dereg_mr(struct ibv_mr *mr)
+{
+    ODL_TRACE_ENTRY();
+    if (mr && mr->context && is_odl_ctx(mr->context))
+        return odl_dereg_mr(mr);
+    int (*real_fn)(struct ibv_mr *) = resolve_verbs_func("ibv_dereg_mr");
+    return real_fn ? real_fn(mr) : -ENOSYS;
+}
+
+/* ── ibv_create_cq / ibv_destroy_cq ─────────────────────────────────── */
+
+struct ibv_cq *ibv_create_cq(struct ibv_context *context, int cqe,
+                              void *cq_context,
+                              struct ibv_comp_channel *channel,
+                              int comp_vector)
+{
+    ODL_TRACE_ENTRY();
+    if (is_odl_ctx(context))
+        return odl_create_cq(context, cqe, channel, comp_vector);
+    static struct ibv_cq *(*real_fn)(struct ibv_context *, int, void *,
+                                      struct ibv_comp_channel *, int);
+    if (!real_fn) { real_fn = dlsym(RTLD_NEXT, "ibv_create_cq"); }
+    return real_fn ? real_fn(context, cqe, cq_context, channel, comp_vector) : NULL;
+}
+
+int ibv_destroy_cq(struct ibv_cq *cq)
+{
+    ODL_TRACE_ENTRY();
+    if (is_odl_cq(cq))
+        return odl_destroy_cq(cq);
+    int (*real_fn)(struct ibv_cq *) = resolve_verbs_func("ibv_destroy_cq");
+    return real_fn ? real_fn(cq) : -ENOSYS;
+}
+
+/* ── ibv_create_qp / ibv_destroy_qp / ibv_modify_qp / ibv_query_qp ──── */
+
+struct ibv_qp *ibv_create_qp(struct ibv_pd *pd,
+                              struct ibv_qp_init_attr *attr)
+{
+    ODL_TRACE_ENTRY();
+    if (is_odl_pd(pd))
+        return odl_create_qp(pd, attr);
+    static struct ibv_qp *(*real_fn)(struct ibv_pd *, struct ibv_qp_init_attr *);
+    if (!real_fn) { real_fn = dlsym(RTLD_NEXT, "ibv_create_qp"); }
+    return real_fn ? real_fn(pd, attr) : NULL;
+}
+
+int ibv_destroy_qp(struct ibv_qp *qp)
+{
+    ODL_TRACE_ENTRY();
+    if (is_odl_qp(qp))
+        return odl_destroy_qp(qp);
+    int (*real_fn)(struct ibv_qp *) = resolve_verbs_func("ibv_destroy_qp");
+    return real_fn ? real_fn(qp) : -ENOSYS;
+}
+
+int ibv_modify_qp(struct ibv_qp *qp, struct ibv_qp_attr *attr,
+                   int attr_mask)
+{
+    ODL_TRACE_ENTRY();
+    if (is_odl_qp(qp))
+        return odl_modify_qp(qp, attr, attr_mask);
+    int (*real_fn)(struct ibv_qp *, struct ibv_qp_attr *, int) = resolve_verbs_func("ibv_modify_qp");
+    return real_fn ? real_fn(qp, attr, attr_mask) : -ENOSYS;
+}
+
+int ibv_query_qp(struct ibv_qp *qp, struct ibv_qp_attr *attr,
+                  int attr_mask, struct ibv_qp_init_attr *init_attr)
+{
+    ODL_TRACE_ENTRY();
+    if (is_odl_qp(qp))
+        return odl_query_qp(qp, attr, attr_mask, init_attr);
+    int (*real_fn)(struct ibv_qp *, struct ibv_qp_attr *, int, struct ibv_qp_init_attr *) = resolve_verbs_func("ibv_query_qp");
+    return real_fn ? real_fn(qp, attr, attr_mask, init_attr) : -ENOSYS;
 }
 
 /* ── Context Ops Table ─────────────────────────────────────────────── */

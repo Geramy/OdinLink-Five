@@ -83,20 +83,21 @@ static void *odl_qp_worker(void *arg)
         /* Poll the device fd until it signals TX readiness.
          * Since the fd is O_NONBLOCK, the stream_send ioctl will
          * return -EAGAIN immediately if frames aren't available.
-         * We poll first to avoid unnecessary ioctl calls. */
+         * We poll first to avoid unnecessary ioctl calls.
+         *
+         * If poll fails (e.g., bad fd in mock mode), fall back to
+         * immediate non-blocking send without waiting. */
         int poll_ret = odl_worker_poll_fd(qp, 5000);
-        if (poll_ret != 0) {
-            odl_logerr("worker poll failed for stream %u: %d",
-                        qp->stream_id, poll_ret);
-            /* Re-queue the WR and retry */
-            pthread_mutex_lock(&qp->sq_lock);
-            if (qp->sq_count < ODL_VERBS_SQ_DEPTH) {
-                qp->sq[qp->sq_tail] = wr;
-                qp->sq_tail = (qp->sq_tail + 1) % ODL_VERBS_SQ_DEPTH;
-                qp->sq_count++;
-            }
-            pthread_mutex_unlock(&qp->sq_lock);
-            continue;
+        if (poll_ret == -ETIMEDOUT) {
+            /* No response in 5s — try anyway, the send may still work */
+        } else if (poll_ret != 0) {
+            /* Bad fd or signal — try a non-blocking send directly,
+             * then back off if it fails. */
+            odl_logverbose("worker poll failed for stream %u: %d, "
+                            "falling back to direct send",
+                            qp->stream_id, poll_ret);
+            struct timespec ts = { .tv_sec = 0, .tv_nsec = 1000000 };
+            nanosleep(&ts, NULL);
         }
 
         /* Execute the send (non-blocking — fd is O_NONBLOCK) */

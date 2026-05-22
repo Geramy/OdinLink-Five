@@ -128,61 +128,16 @@ struct mock_handle {
     bool               streams_in_use[MOCK_STREAM_MAX];
 };
 
-/* ── Intercept odl_ibv_open_device ──────────────────────────────────── */
-
-/* The verbs provider's odl_ibv_open_device receives a struct ibv_device*
- * which it expects to be a struct odl_verbs_device* (embedding ibv_device
- * at offset 0 followed by dev_index). For the mock, the device pointer
- * comes from odl_find_tb5_device which returns a bare ibv_device, not
- * an odl_verbs_device. So odl_ibv_open_device would crash trying to
- * read dev_index.
- *
- * Our fix: intercept odl_ibv_open_device, construct a proper fake
- * odl_verbs_device on the stack, and chain to the real function. */
-
 /* The mock intercepts only odl_tb5_* API functions.
  * Device discovery uses the real verbs provider's scan (need /dev/odl_tb5_N).
  * The ibv_open_device path goes through the verbs provider which calls
- * odl_tb5_open — which we intercept. */
+ * odl_tb5_open — which we intercept.
+ *
+ * Note: we do NOT intercept odl_ibv_open_device — the verbs provider's
+ * version receives a valid struct odl_verbs_device* from its own scan,
+ * so it can safely cast it. */
 
-/* Match the verbs provider's odl_verbs_device layout */
-struct fake_odl_dev {
-    struct ibv_device base;
-    int               dev_index;
-    char              dev_path[64];
-    char              dev_name[32];
-    int               is_open;
-    void             *active_ctx;
-};
-
-struct ibv_context *odl_ibv_open_device(struct ibv_device *device)
-{
-    (void)device;
-
-    static struct ibv_context *(*real_fn)(struct ibv_device *) = NULL;
-    if (!real_fn) {
-        real_fn = dlsym(RTLD_NEXT, "odl_ibv_open_device");
-        if (!real_fn) {
-            errno = ENOSYS;
-            return NULL;
-        }
-    }
-
-    /* Construct a fake odl_verbs_device with dev_index=0 */
-    struct fake_odl_dev fake;
-    memset(&fake, 0, sizeof(fake));
-    fake.dev_index = 0;
-    strncpy(fake.dev_name, "odl_tb5_mock_0", sizeof(fake.dev_name) - 1);
-    strncpy(fake.dev_path, "/dev/odl_tb5_0", sizeof(fake.dev_path) - 1);
-    strncpy((char *)fake.base.name, "odl_tb5_mock_0",
-            sizeof(fake.base.name) - 1);
-    strncpy((char *)fake.base.dev_name, "odl_tb5_mock_0",
-            sizeof(fake.base.dev_name) - 1);
-    strncpy((char *)fake.base.dev_path, "/dev/odl_tb5_0",
-            sizeof(fake.base.dev_path) - 1);
-
-    return real_fn(&fake.base);
-}
+/* ── Shared memory management ───────────────────────────────────────── */
 
 /* ── Shared memory management ───────────────────────────────────────── */
 
