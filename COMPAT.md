@@ -29,6 +29,19 @@ protocol is determined by the NHI hardware. What differs is:
 
 | Capability | macOS (Apple) | Linux (OdinLink-Five) |
 |------------|---------------|----------------------|
+| Kernel driver | `AppleThunderboltRDMA.kext` — ships with macOS | `odl_tb5.ko` — custom module |
+| Userspace lib | `libthunderboltrdma.dylib` + `libibverbs` (Apple) | `libodl_tb5.so` |
+| Verbs provider | Built into `libthunderboltrdma.dylib` | `libodl_tb5-rdmav34.so` |
+| Device discovery | Via IOThunderboltXDomainService | `/dev/odl_tb5_N` scan |
+| `ibv_open_device` | ✅ Yes (Apple verbs) | ✅ Yes (standalone lib + plugin) |
+| `ibv_reg_mr` | ✅ Yes | ✅ Yes (host memory) |
+| `ibv_reg_dmabuf_mr` | ✅ Yes (hidden but real) | ✅ Yes (via Linux DMA-buf) |
+| `ibv_create_qp` | ✅ Yes | ✅ Yes (maps to streams) |
+| `ibv_post_send` | ✅ Yes | ✅ Yes (async via workqueue) |
+| `ibv_poll_cq` | ✅ Yes | ✅ Yes (eventfd-based) |
+| `ibv_devinfo` | ✅ Yes | ✅ Yes (via provider plugin) |
+| Zero-copy GPU | ✅ Metal → IOSurface dmabuf | ❌ Needs NCCL plugin |
+| No-cable test | ❌ Requires TB5 cable | ✅ `loopback=1` module param |
 | Kernel driver | ⚠️ **Not shipped** — `AppleThunderboltRDMA.kext` is a stub (no binary); `IORDMAFamily` missing on macOS 26.5 | ✅ `odl_tb5.ko` — working kernel module |
 | Userspace lib | ✅ `libthunderboltrdma.dylib` — full verbs library but no kernel target | ✅ `libodl_tb5.so` |
 | Verbs API | ⚠️ Will work if Apple ships the kernel side | ✅ `libodl_tb5-rdmav34.so` |
