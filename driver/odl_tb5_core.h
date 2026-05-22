@@ -376,6 +376,10 @@ int  odl_tb5_stream_recv(struct odl_tb5_stream *stream,
 int  odl_tb5_stream_wait_tx(struct odl_tb5_stream *stream, u32 timeout_ms);
 int  odl_tb5_stream_wait_rx(struct odl_tb5_stream *stream, u32 timeout_ms);
 
+/* Non-blocking availability checks (for poll/epoll support) */
+bool odl_tb5_stream_can_send(struct odl_tb5_stream *stream);
+bool odl_tb5_stream_can_recv(struct odl_tb5_stream *stream);
+
 /* ── TX drain worker ─────────────────────────────────────────────────── */
 
 void odl_tb5_tx_drain_work_fn(struct work_struct *work);
