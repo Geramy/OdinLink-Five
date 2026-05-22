@@ -33,6 +33,8 @@ mkdir build && cd build && cmake .. && make -j$(nproc)
 | Verbs provider (standalone) | `verbs/libodl_tb5_verbs.so` (symbol interposition) | MIT |
 | Verbs provider (plugin) | `verbs/libodl_tb5-rdmav34.so` (rdma-core provider) | MIT |
 
+Cross-platform compat docs at `COMPAT.md`. Apple's TB RDMA protocol ID = 64087 (0xFA57); OdinLink uses 0x4F4C. They must match for Mac↔Linux interop.
+
 - Library source: `lib/src/odl_tb5_{dev,xfer,peer,completion,stream}.c`, header at `lib/include/odl_tb5/odl_tb5.h`.
 - Kernel uapi header: `driver/uapi/odl_tb5_uapi.h` (ioctl defs shared with userspace).
 - Third-party headers (vendored): `third_party/rccl/net_v7.h`, `third_party/nccl/`.
