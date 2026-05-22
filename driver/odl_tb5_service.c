@@ -57,6 +57,7 @@ static int odl_tb5_probe(struct tb_service *svc,
 	dev->state = ODL_TB5_STATE_DISCONNECTED;
 
 	mutex_init(&dev->state_lock);
+	init_waitqueue_head(&dev->state_waitq);
 	spin_lock_init(&dev->tx.lock);
 	spin_lock_init(&dev->rx.lock);
 	init_waitqueue_head(&dev->tx.waitq);
@@ -147,6 +148,7 @@ static void odl_tb5_remove(struct tb_service *svc)
 	mutex_lock(&dev->state_lock);
 	saved_state = dev->state;
 	dev->state = ODL_TB5_STATE_DISCONNECTED;
+	wake_up_all(&dev->state_waitq);
 	mutex_unlock(&dev->state_lock);
 
 	if (saved_state == ODL_TB5_STATE_CONNECTED ||

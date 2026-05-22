@@ -249,6 +249,7 @@ struct odl_tb5_device {
 	/* Connection state */
 	enum odl_tb5_conn_state	state;
 	struct mutex		state_lock;
+	wait_queue_head_t	state_waitq;
 
 	/* Character device */
 	struct cdev		cdev;

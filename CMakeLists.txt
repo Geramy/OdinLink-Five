@@ -127,8 +127,10 @@ if(BUILD_TRAY AND (NOT _CHK_GTK3_FOUND OR NOT _CHK_APPIND_FOUND))
     set(BUILD_TRAY OFF)
 endif()
 
-if(BUILD_DAEMON AND BUILD_TRAY)
+if(BUILD_DAEMON)
     add_subdirectory(daemon)
+endif()
+if(BUILD_TRAY)
     add_subdirectory(tray)
 endif()
 

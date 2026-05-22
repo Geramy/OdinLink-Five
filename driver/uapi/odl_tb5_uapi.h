@@ -173,6 +173,9 @@ struct odl_tb5_buf_info {
 #define ODL_TB5_IOCTL_WAIT_TX          _IOR(ODL_TB5_IOCTL_MAGIC, 0x0B, struct odl_tb5_completion)
 #define ODL_TB5_IOCTL_WAIT_RX          _IOR(ODL_TB5_IOCTL_MAGIC, 0x0C, struct odl_tb5_completion)
 
+/* Block until peer reaches READY state (timeout in ms, 0 = forever) */
+#define ODL_TB5_IOCTL_WAIT_READY      _IOW(ODL_TB5_IOCTL_MAGIC, 0x0D, __u32)
+
 #define ODL_TB5_MMAP_TX_BUF0   0x00000000ULL
 #define ODL_TB5_MMAP_TX_BUF1   0x10000000ULL
 #define ODL_TB5_MMAP_RX_BUF0   0x20000000ULL

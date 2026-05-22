@@ -1,6 +1,6 @@
 # OdinLink Thunderbolt 5, Thunderbolt 4 & USB4 / USB4v2
 
-High-performance peer-to-peer DMA ring driver and toolchain for Thunderbolt 5, enabling GPU-to-GPU communication (via RCCL/NCCL), distributed file access, and performance testing between TB5-connected machines.
+High-performance peer-to-peer DMA ring driver and toolchain for Thunderbolt 5, enabling GPU-to-GPU communication for both AMD (RCCL) and NVIDIA (NCCL/CUDA/PyTorch), distributed file access, and performance testing between TB5-connected machines.
 ## FYI THIS IS A POC, MORE OF A HACK FOR NOW.
 
 # Tested Systems
@@ -448,4 +448,7 @@ GRUB_CMDLINE_LINUX_DEFAULT="quiet splash pcie_port_pm=off"
 
 ## License
 
-MIT
+Userspace components (library, plugins, CLI, daemon, tray): MIT
+
+Kernel driver (`odl_tb5.ko`): **GPL v2** — required because the driver uses
+GPL-only kernel symbols (DMA-buf, Thunderbolt NHI subsystem).

@@ -323,6 +323,7 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 
 	mutex_lock(&dev->state_lock);
 	dev->state = ODL_TB5_STATE_CONNECTED;
+	wake_up_all(&dev->state_waitq);
 	mutex_unlock(&dev->state_lock);
 
 	pr_info("OdinLink: connected to peer "
@@ -534,6 +535,7 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 
 	mutex_lock(&dev->state_lock);
 	dev->state = ODL_TB5_STATE_READY;
+	wake_up_all(&dev->state_waitq);
 	mutex_unlock(&dev->state_lock);
 
 	/*
@@ -585,6 +587,7 @@ static void odl_tb5_restart_work_fn(struct work_struct *work)
 
 	mutex_lock(&dev->state_lock);
 	dev->state = ODL_TB5_STATE_HANDSHAKE;
+	wake_up_all(&dev->state_waitq);
 	dev->login_sent = false;
 	dev->login_retries = 0;
 	mutex_unlock(&dev->state_lock);
@@ -638,6 +641,7 @@ int odl_tb5_proto_send_logout(struct odl_tb5_device *dev)
 
 	mutex_lock(&dev->state_lock);
 	dev->state = ODL_TB5_STATE_DISCONNECTED;
+	wake_up_all(&dev->state_waitq);
 	mutex_unlock(&dev->state_lock);
 
 	pr_info("OdinLink: logout sent to peer\n");
@@ -664,6 +668,7 @@ int odl_tb5_proto_init(struct odl_tb5_device *dev)
 
 	mutex_lock(&dev->state_lock);
 	dev->state = ODL_TB5_STATE_HANDSHAKE;
+	wake_up_all(&dev->state_waitq);
 	mutex_unlock(&dev->state_lock);
 
 	schedule_delayed_work(&dev->login_work, 0);

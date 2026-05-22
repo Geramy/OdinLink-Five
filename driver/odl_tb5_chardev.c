@@ -399,6 +399,27 @@ static long odl_tb5_ioctl(struct file *filp, unsigned int cmd,
 		spin_unlock(&dev->rx.lock);
 		return 0;
 
+	case ODL_TB5_IOCTL_WAIT_READY: {
+		uint32_t timeout_ms;
+		long ret;
+
+		if (copy_from_user(&timeout_ms, uarg, sizeof(timeout_ms)))
+			return -EFAULT;
+
+		if (timeout_ms == 0) {
+			ret = wait_event_interruptible(dev->state_waitq,
+				dev->state == ODL_TB5_STATE_READY);
+		} else {
+			ret = wait_event_interruptible_timeout(dev->state_waitq,
+				dev->state == ODL_TB5_STATE_READY,
+				msecs_to_jiffies(timeout_ms));
+			if (ret == 0)
+				return -ETIMEDOUT;
+		}
+
+		return ret < 0 ? ret : 0;
+	}
+
 	default:
 		return -ENOTTY;
 	}

@@ -22,11 +22,19 @@ int odl_tb5_wait_peer(odl_tb5_t handle, int timeout_ms)
 {
 	struct odl_tb5_peer_info info;
 	struct timespec ts_start, ts_now;
+	uint32_t ktimeout;
 	int ret;
 
 	if (!handle)
 		return -EINVAL;
 
+	/* Try kernel blocking wait first (eliminates userspace busy-poll) */
+	ktimeout = (timeout_ms > 0) ? (uint32_t)timeout_ms : 0;
+	ret = ioctl(handle->fd, ODL_TB5_IOCTL_WAIT_READY, &ktimeout);
+	if (ret == 0 || (ret < 0 && errno != ENOTTY))
+		return ret < 0 ? -errno : 0;
+
+	/* Fallback to polling if kernel doesn't support WAIT_READY ioctl */
 	clock_gettime(CLOCK_MONOTONIC, &ts_start);
 
 	for (;;) {
