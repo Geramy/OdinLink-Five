@@ -1,3 +1,3 @@
 obj-m := odl_tb5.o
-odl_tb5-y := odl_tb5_service.o odl_tb5_ring_dma.o odl_tb5_chardev.o odl_tb5_proto.o
+odl_tb5-y := odl_tb5_service.o odl_tb5_ring_dma.o odl_tb5_chardev.o odl_tb5_proto.o odl_tb5_loopback.o
 ccflags-y := -I$(src)/uapi

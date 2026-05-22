@@ -359,7 +359,7 @@ static rcclResult_t odl_tb5_closeSend(void *sendComm)
 	if (!comm)
 		return rcclSuccess;
 
-	if (__sync_sub_and_fetch(&comm->refcount, 1) == 0) {
+	if (__atomic_sub_fetch(&comm->refcount, 1, __ATOMIC_SEQ_CST) == 0) {
 		odl_tb5_close(comm->handle);
 		free(comm);
 	}

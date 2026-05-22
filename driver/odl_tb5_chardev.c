@@ -193,6 +193,42 @@ static long odl_tb5_ioctl(struct file *filp, unsigned int cmd,
 		return ret;
 	}
 
+	case ODL_TB5_IOCTL_STREAM_SEND_DMABUF: {
+		struct odl_tb5_stream_dmabuf req;
+		struct odl_tb5_stream *stream;
+		int ret;
+
+		if (copy_from_user(&req, uarg, sizeof(req)))
+			return -EFAULT;
+
+		stream = odl_tb5_stream_lookup(dev, req.stream_id);
+		if (!stream)
+			return -ENOENT;
+
+		ret = odl_tb5_submit_tx_dmabuf(dev, req.dmabuf_fd,
+					       req.offset, req.len);
+		odl_tb5_stream_put(stream);
+		return ret;
+	}
+
+	case ODL_TB5_IOCTL_STREAM_RECV_DMABUF: {
+		struct odl_tb5_stream_dmabuf req;
+		struct odl_tb5_stream *stream;
+		int ret;
+
+		if (copy_from_user(&req, uarg, sizeof(req)))
+			return -EFAULT;
+
+		stream = odl_tb5_stream_lookup(dev, req.stream_id);
+		if (!stream)
+			return -ENOENT;
+
+		ret = odl_tb5_submit_rx_dmabuf(dev, req.dmabuf_fd,
+					       req.offset, req.len);
+		odl_tb5_stream_put(stream);
+		return ret;
+	}
+
 	/* ── Legacy ioctls ──────────────────────────────────────────── */
 
 	case ODL_TB5_IOCTL_SEND: {
@@ -362,6 +398,27 @@ static long odl_tb5_ioctl(struct file *filp, unsigned int cmd,
 		dev->rx.swapped_since_post = true;
 		spin_unlock(&dev->rx.lock);
 		return 0;
+
+	case ODL_TB5_IOCTL_WAIT_READY: {
+		uint32_t timeout_ms;
+		long ret;
+
+		if (copy_from_user(&timeout_ms, uarg, sizeof(timeout_ms)))
+			return -EFAULT;
+
+		if (timeout_ms == 0) {
+			ret = wait_event_interruptible(dev->state_waitq,
+				dev->state == ODL_TB5_STATE_READY);
+		} else {
+			ret = wait_event_interruptible_timeout(dev->state_waitq,
+				dev->state == ODL_TB5_STATE_READY,
+				msecs_to_jiffies(timeout_ms));
+			if (ret == 0)
+				return -ETIMEDOUT;
+		}
+
+		return ret < 0 ? ret : 0;
+	}
 
 	default:
 		return -ENOTTY;

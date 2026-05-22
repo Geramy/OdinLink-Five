@@ -34,7 +34,8 @@
 #define class_create_compat(name) class_create((name))
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 8, 0)
+/* hrtimer_setup was added in kernel 6.11; provide fallback for older kernels */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
 static inline void hrtimer_setup(struct hrtimer *timer,
 				 enum hrtimer_restart (*fn)(struct hrtimer *),
 				 clockid_t clock, enum hrtimer_mode mode)
@@ -249,6 +250,7 @@ struct odl_tb5_device {
 	/* Connection state */
 	enum odl_tb5_conn_state	state;
 	struct mutex		state_lock;
+	wait_queue_head_t	state_waitq;
 
 	/* Character device */
 	struct cdev		cdev;
@@ -273,6 +275,16 @@ struct odl_tb5_device {
 		unsigned int		high_watermark;
 		unsigned int		low_watermark;
 	} tx_adaptive;
+
+	/* Software loopback mode (no NHI hardware needed) */
+	void *loopback_data;
+	int (*loopback_stream_send)(struct odl_tb5_device *dev,
+				    uint8_t stream_id, uint8_t dst_id,
+				    const void *data, uint32_t len);
+	int (*loopback_stream_recv)(struct odl_tb5_device *dev,
+				    uint8_t stream_id, void *buf,
+				    uint32_t buf_len, uint32_t *actual_len,
+				    bool block);
 
 	/* TX drain worker */
 	struct work_struct	tx_drain_work;
@@ -405,5 +417,11 @@ int  odl_tb5_proto_init(struct odl_tb5_device *dev);
 void odl_tb5_proto_exit(struct odl_tb5_device *dev);
 int  odl_tb5_proto_send_login(struct odl_tb5_device *dev);
 int  odl_tb5_proto_send_logout(struct odl_tb5_device *dev);
+
+/* ── Software loopback (testing without TB5 cable) ──────────────────── */
+
+extern int odl_loopback_count;
+int  odl_loopback_init(void);
+void odl_loopback_exit(void);
 
 #endif /* ODL_TB5_CORE_H */

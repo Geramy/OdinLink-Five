@@ -43,6 +43,13 @@ typedef int64_t  __s64;
 #define ODL_TB5_PROTOCOL_ID    0x4F4C
 #define ODL_TB5_PROTOCOL_VER   1
 
+/* Apple ThunderboltRDMA protocol — for cross-platform Mac ↔ Linux interop
+ * Source: AppleThunderboltRDMA.kext Info.plist IOPropertyMatch Protocol ID
+ * Changing ODL_TB5_PROTOCOL_ID to this value and registering the property
+ * dir under Apple's key allows XDomain discovery to match macOS peers. */
+#define ODL_TB5_PROTOCOL_ID_APPLE   64087   /* 0xFA57 */
+#define ODL_TB5_PROTOCOL_KEY_APPLE  "rdma"
+
 #define ODL_TB5_PDF_SOF_DATA   0x01
 #define ODL_TB5_PDF_EOF_DATA   0x02
 #define ODL_TB5_PDF_SOF_CTRL   0x01
@@ -172,6 +179,9 @@ struct odl_tb5_buf_info {
 #define ODL_TB5_IOCTL_SWAP_RX_BUF      _IO(ODL_TB5_IOCTL_MAGIC, 0x0A)
 #define ODL_TB5_IOCTL_WAIT_TX          _IOR(ODL_TB5_IOCTL_MAGIC, 0x0B, struct odl_tb5_completion)
 #define ODL_TB5_IOCTL_WAIT_RX          _IOR(ODL_TB5_IOCTL_MAGIC, 0x0C, struct odl_tb5_completion)
+
+/* Block until peer reaches READY state (timeout in ms, 0 = forever) */
+#define ODL_TB5_IOCTL_WAIT_READY      _IOW(ODL_TB5_IOCTL_MAGIC, 0x0D, __u32)
 
 #define ODL_TB5_MMAP_TX_BUF0   0x00000000ULL
 #define ODL_TB5_MMAP_TX_BUF1   0x10000000ULL
