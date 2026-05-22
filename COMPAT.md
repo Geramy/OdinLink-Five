@@ -125,9 +125,8 @@ would be in `driver/odl_tb5_proto.c` where `odl_tb5_login_msg` is
 sent and received.
 
 Apple's login format can be determined by:
-- Disassembling `libthunderboltrdma.dylib` from macOS dyld shared cache
-- Or running `ioreg -lw0 | grep -A20 ThunderboltRDMA` on a connected Mac
-- Or capturing XDomain packets between two Macs
+- Running `ioreg -lw0 | grep -A20 ThunderboltRDMA` on a connected Mac
+- Or capturing XDomain packets between two Macs with RDMA enabled
 
 ## Setup: macOS Side
 
@@ -258,25 +257,29 @@ verbs/src/odl_tb5_verbs_*.c   # Verbs provider
 verbs/VERBS_PROVIDER.md       # Verbs provider manual
 ```
 
-## Reverse-Engineered Apple ThunderboltRDMA Details
+## Apple ThunderboltRDMA Protocol Details
 
-Disassembled from `libthunderboltrdma.dylib` (dyld shared cache, macOS 26.5):
-
-| Property | Value |
-|----------|-------|
-| Protocol key | `"rdma"` |
-| Protocol ID | `64087` (`0xFA57`) |
-| Device modalias | `"rdma_device:*Ntbt*"` |
-| Provider name | `"thunderboltrdma"` |
-| Provider plugin | `libthunderboltrdma-rdmav34.so` |
-| IOKit service | `com.apple.AppleThunderboltRDMA` |
-| DMA interface | `IORDMAInterface` |
-| NHI ring size | Configurable, managed via `IORDMAFamily` |
+| Property | Value | Source |
+|----------|-------|--------|
+| Protocol key | `"rdma"` | AppleThunderboltRDMA.kext Info.plist |
+| Protocol ID | `64087` (`0xFA57`) | AppleThunderboltRDMA.kext Info.plist |
+| IOKit service | `com.apple.AppleThunderboltRDMA` | Provider binary |
+| DMA interface | `IORDMAInterface` | Provider binary |
 
 Login handler flexibility implemented in OdinLink:
 - Accepts login messages with just the XDomain header (40+ bytes)
 - Lenient response parsing in Apple protocol mode (skip UUID/type check)
 - `protocol=1` mode now ready for real hardware testing
+
+## Protocol Investigation (WIP)
+
+What's needed to complete Mac↔Linux compatibility:
+
+1. **Login message format**: The XDomain login payload OdinLink sends may
+   differ from what Apple expects. Connecting two Macs with RDMA enabled
+   and capturing the XDomain packets would reveal the exact format.
+2. **Response format**: Apple's login response may use different fields.
+3. **Hop ID negotiation**: How TX/RX hop IDs are exchanged between peers.
 
 ### What's unknown (needs real hardware test)
 
