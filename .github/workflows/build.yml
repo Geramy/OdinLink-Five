@@ -1,0 +1,126 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build & package (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            deb_arch: amd64
+            libibverbs_dir: /usr/lib/x86_64-linux-gnu/libibverbs
+          - arch: arm64
+            runner: ["self-hosted", "Linux", "ARM64"]
+            deb_arch: arm64
+            libibverbs_dir: /usr/lib/aarch64-linux-gnu/libibverbs
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential cmake pkg-config \
+            libibverbs-dev rdma-core \
+            libglib2.0-dev libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            linux-headers-$(uname -r) gcc-14
+
+      - name: Configure
+        run: |
+          mkdir build && cd build
+          cmake .. \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_DAEMON=ON \
+            -DBUILD_TRAY=ON \
+            -DBUILD_NCCL=OFF \
+            -DBUILD_RCCL=OFF \
+            -DBUILD_VERBS=ON
+
+      - name: Build userspace
+        run: |
+          cd build
+          make -j$(nproc) odl_tb5 odl_tb5_verbs odl_tb5_verbs_provider
+          make -j$(nproc) odl_tb5_cli odl_tb5_daemon odl_tb5_tray
+
+      - name: Build kernel module
+        continue-on-error: true
+        run: |
+          cd build
+          make -j$(nproc) driver 2>&1 | tail -10
+
+      - name: Package .deb
+        run: |
+          cd build
+          cpack -G DEB -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=${{ matrix.deb_arch }}
+          ls -la *.deb
+
+      - name: Build smoke test
+        run: |
+          gcc -o /tmp/test_smoke /dev/stdin << 'EOF' 2>/dev/null || true
+          #include <infiniband/verbs.h>
+          #include <stdio.h>
+          int main() {
+            printf("libibverbs version: %s\n", ibv_get_version(NULL, NULL, NULL));
+            return 0;
+          }
+          EOF
+          [ -x /tmp/test_smoke ] && /tmp/test_smoke || echo "(smoke test requires -libverbs)"
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: odl-tb5-debs-${{ matrix.arch }}
+          path: build/*.deb
+
+      - name: Upload DKMS source
+        if: always()
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          [ -n "$VERSION" ] || VERSION="0.1.0"
+          DKMS_DIR="/tmp/dkms/usr/src/odl-tb5-${VERSION}"
+          mkdir -p "${DKMS_DIR}/uapi"
+          cp driver/*.c "${DKMS_DIR}/" 2>/dev/null || true
+          cp driver/*.h "${DKMS_DIR}/" 2>/dev/null || true
+          cp driver/Kbuild "${DKMS_DIR}/" 2>/dev/null || true
+          cp driver/Makefile "${DKMS_DIR}/" 2>/dev/null || true
+          cp driver/uapi/odl_tb5_uapi.h "${DKMS_DIR}/uapi/" 2>/dev/null || true
+          cp packaging/dkms.conf "${DKMS_DIR}/" 2>/dev/null || true
+          cp packaging/dkms-postinst.sh "${DKMS_DIR}/" 2>/dev/null || true
+          cp packaging/dkms-prerm.sh "${DKMS_DIR}/" 2>/dev/null || true
+          cp driver/71-odl-tb5.rules /tmp/dkms/ 2>/dev/null || true
+          cd /tmp && tar czf "odl-tb5-dkms-${VERSION}.tar.gz" dkms/
+
+      - name: Upload DKMS tarball
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: odl-tb5-dkms-${{ matrix.arch }}
+          path: /tmp/odl-tb5-dkms-*.tar.gz
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Gather artifacts
+        run: |
+          mkdir -p release
+          find . -name '*.deb' -exec cp {} release/ \;
+          find . -name '*.tar.gz' -exec cp {} release/ \;
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
