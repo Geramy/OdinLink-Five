@@ -180,6 +180,17 @@ static void *resolve_verbs_func(const char *name)
     return dlsym_fn(RTLD_NEXT, name);
 }
 
+/* ── ibv_close_device ──────────────────────────────────────────────── */
+
+int ibv_close_device(struct ibv_context *context)
+{
+    ODL_TRACE_ENTRY();
+    if (is_odl_ctx(context))
+        return odl_free_context(context);
+    int (*real_fn)(struct ibv_context *) = resolve_verbs_func("ibv_close_device");
+    return real_fn ? real_fn(context) : -ENOSYS;
+}
+
 /* ── ibv_query_device ───────────────────────────────────────────────── */
 
 int ibv_query_device(struct ibv_context *context,
