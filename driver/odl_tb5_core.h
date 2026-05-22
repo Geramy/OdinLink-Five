@@ -418,9 +418,10 @@ void odl_tb5_proto_exit(struct odl_tb5_device *dev);
 int  odl_tb5_proto_send_login(struct odl_tb5_device *dev);
 int  odl_tb5_proto_send_logout(struct odl_tb5_device *dev);
 
-/* ── Software loopback (testing without TB5 cable) ──────────────────── */
+/* ── Module parameters (defined in odl_tb5_service.c) ───────────────── */
 
 extern int odl_loopback_count;
+extern int odl_protocol_mode;
 int  odl_loopback_init(void);
 void odl_loopback_exit(void);
 
