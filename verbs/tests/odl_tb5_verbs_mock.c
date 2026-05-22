@@ -507,8 +507,16 @@ int odl_tb5_stream_send(void *handle, uint8_t stream_id,
     struct mock_stream *streams = h->side == 0 ?
         h->shm->streams_b_to_a : h->shm->streams_a_to_b;
 
-    if (stream_id >= MOCK_STREAM_MAX || !streams[stream_id].in_use)
+    if (stream_id >= MOCK_STREAM_MAX)
         return -ENOENT;
+
+    /* Auto-activate the target stream if not yet active.
+     * This handles the case where the send side opened the stream
+     * but the receive side hasn't. */
+    if (!streams[stream_id].in_use) {
+        streams[stream_id].in_use = true;
+        streams[stream_id].stream_id = stream_id;
+    }
 
     return mock_ring_push(&streams[stream_id].rx_ring,
                            data, len, stream_id, 0);
