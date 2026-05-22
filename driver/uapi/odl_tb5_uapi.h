@@ -43,6 +43,13 @@ typedef int64_t  __s64;
 #define ODL_TB5_PROTOCOL_ID    0x4F4C
 #define ODL_TB5_PROTOCOL_VER   1
 
+/* Apple ThunderboltRDMA protocol — for cross-platform Mac ↔ Linux interop
+ * Source: AppleThunderboltRDMA.kext Info.plist IOPropertyMatch Protocol ID
+ * Changing ODL_TB5_PROTOCOL_ID to this value and registering the property
+ * dir under Apple's key allows XDomain discovery to match macOS peers. */
+#define ODL_TB5_PROTOCOL_ID_APPLE   64087   /* 0xFA57 */
+#define ODL_TB5_PROTOCOL_KEY_APPLE  "rdma"
+
 #define ODL_TB5_PDF_SOF_DATA   0x01
 #define ODL_TB5_PDF_EOF_DATA   0x02
 #define ODL_TB5_PDF_SOF_CTRL   0x01

@@ -26,6 +26,15 @@ module_param_named(loopback, odl_loopback_count, int, 0444);
 MODULE_PARM_DESC(loopback,
 	"Create N software loopback devices (max 16, default 0; no NHI hw needed)");
 
+static int odl_protocol_mode = 0;
+module_param_named(protocol, odl_protocol_mode, int, 0444);
+MODULE_PARM_DESC(protocol,
+	"XDomain protocol mode: 0=OdinLink (0x4F4C, default), 1=Apple (0xFA57)");
+
+/* Apple protocol uses its own property key and registers as an alternate
+ * service so macOS ThunderboltRDMA can discover us via XDomain matching. */
+static struct tb_property_dir *odl_tb5_apple_property_dir;
+
 const uuid_t odl_tb5_proto_uuid =
 	UUID_INIT(0x4f444c4e, 0x4b54, 0x4235,
 		  0x4f, 0x44, 0x49, 0x4e, 0x4c, 0x49, 0x4e, 0x4b);
@@ -34,6 +43,7 @@ static struct tb_property_dir *odl_tb5_property_dir;
 
 static const struct tb_service_id odl_tb5_ids[] = {
 	{ TB_SERVICE(ODL_TB5_PROTOCOL_KEY, ODL_TB5_PROTOCOL_ID) },
+	{ TB_SERVICE(ODL_TB5_PROTOCOL_KEY_APPLE, ODL_TB5_PROTOCOL_ID_APPLE) },
 	{ }
 };
 MODULE_DEVICE_TABLE(tbsvc, odl_tb5_ids);
@@ -245,8 +255,17 @@ static int __init odl_tb5_init(void)
 		goto err_chardev;
 	}
 
+	/* Choose protocol ID based on mode */
+	u32 protocol_id = ODL_TB5_PROTOCOL_ID;
+	if (odl_protocol_mode == 1)
+		protocol_id = ODL_TB5_PROTOCOL_ID_APPLE;
+
+	const char *protocol_key = ODL_TB5_PROTOCOL_KEY;
+	if (odl_protocol_mode == 1)
+		protocol_key = ODL_TB5_PROTOCOL_KEY_APPLE;
+
 	ret = tb_property_add_immediate(odl_tb5_property_dir, "prtcid",
-					ODL_TB5_PROTOCOL_ID);
+					protocol_id);
 	if (ret)
 		goto err_dir;
 
@@ -263,10 +282,34 @@ static int __init odl_tb5_init(void)
 	if (ret)
 		goto err_dir;
 
-	ret = tb_register_property_dir(ODL_TB5_PROTOCOL_KEY,
+	ret = tb_register_property_dir(protocol_key,
 				       odl_tb5_property_dir);
 	if (ret)
 		goto err_dir;
+
+	/* In Apple mode, also register under OdinLink's original key so we
+	 * can still talk to other OdinLink nodes. Need a separate directory
+	 * since the same dir can't be registered under two keys. */
+	if (odl_protocol_mode == 1) {
+		odl_tb5_apple_property_dir =
+			tb_property_create_dir(&odl_tb5_proto_uuid);
+		if (!odl_tb5_apple_property_dir) {
+			ret = -ENOMEM;
+			goto err_dir;
+		}
+		tb_property_add_immediate(odl_tb5_apple_property_dir,
+					  "prtcid", ODL_TB5_PROTOCOL_ID);
+		tb_property_add_immediate(odl_tb5_apple_property_dir,
+					  "prtcvers", ODL_TB5_PROTOCOL_VER);
+		tb_property_add_immediate(odl_tb5_apple_property_dir,
+					  "prtcrevs", 1);
+		tb_property_add_immediate(odl_tb5_apple_property_dir,
+					  "prtcstns", 0);
+		ret = tb_register_property_dir(ODL_TB5_PROTOCOL_KEY,
+					odl_tb5_apple_property_dir);
+		if (ret)
+			goto err_dir;
+	}
 
 	odl_tb5_proto_register();
 
@@ -282,6 +325,10 @@ static int __init odl_tb5_init(void)
 err_proto:
 	odl_tb5_proto_unregister();
 err_dir:
+	if (odl_tb5_apple_property_dir) {
+		tb_property_free_dir(odl_tb5_apple_property_dir);
+		odl_tb5_apple_property_dir = NULL;
+	}
 	tb_property_free_dir(odl_tb5_property_dir);
 err_chardev:
 	odl_tb5_chardev_exit();
@@ -331,9 +378,20 @@ static void __exit odl_tb5_exit(void)
 
 	tb_unregister_service_driver(&odl_tb5_driver);
 	odl_tb5_proto_unregister();
-	tb_unregister_property_dir(ODL_TB5_PROTOCOL_KEY,
-				   odl_tb5_property_dir);
+
+	/* Unregister property dirs: main dir under its protocol key,
+	 * and the Apple backup dir under OdinLink key if dual-mode */
+	const char *main_key = (odl_protocol_mode == 1)
+		? ODL_TB5_PROTOCOL_KEY_APPLE : ODL_TB5_PROTOCOL_KEY;
+
+	tb_unregister_property_dir(main_key, odl_tb5_property_dir);
 	tb_property_free_dir(odl_tb5_property_dir);
+
+	if (odl_tb5_apple_property_dir) {
+		tb_unregister_property_dir(ODL_TB5_PROTOCOL_KEY,
+					   odl_tb5_apple_property_dir);
+		tb_property_free_dir(odl_tb5_apple_property_dir);
+	}
 out:
 	odl_tb5_chardev_exit();
 	ida_destroy(&odl_tb5_ida);

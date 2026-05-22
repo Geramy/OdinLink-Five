@@ -88,35 +88,46 @@ The protocol IDs MUST match for XDomain discovery to work. Options:
 | **B: Implement both simultaneously** | OdinLink accepts both protocol IDs | ✅ Linux ↔ both |
 | **C: Gateway mode** | Linux bridge between Apple protocol and OdinLink | ⚠️ Complex |
 
-### Option A (Recommended): Make OdinLink use Apple's protocol
+## Making Them Talk
 
-In `driver/odl_tb5_service.c`, change:
+The protocol IDs MUST match for XDomain discovery to work. OdinLink-Five
+now supports a `protocol` module parameter:
 
-```c
-// Current (OdinLink protocol):
-tb_property_add_immediate(dir, "prtcid", 0x4F4C);
+```bash
+# Default: talk to other OdinLink nodes (protocol ID 0x4F4C)
+sudo insmod driver/odl_tb5.ko
 
-// Change to (Apple protocol):
-tb_property_add_immediate(dir, "prtcid", 64087);
+# Apple mode: talk to macOS Thunderbolt RDMA (protocol ID 64087 / 0xFA57)
+sudo insmod driver/odl_tb5.ko protocol=1
 ```
 
-Also need to match Apple's login message format. Apple's exact XDomain
-message format can be determined by analyzing the `libthunderboltrdma.dylib`
-binary on macOS using Ghidra.
+In Apple mode (protocol=1), the driver:
+- Advertises Apple's protocol ID `64087` under property key `"rdma"`
+- Also advertises OdinLink's original protocol under `"odinlink"`
+- Responds to XDomain discovery from either side
+- The login message format may still differ — see below
 
-### Option B: Dual-protocol handshake
+### Option A: Apple protocol mode (easiest)
 
-Modify the kernel module to accept connections on BOTH protocol IDs:
-
-```c
-// In the XDomain property directory, advertise both:
-tb_property_add_immediate(dir, "prtcid", 64087);       // Apple
-tb_property_add_immediate(dir, "odinlink-prtcid", 0x4F4C);  // OdinLink
+```bash
+sudo insmod driver/odl_tb5.ko protocol=1
 ```
 
-The handshake handler would recognize incoming logins from either
-protocol and respond appropriately. This lets the Linux side connect
-to either a Mac (Apple protocol) or another Linux box (OdinLink protocol).
+The driver advertises Apple's `prtcid=64087` under `"rdma"` key, AND
+advertises OdinLink's `prtcid=0x4F4C` under `"odinlink"` key.
+This lets it connect to both macOS and other OdinLink nodes.
+
+### Option B: Modify login message format
+
+The XDomain login message format might differ between OdinLink and
+Apple's ThunderboltRDMA. If ODL's login is rejected by macOS, the fix
+would be in `driver/odl_tb5_proto.c` where `odl_tb5_login_msg` is
+sent and received.
+
+Apple's login format can be determined by:
+- Disassembling `libthunderboltrdma.dylib` from macOS dyld shared cache
+- Or running `ioreg -lw0 | grep -A20 ThunderboltRDMA` on a connected Mac
+- Or capturing XDomain packets between two Macs
 
 ## Setup: macOS Side
 
