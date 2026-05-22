@@ -1,17 +1,15 @@
 /*
  * OdinLink Verbs Provider — Queue Pairs
  *
- * Full async Queue Pair implementation:
+ * Async Queue Pair with poll()-based non-blocking I/O:
  *
  * ibv_post_send → enqueue to SQ → return immediately
- * Worker thread → drain SQ → call odl_tb5_stream_send/send_dmabuf
- *              → post WC to CQ → signal eventfd
+ * Worker thread → poll(fd, EPOLLOUT) → dequeue WR → ioctl(nonblock)
+ *              → on -EAGAIN → re-enqueue WR → poll again
+ *              → on success → post WC to CQ → signal eventfd
  *
- * ibv_post_recv → synchronous (blocking odl_tb5_stream_recv)
- *              → post WC to recv CQ
- *
- * When the kernel driver gains true async support, the worker thread
- * can be replaced with direct non-blocking ioctl submission.
+ * The device fd is set to O_NONBLOCK at context init time, so all
+ * stream_send/recv ioctls return -EAGAIN instead of blocking.
  */
 
 #include "odl_tb5_verbs.h"
@@ -19,8 +17,43 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <poll.h>
 
 /* ── Worker Thread ──────────────────────────────────────────────────── */
+
+static int odl_worker_poll_fd(struct odl_verbs_qp *qp, int timeout_ms)
+{
+    struct odl_verbs_context *ctx = qp->ctx;
+    int dev_fd = ctx->base.cmd_fd;
+    if (dev_fd < 0) return -EBADF;
+
+    struct pollfd pfd = {
+        .fd     = dev_fd,
+        .events = POLLOUT,
+    };
+
+    int ret = poll(&pfd, 1, timeout_ms);
+    if (ret < 0) return -errno;
+    if (ret == 0) return -ETIMEDOUT;
+    return (pfd.revents & POLLOUT) ? 0 : -EAGAIN;
+}
+
+/* Look up a dmabuf fd by lkey. Returns -1 if not a dmabuf MR. */
+static int odl_lookup_dmabuf(struct odl_verbs_context *ctx, uint32_t lkey)
+{
+    if (!lkey) return -1;
+    pthread_mutex_lock(&ctx->mr_lock);
+    for (int i = 0; i < ctx->nmrs; i++) {
+        struct odl_verbs_mr *mr = ctx->mrs[i];
+        if (mr && mr->base.lkey == lkey && mr->mr_type == 1) {
+            int fd = mr->dmabuf_fd;
+            pthread_mutex_unlock(&ctx->mr_lock);
+            return fd;
+        }
+    }
+    pthread_mutex_unlock(&ctx->mr_lock);
+    return -1;
+}
 
 static void *odl_qp_worker(void *arg)
 {
@@ -30,7 +63,6 @@ static void *odl_qp_worker(void *arg)
 
     while (qp->worker_running) {
         struct ibv_send_wr *wr = NULL;
-        bool have_work = false;
 
         /* Dequeue one work request */
         pthread_mutex_lock(&qp->sq_lock);
@@ -38,72 +70,75 @@ static void *odl_qp_worker(void *arg)
             wr = qp->sq[qp->sq_head];
             qp->sq_head = (qp->sq_head + 1) % ODL_VERBS_SQ_DEPTH;
             qp->sq_count--;
-            have_work = true;
         }
         pthread_mutex_unlock(&qp->sq_lock);
 
-        if (!have_work) {
-            struct timespec ts = { .tv_sec = 0, .tv_nsec = 50000 };
-            nanosleep(&ts, NULL);
+        if (!wr) {
+            /* No work — poll for TX readiness with 100ms timeout.
+             * This also yields the CPU when idle instead of busy-waiting. */
+            odl_worker_poll_fd(qp, 100);
             continue;
         }
 
-        ODL_ASSERT(wr, "null wr from SQ");
+        /* Poll the device fd until it signals TX readiness.
+         * Since the fd is O_NONBLOCK, the stream_send ioctl will
+         * return -EAGAIN immediately if frames aren't available.
+         * We poll first to avoid unnecessary ioctl calls. */
+        int poll_ret = odl_worker_poll_fd(qp, 5000);
+        if (poll_ret != 0) {
+            odl_logerr("worker poll failed for stream %u: %d",
+                        qp->stream_id, poll_ret);
+            /* Re-queue the WR and retry */
+            pthread_mutex_lock(&qp->sq_lock);
+            if (qp->sq_count < ODL_VERBS_SQ_DEPTH) {
+                qp->sq[qp->sq_tail] = wr;
+                qp->sq_tail = (qp->sq_tail + 1) % ODL_VERBS_SQ_DEPTH;
+                qp->sq_count++;
+            }
+            pthread_mutex_unlock(&qp->sq_lock);
+            continue;
+        }
 
-        int ret = -EINVAL;
+        /* Execute the send (non-blocking — fd is O_NONBLOCK) */
+        int ret;
         struct ibv_wc wc;
         memset(&wc, 0, sizeof(wc));
 
         if (wr->num_sge > 0) {
             struct ibv_sge *sge = &wr->sg_list[0];
-            bool use_dmabuf = false;
-            int dmabuf_fd = -1;
+            int dmabuf_fd = odl_lookup_dmabuf(ctx, sge->lkey);
 
-            /* Check if the SGE's lkey points to a dmabuf MR */
-            if (sge->lkey != 0) {
-                pthread_mutex_lock(&ctx->mr_lock);
-                for (int i = 0; i < ctx->nmrs && !use_dmabuf; i++) {
-                    struct odl_verbs_mr *mr = ctx->mrs[i];
-                    if (mr && mr->base.lkey == sge->lkey &&
-                        mr->mr_type == 1) {
-                        dmabuf_fd = mr->dmabuf_fd;
-                        use_dmabuf = true;
-                    }
-                }
-                pthread_mutex_unlock(&ctx->mr_lock);
-            }
-
-            if (use_dmabuf && dmabuf_fd >= 0) {
+            if (dmabuf_fd >= 0) {
                 ret = odl_tb5_stream_send_dmabuf(
                     h, qp->stream_id, 0,
                     dmabuf_fd, 0, sge->length);
-
-                odl_logverbose("send_dmabuf: stream=%u fd=%d len=%u -> %d",
-                                qp->stream_id, dmabuf_fd, sge->length, ret);
             } else {
                 void *data = (void *)(uintptr_t)sge->addr;
                 ret = odl_tb5_stream_send(
                     h, qp->stream_id, 0,
                     data, sge->length);
-
-                odl_logverbose("stream_send: stream=%u len=%u -> %d",
-                                qp->stream_id, sge->length, ret);
             }
 
-            if (ret == 0) {
-                wc.status   = IBV_WC_SUCCESS;
-                wc.byte_len = sge->length;
-                wc.opcode   = IBV_WC_SEND;
-                wc.qp_num   = qp->base.qp_num;
-            } else {
-                wc.status   = IBV_WC_GENERAL_ERR;
-                wc.wc_flags = 0;
-                wc.byte_len = 0;
-                wc.opcode   = IBV_WC_SEND;
-                wc.qp_num   = qp->base.qp_num;
-                odl_logerr("send failed: stream=%u ret=%d",
-                            qp->stream_id, ret);
+            if (ret == -EAGAIN) {
+                /* Non-blocking send couldn't proceed — re-queue and retry */
+                odl_logverbose("send EAGAIN stream=%u, re-queueing", qp->stream_id);
+                pthread_mutex_lock(&qp->sq_lock);
+                if (qp->sq_count < ODL_VERBS_SQ_DEPTH) {
+                    qp->sq[qp->sq_tail] = wr;
+                    qp->sq_tail = (qp->sq_tail + 1) % ODL_VERBS_SQ_DEPTH;
+                    qp->sq_count++;
+                }
+                pthread_mutex_unlock(&qp->sq_lock);
+                continue;
             }
+
+            wc.status   = (ret == 0) ? IBV_WC_SUCCESS : IBV_WC_GENERAL_ERR;
+            wc.byte_len = (ret == 0) ? sge->length : 0;
+            wc.opcode   = IBV_WC_SEND;
+            wc.qp_num   = qp->base.qp_num;
+
+            if (ret != 0)
+                odl_logerr("send failed stream=%u ret=%d", qp->stream_id, ret);
         } else {
             /* Zero-length send */
             wc.status   = IBV_WC_SUCCESS;
@@ -292,13 +327,14 @@ int odl_post_send(struct ibv_qp *qp, struct ibv_send_wr *wr,
     return 0;
 }
 
-/* ── Post Recv (synchronous) ────────────────────────────────────────── */
+/* ── Post Recv (async via poll + non-blocking) ──────────────────────── */
 
 int odl_post_recv(struct ibv_qp *qp, struct ibv_recv_wr *wr,
                    struct ibv_recv_wr **bad_wr)
 {
     struct odl_verbs_qp *oqp = odl_qp_from_ibv(qp);
     struct odl_verbs_context *ctx = oqp->ctx;
+    int dev_fd = ctx->base.cmd_fd;
     *bad_wr = NULL;
 
     while (wr) {
@@ -307,26 +343,47 @@ int odl_post_recv(struct ibv_qp *qp, struct ibv_recv_wr *wr,
             uint8_t src_id = 0;
             uint32_t actual = 0;
 
-            /* Blocking recv */
+            /* Poll for RX readiness (up to 5 second timeout).
+             * Since the fd is O_NONBLOCK, stream_recv returns -EAGAIN
+             * immediately if no data is available. */
+            if (dev_fd >= 0) {
+                struct pollfd pfd = {
+                    .fd     = dev_fd,
+                    .events = POLLIN,
+                };
+                int pr = poll(&pfd, 1, 5000);
+                if (pr <= 0 || !(pfd.revents & POLLIN)) {
+                    *bad_wr = wr;
+                    return pr == 0 ? -ETIMEDOUT : -EAGAIN;
+                }
+            }
+
+            /* Non-blocking recv */
             int ret = odl_tb5_stream_recv(
                 ctx->handle, oqp->stream_id,
                 (void *)(uintptr_t)sge->addr,
                 sge->length,
                 &src_id, &actual);
 
+            if (ret == -EAGAIN) {
+                /* No data yet despite poll saying ready — rare race.
+                 * Return the bad WR and let the caller retry. */
+                *bad_wr = wr;
+                return -EAGAIN;
+            }
+
             struct ibv_wc wc;
             memset(&wc, 0, sizeof(wc));
             wc.qp_num   = qp->qp_num;
             wc.src_qp   = src_id;
             wc.opcode   = IBV_WC_RECV;
-    wc.slid     = 0;
-    wc.sl       = 0;
-    wc.vendor_err = 0;
+            wc.slid     = 0;
+            wc.sl       = 0;
+            wc.vendor_err = 0;
 
             if (ret == 0) {
                 wc.status   = IBV_WC_SUCCESS;
                 wc.byte_len = actual;
-                odl_logverbose("recv: stream=%u len=%u", oqp->stream_id, actual);
             } else {
                 wc.status   = IBV_WC_GENERAL_ERR;
                 wc.byte_len = 0;

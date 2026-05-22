@@ -11,6 +11,7 @@
 #include <string.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <fcntl.h>
 
 /* ── Chaining to real libibverbs ────────────────────────────────────── */
 
@@ -75,6 +76,17 @@ struct ibv_context *odl_ibv_open_device(struct ibv_device *device)
         free(ctx);
         errno = ENODEV;
         return NULL;
+    }
+
+    /* Set non-blocking mode on the device fd so stream_send/recv
+     * ioctls return -EAGAIN instead of blocking. The verbs provider
+     * uses poll() + non-blocking ioctls for true async behavior. */
+    int dev_fd = odl_tb5_get_fd(handle);
+    if (dev_fd >= 0) {
+        int flags = fcntl(dev_fd, F_GETFL, 0);
+        if (flags >= 0)
+            fcntl(dev_fd, F_SETFL, flags | O_NONBLOCK);
+        ctx->base.cmd_fd = dev_fd;
     }
 
     /* Initialize context fields */
