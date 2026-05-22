@@ -155,6 +155,7 @@ install(FILES
     driver/odl_tb5_chardev.c
     driver/odl_tb5_ring_dma.c
     driver/odl_tb5_proto.c
+    driver/odl_tb5_loopback.c
     driver/odl_tb5_core.h
     driver/Kbuild
     driver/Makefile
