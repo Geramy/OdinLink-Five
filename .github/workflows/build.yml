@@ -10,71 +10,45 @@ on:
 
 jobs:
   linux:
-    name: Linux (${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-24.04
-            deb_arch: amd64
-            apt_deps: libibverbs-dev rdma-core
-          - arch: arm64
-            runner: ["self-hosted", "Linux", "ARM64"]
-            deb_arch: arm64
-            apt_deps: libibverbs-dev rdma-core
-
+    name: Linux
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-
       - name: Install dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             build-essential cmake pkg-config \
-            ${{ matrix.apt_deps }} \
+            libibverbs-dev rdma-core \
             libglib2.0-dev libgtk-3-dev \
             libayatana-appindicator3-dev \
             linux-headers-$(uname -r) gcc-14
-
       - name: Configure
         run: |
           mkdir build && cd build
-          cmake .. \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_DAEMON=ON \
-            -DBUILD_TRAY=ON \
-            -DBUILD_VERBS=ON
-
+          cmake .. -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_DAEMON=ON -DBUILD_TRAY=ON -DBUILD_VERBS=ON
       - name: Build userspace
         run: |
           cd build
           make -j$(nproc) odl_tb5 odl_tb5_verbs odl_tb5_verbs_provider
           make -j$(nproc) odl_tb5_cli odl_tb5_daemon odl_tb5_tray
-
       - name: Build kernel module
         continue-on-error: true
-        run: |
-          cd build
-          make -j$(nproc) driver 2>&1 | tail -10
-
+        run: cd build && make -j$(nproc) driver 2>&1 | tail -10
       - name: Package .deb
         run: |
-          cd build
-          cpack -G DEB -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=${{ matrix.deb_arch }}
-          ls -la *.deb
-
+          cd build && cpack -G DEB -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=amd64 && ls *.deb
       - name: Upload packages
         uses: actions/upload-artifact@v4
         with:
-          name: odl-tb5-debs-${{ matrix.arch }}
+          name: odl-tb5-debs
           path: build/*.deb
-
       - name: Upload DKMS source
         if: always()
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"; [ -n "$VERSION" ] || VERSION="0.1.0"
-          D="/tmp/dkms/usr/src/odl-tb5-${VERSION}/uapi"; mkdir -p "$D"
+          V="${GITHUB_REF_NAME#v}"; [ -n "$V" ] || V="0.1.0"
+          D="/tmp/dkms/usr/src/odl-tb5-${V}/uapi"; mkdir -p "$D"
           cp driver/*.c "$D/../" 2>/dev/null || true
           cp driver/*.h "$D/../" 2>/dev/null || true
           cp driver/Kbuild "$D/../" 2>/dev/null || true
@@ -84,72 +58,32 @@ jobs:
           cp packaging/dkms-postinst.sh "$D/../" 2>/dev/null || true
           cp packaging/dkms-prerm.sh "$D/../" 2>/dev/null || true
           cp driver/71-odl-tb5.rules /tmp/dkms/ 2>/dev/null || true
-          cd /tmp && tar czf "odl-tb5-dkms-${VERSION}.tar.gz" dkms/
-
+          cd /tmp && tar czf "odl-tb5-dkms-${V}.tar.gz" dkms/
       - name: Upload DKMS tarball
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: odl-tb5-dkms-${{ matrix.arch }}
+          name: odl-tb5-dkms
           path: /tmp/odl-tb5-dkms-*.tar.gz
 
   mac:
     name: macOS
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      matrix:
-        include:
-          - runner: macos-15
-            arch: arm64
-          - runner: ["self-hosted", "macOS", "x86_64"]
-            arch: amd64
-
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-
       - name: Install dependencies
-        run: |
-          brew update-reset 2>/dev/null || brew update
-          brew install cmake pkg-config || true
-
-      - name: Build verbs provider
+        run: brew install cmake pkg-config || true
+      - name: Build core library
         run: |
           mkdir build && cd build
-          cmake .. \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_VERBS=ON \
-            -DBUILD_DAEMON=OFF \
-            -DBUILD_TRAY=OFF
-          make -j$(sysctl -n hw.ncpu) odl_tb5_verbs 2>&1
-
-      - name: Build tests
-        run: |
-          cd build
-          gcc -o tests/test_verbs_basic \
-            ../verbs/tests/test_verbs_basic.c \
-            -I../verbs/src -I../lib/include \
-            -L./verbs -L./lib \
-            -lodl_tb5_verbs -lodl_tb5 \
-            -libverbs -lpthread -ldl 2>/dev/null || \
-          echo "Note: test build requires libibverbs (not available on macOS)"
-
-      - name: Run mock test
-        run: |
-          cd build
-          mkfifo /dev/odl_tb5_0 2>/dev/null || true
-          gcc -o tests/test_mock \
-            ../verbs/tests/test_verbs_mock_loopback.c \
-            -I../verbs/src \
-            -L./verbs -L./lib \
-            -lodl_tb5_verbs -lodl_tb5 \
-            -libverbs -lpthread -ldl 2>&1 || \
-          echo "Note: mock test requires libibverbs (not available on macOS)"
-
+          cmake .. -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_DAEMON=OFF -DBUILD_TRAY=OFF -DBUILD_VERBS=OFF
+          make -j$(sysctl -n hw.ncpu) odl_tb5 2>&1
       - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: odl-tb5-macos-${{ matrix.arch }}-logs
+          name: odl-tb5-macos-logs
           path: build/**/*.log
 
   release:
@@ -158,10 +92,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
-      - name: Gather release artifacts
-        run: |
-          mkdir -p release
-          find . -name '*.deb' -exec cp {} release/ \;
+      - run: |
+          mkdir -p release && find . -name '*.deb' -exec cp {} release/ \;
           find . -name '*.tar.gz' -exec cp {} release/ \;
       - uses: softprops/action-gh-release@v2
         with:

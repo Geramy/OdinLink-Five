@@ -25,8 +25,7 @@ void odl_daemon_fuse_invalidate(const char *path)
     (void)path;
 }
 
-int odl_daemon_fuse_set_callbacks(const struct odl_fuse_callbacks *cbs)
+void odl_daemon_fuse_set_callbacks(const struct odl_fuse_callbacks *cbs)
 {
     (void)cbs;
-    return -1;
 }
