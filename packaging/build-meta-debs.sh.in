@@ -354,16 +354,16 @@ EOF
 echo "Building OdinLink TB5 packages (v${VERSION}, ${ARCH})..."
 echo ""
 
-# 1. Minimal: driver + lib + rccl (bare minimum for GPU cluster nodes)
+# 1. Minimal: driver + lib + rccl + nccl (bare minimum for GPU cluster nodes)
 echo "[1/3] odl-tb5-minimal"
 build_deb "odl-tb5-minimal" \
     "dkms, gcc-14 | gcc-15 | gcc, libc6, mokutil, openssl" \
     "OdinLink Thunderbolt 5 - Minimal (GPU cluster node)
- Installs the kernel driver (DKMS), userspace library, and RCCL/NCCL
- plugin. Bare minimum for a GPU cluster node to participate in RCCL
+ Installs the kernel driver (DKMS), userspace library, and RCCL + NCCL
+ plugins. Bare minimum for a GPU cluster node to participate in GPU
  collective operations over Thunderbolt 5." \
     "yes" "no" "no" \
-    dkms library rccl
+    dkms library rccl nccl
 
 # 2. Server: headless with full management (no tray, no dev headers)
 echo "[2/3] odl-tb5-server"
@@ -371,9 +371,10 @@ build_deb "odl-tb5-server" \
     "dkms, gcc-14 | gcc-15 | gcc, libc6, mokutil, openssl, libglib2.0-0 (>= 2.56)" \
     "OdinLink Thunderbolt 5 - Server (headless)
  Installs everything except the GUI tray application. Includes the
- kernel driver, library, CLI tool, background daemon, and RCCL plugin." \
+ kernel driver, library, CLI tool, background daemon, and both
+ RCCL (AMD) + NCCL (NVIDIA) plugins." \
     "yes" "yes" "no" \
-    dkms library cli daemon rccl
+    dkms library cli daemon rccl nccl
 
 # 3. Full: everything
 echo "[3/3] odl-tb5-full"
@@ -381,9 +382,10 @@ build_deb "odl-tb5-full" \
     "dkms, gcc-14 | gcc-15 | gcc, libc6, mokutil, openssl, libglib2.0-0 (>= 2.56), libgtk-3-0 (>= 3.22), libayatana-appindicator3-1" \
     "OdinLink Thunderbolt 5 - Full (all components)
  Installs every OdinLink TB5 component: kernel driver, library,
- development headers, CLI tool, daemon, tray app, and RCCL plugin." \
+ development headers, CLI tool, daemon, tray app, and both
+ RCCL (AMD) + NCCL (NVIDIA) plugins." \
     "yes" "yes" "yes" \
-    dkms library library-dev cli daemon tray rccl
+    dkms library library-dev cli daemon tray rccl nccl
 
 echo ""
 echo "All packages built in: ${OUT_DIR}/"

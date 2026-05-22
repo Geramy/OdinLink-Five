@@ -193,6 +193,42 @@ static long odl_tb5_ioctl(struct file *filp, unsigned int cmd,
 		return ret;
 	}
 
+	case ODL_TB5_IOCTL_STREAM_SEND_DMABUF: {
+		struct odl_tb5_stream_dmabuf req;
+		struct odl_tb5_stream *stream;
+		int ret;
+
+		if (copy_from_user(&req, uarg, sizeof(req)))
+			return -EFAULT;
+
+		stream = odl_tb5_stream_lookup(dev, req.stream_id);
+		if (!stream)
+			return -ENOENT;
+
+		ret = odl_tb5_submit_tx_dmabuf(dev, req.dmabuf_fd,
+					       req.offset, req.len);
+		odl_tb5_stream_put(stream);
+		return ret;
+	}
+
+	case ODL_TB5_IOCTL_STREAM_RECV_DMABUF: {
+		struct odl_tb5_stream_dmabuf req;
+		struct odl_tb5_stream *stream;
+		int ret;
+
+		if (copy_from_user(&req, uarg, sizeof(req)))
+			return -EFAULT;
+
+		stream = odl_tb5_stream_lookup(dev, req.stream_id);
+		if (!stream)
+			return -ENOENT;
+
+		ret = odl_tb5_submit_rx_dmabuf(dev, req.dmabuf_fd,
+					       req.offset, req.len);
+		odl_tb5_stream_put(stream);
+		return ret;
+	}
+
 	/* ── Legacy ioctls ──────────────────────────────────────────── */
 
 	case ODL_TB5_IOCTL_SEND: {

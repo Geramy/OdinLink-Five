@@ -100,6 +100,12 @@ add_subdirectory(lib)
 # RCCL plugin (librccl_net_odl_tb5.so)
 add_subdirectory(rccl)
 
+# NCCL plugin (libnccl-net-ODL_TB5.so) — for CUDA/NVIDIA/PyTorch
+option(BUILD_NCCL "Build OdinLink TB5 NCCL network plugin" ON)
+if(BUILD_NCCL)
+    add_subdirectory(nccl)
+endif()
+
 # CLI tool (odl_tb5_cli)
 add_subdirectory(cli)
 
@@ -128,6 +134,7 @@ endif()
 
 message(STATUS "BUILD_DAEMON: ${BUILD_DAEMON}")
 message(STATUS "BUILD_TRAY:   ${BUILD_TRAY}")
+message(STATUS "BUILD_NCCL:   ${BUILD_NCCL}")
 
 # =============================================================================
 # DKMS kernel module install (source files for DKMS to compile per-kernel)
@@ -231,8 +238,14 @@ set(CPACK_DEBIAN_TRAY_PACKAGE_DEPENDS
 # --- rccl ---
 set(CPACK_DEBIAN_RCCL_PACKAGE_NAME "odl-tb5-rccl")
 set(CPACK_DEBIAN_RCCL_DESCRIPTION
-    "OdinLink Thunderbolt 5 RCCL/NCCL network plugin")
+    "OdinLink Thunderbolt 5 RCCL network plugin (AMD ROCm)")
 set(CPACK_DEBIAN_RCCL_PACKAGE_DEPENDS "libodl-tb5-0 (>= ${PROJECT_VERSION})")
+
+# --- nccl ---
+set(CPACK_DEBIAN_NCCL_PACKAGE_NAME "odl-tb5-nccl")
+set(CPACK_DEBIAN_NCCL_DESCRIPTION
+    "OdinLink Thunderbolt 5 NCCL network plugin (NVIDIA CUDA)")
+set(CPACK_DEBIAN_NCCL_PACKAGE_DEPENDS "libodl-tb5-0 (>= ${PROJECT_VERSION})")
 
 include(CPack)
 
@@ -243,7 +256,8 @@ cpack_add_component(library-dev DISPLAY_NAME "Development Headers"  DEPENDS libr
 cpack_add_component(cli         DISPLAY_NAME "CLI Test Tool"        DEPENDS library)
 cpack_add_component(daemon      DISPLAY_NAME "Background Daemon"    DEPENDS library)
 cpack_add_component(tray        DISPLAY_NAME "System Tray App"      DEPENDS daemon)
-cpack_add_component(rccl        DISPLAY_NAME "RCCL Plugin"          DEPENDS library)
+cpack_add_component(rccl        DISPLAY_NAME "RCCL Plugin (AMD)"    DEPENDS library)
+cpack_add_component(nccl        DISPLAY_NAME "NCCL Plugin (NVIDIA)"  DEPENDS library)
 
 # =============================================================================
 # Package target: creates 3 self-contained .deb installers
@@ -251,8 +265,8 @@ cpack_add_component(rccl        DISPLAY_NAME "RCCL Plugin"          DEPENDS libr
 #   cmake --build . --target meta-packages
 #
 # Produces:
-#   odl-tb5-minimal_0.1.0_amd64.deb (GPU cluster: dkms+lib+rccl)
-#   odl-tb5-server_0.1.0_amd64.deb  (headless:    dkms+lib+cli+daemon+rccl)
+#   odl-tb5-minimal_0.1.0_amd64.deb (GPU cluster: dkms+lib+rccl+nccl)
+#   odl-tb5-server_0.1.0_amd64.deb  (headless:    dkms+lib+cli+daemon+rccl+nccl)
 #   odl-tb5-full_0.1.0_amd64.deb    (full:        everything)
 # =============================================================================
 
