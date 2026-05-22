@@ -1,11 +1,17 @@
 /*
- * OdinLink Verbs Provider — ibv_context Ops Dispatch Table
+ * OdinLink Verbs Provider — ibv_context Ops Dispatch Table + Interposition
  *
- * Sets up the ibv_context.ops table that libibverbs dispatches to.
- * Both legacy (_compat_*) and modern dispatch entries are filled in.
+ * On modern rdma-core, ibv_query_device and ibv_query_port dispatch
+ * through the internal verbs_context struct (not ibv_context_ops).
+ * We provide symbol interposition for these functions so they work
+ * with our contexts.
+ *
+ * Other ibv_* functions (poll_cq, post_send, post_recv, etc.)
+ * DO dispatch through ibv_context_ops fields that we set here.
  */
 
 #include "odl_tb5_verbs.h"
+#include <dlfcn.h>
 
 /* The struct _compat_ibv_port_attr definition from rdma-core:
  * Same layout as ibv_port_attr but used for the legacy dispatch path. */
@@ -116,6 +122,43 @@ static int odl_compat_destroy_comp_channel(
     ODL_TRACE_ENTRY();
     (void)channel;
     return 0;
+}
+
+/* ── Symbol Interposition: ibv_query_device / ibv_query_port ─────────── */
+
+/* These dispatch through the internal verbs_context struct on modern
+ * rdma-core, not ibv_context_ops. We intercept both via symbol interposition.
+ * Note: ibv_query_port is a macro in verbs.h — undef it before defining. */
+#undef ibv_query_port
+
+int ibv_query_device(struct ibv_context *context,
+                      struct ibv_device_attr *device_attr)
+{
+    ODL_TRACE_ENTRY();
+
+    /* Check if this is an OdinLink-Five context */
+    if (context && context->device &&
+        context->device->name &&
+        strncmp(context->device->name, "odl_tb5_", 8) == 0) {
+        return odl_compat_query_device(context, device_attr);
+    }
+
+    /* Chain to real libibverbs */
+    static int (*real_fn)(struct ibv_context *, struct ibv_device_attr *);
+    if (!real_fn) {
+        real_fn = dlsym(RTLD_NEXT, "ibv_query_device");
+        if (!real_fn) return -ENOSYS;
+    }
+    return real_fn(context, device_attr);
+}
+
+/* ── Symbol Interposition: ibv_query_port ───────────────────────────── */
+
+int ibv_query_port(struct ibv_context *context, uint8_t port_num,
+                    struct _compat_ibv_port_attr *port_attr)
+{
+    ODL_TRACE_ENTRY();
+    return odl_compat_query_port(context, port_num, port_attr);
 }
 
 /* ── Context Ops Table ─────────────────────────────────────────────── */

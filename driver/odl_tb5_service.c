@@ -21,6 +21,11 @@ module_param(odl_ring_size, uint, 0444);
 MODULE_PARM_DESC(odl_ring_size,
 	"NHI ring entries per direction (power-of-2, default 4096 = 16 MB/batch)");
 
+int odl_loopback_count = 0;
+module_param_named(loopback, odl_loopback_count, int, 0444);
+MODULE_PARM_DESC(loopback,
+	"Create N software loopback devices (max 16, default 0; no NHI hw needed)");
+
 const uuid_t odl_tb5_proto_uuid =
 	UUID_INIT(0x4f444c4e, 0x4b54, 0x4235,
 		  0x4f, 0x44, 0x49, 0x4e, 0x4c, 0x49, 0x4e, 0x4b);
@@ -209,79 +214,76 @@ static int __init odl_tb5_init(void)
 {
 	int ret;
 
-	if (odl_ring_size < ODL_TB5_RING_SIZE_MIN ||
-	    odl_ring_size > ODL_TB5_RING_SIZE_MAX ||
-	    !is_power_of_2(odl_ring_size)) {
-		pr_warn("odl_tb5: invalid ring_size=%u, using default %u\n",
-			odl_ring_size, ODL_TB5_RING_SIZE_DEFAULT);
-		odl_ring_size = ODL_TB5_RING_SIZE_DEFAULT;
+	if (!is_power_of_2(odl_ring_size) ||
+	    odl_ring_size < ODL_TB5_RING_SIZE_MIN ||
+	    odl_ring_size > ODL_TB5_RING_SIZE_MAX) {
+		pr_err("odl_tb5: invalid ring_size=%u (must be power-of-2, %u-%u)\n",
+		       odl_ring_size, ODL_TB5_RING_SIZE_MIN,
+		       ODL_TB5_RING_SIZE_MAX);
+		return -EINVAL;
 	}
 
 	ret = odl_tb5_chardev_init();
-	if (ret) {
-		pr_err("odl_tb5: chardev init failed: %d\n", ret);
+	if (ret)
 		return ret;
+
+	/* If loopback=1 or more, create software-only devices.
+	 * Loopback devices work without Thunderbolt hardware and
+	 * don't need property directories or service registration. */
+	if (odl_loopback_count > 0) {
+		ret = odl_loopback_init();
+		if (ret)
+			goto err_chardev;
+		pr_info("odl_tb5: loopback mode enabled (%d devices)\n",
+			odl_loopback_count);
+		return 0;
 	}
 
 	odl_tb5_property_dir = tb_property_create_dir(&odl_tb5_proto_uuid);
 	if (!odl_tb5_property_dir) {
-		pr_err("odl_tb5: failed to create property directory\n");
 		ret = -ENOMEM;
-		goto err_chardev_exit;
+		goto err_chardev;
 	}
 
 	ret = tb_property_add_immediate(odl_tb5_property_dir, "prtcid",
 					ODL_TB5_PROTOCOL_ID);
 	if (ret)
-		goto err_property_dir;
+		goto err_dir;
 
 	ret = tb_property_add_immediate(odl_tb5_property_dir, "prtcvers",
 					ODL_TB5_PROTOCOL_VER);
 	if (ret)
-		goto err_property_dir;
+		goto err_dir;
 
 	ret = tb_property_add_immediate(odl_tb5_property_dir, "prtcrevs", 1);
 	if (ret)
-		goto err_property_dir;
+		goto err_dir;
 
 	ret = tb_property_add_immediate(odl_tb5_property_dir, "prtcstns", 0);
 	if (ret)
-		goto err_property_dir;
+		goto err_dir;
 
 	ret = tb_register_property_dir(ODL_TB5_PROTOCOL_KEY,
 				       odl_tb5_property_dir);
-	if (ret) {
-		pr_err("odl_tb5: failed to register property directory: %d\n",
-		       ret);
-		goto err_property_dir;
-	}
+	if (ret)
+		goto err_dir;
 
-	ret = odl_tb5_proto_register();
-	if (ret) {
-		pr_err("odl_tb5: protocol handler registration failed: %d\n",
-		       ret);
-		goto err_property_unreg;
-	}
+	odl_tb5_proto_register();
 
 	ret = tb_register_service_driver(&odl_tb5_driver);
-	if (ret) {
-		pr_err("odl_tb5: service driver registration failed: %d\n",
-		       ret);
-		goto err_proto_unreg;
-	}
+	if (ret)
+		goto err_proto;
 
-	pr_info("odl_tb5: OdinLink TB5 driver loaded\n");
+	pr_info("odl_tb5: OdinLink TB5 driver loaded (ring_size=%u)\n",
+		odl_ring_size);
+
 	return 0;
 
-err_proto_unreg:
+err_proto:
 	odl_tb5_proto_unregister();
-err_property_unreg:
-	tb_unregister_property_dir(ODL_TB5_PROTOCOL_KEY,
-				   odl_tb5_property_dir);
-err_property_dir:
+err_dir:
 	tb_property_free_dir(odl_tb5_property_dir);
-	odl_tb5_property_dir = NULL;
-err_chardev_exit:
+err_chardev:
 	odl_tb5_chardev_exit();
 	return ret;
 }
@@ -290,11 +292,17 @@ static void __exit odl_tb5_exit(void)
 {
 	struct odl_tb5_device *dev, *tmp;
 
-    /*
-     * Explicit cleanup of remaining devices.
-     * This is a safeguard in case tb_unregister_service_driver()
-     * did not remove all devices (e.g., due to a hotplug error).
-     */
+	/* Clean up software loopback devices first (no NHI/hardware deps) */
+	if (odl_loopback_count > 0) {
+		odl_loopback_exit();
+		goto out;
+	}
+
+	/*
+	 * Explicit cleanup of remaining devices.
+	 * This is a safeguard in case tb_unregister_service_driver()
+	 * did not remove all devices (e.g., due to a hotplug error).
+	 */
 	mutex_lock(&odl_tb5_devices_lock);
 	list_for_each_entry_safe(dev, tmp, &odl_tb5_devices_list, list) {
 		pr_warn("odl_tb5: cleaning up orphaned device at exit\n");
@@ -326,6 +334,7 @@ static void __exit odl_tb5_exit(void)
 	tb_unregister_property_dir(ODL_TB5_PROTOCOL_KEY,
 				   odl_tb5_property_dir);
 	tb_property_free_dir(odl_tb5_property_dir);
+out:
 	odl_tb5_chardev_exit();
 	ida_destroy(&odl_tb5_ida);
 	pr_info("odl_tb5: OdinLink TB5 driver unloaded\n");
