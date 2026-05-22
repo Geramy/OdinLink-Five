@@ -20,9 +20,9 @@ OdinLink turns a Thunderbolt cable into a high-speed RDMA interconnect between m
 | 🟢 | rdma-core plugin (`libodl_tb5-rdmav34.so`) | Auto-discovered by `ibv_devinfo` |
 | 🟢 | Async I/O | `poll()` + `O_NONBLOCK` ioctls end-to-end |
 | 🟢 | No-cable testing | `loopback=1` module param + mock library |
-| 🟡 | NCCL plugin | Custom API — needs verbs provider integration |
-| 🔴 | NCCL verbs transport | Built-in NCCL verbs transport auto-discovers ODL |
-| 🔴 | Async DMA-buf | Non-blocking GPU memory registration |
+| 🟢 | NCCL verbs transport | NCCL's built-in `NCCL_NET_PLUGIN=IB` transport auto-discovers ODL via `ibv_get_device_list` |
+| 🟡 | NCCL custom plugin | DMA-buf zero-copy path (legacy, use verbs transport instead) |
+| 🟡 | Async DMA-buf | Needs callback-based cleanup — stream path is already async via poll() |
 
 ## Quick Start
 

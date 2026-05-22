@@ -15,30 +15,46 @@ TX/RX bytes, operation counts, and uptime in a dedicated RCCL Stats window.
 
 ## NCCL (NVIDIA CUDA / PyTorch)
 
-The NCCL network plugin enables zero-copy GPU-to-GPU transfers over
-Thunderbolt 5 for NVIDIA GPUs. It uses the Linux DMA-buf infrastructure
-to transfer CUDA memory directly through the TB5 NHI DMA engine, bypassing
-the CPU.
+### Option 1: Built-in Verbs Transport (Recommended)
+
+NCCL has a built-in `IB` (InfiniBand Verbs) transport that discovers RDMA
+devices automatically via `ibv_get_device_list`. Once the OdinLink verbs
+provider plugin is installed, NCCL can use it without any custom plugin.
+
+```bash
+# Install provider plugin (one-time)
+sudo cp build/verbs/libodl_tb5-rdmav34.so /usr/lib/aarch64-linux-gnu/libibverbs/
+
+# NCCL discovers ODL automatically via verbs
+export NCCL_NET_PLUGIN=IB
+export NCCL_IB_HCA=odl_tb5               # Restrict to ODL device
+export NCCL_IB_TIMEOUT=22
+export NCCL_IB_RETRY_CNT=7
+
+# Run your NCCL application
+torchrun --nproc_per_node=1 --nnodes=2 \
+    --node_rank=0 --master_addr=192.168.1.1 --master_port=12345 \
+    your_training_script.py
+```
+
+The verbs provider implements all operations NCCL's IB transport needs:
+`ibv_reg_mr`, `ibv_create_qp`, `ibv_post_send`, `ibv_post_recv`,
+`ibv_poll_cq`. This is the standard, well-tested path.
+
+### Option 2: Custom Plugin (Legacy)
+
+The custom NCCL plugin provides a DMA-buf-based zero-copy path for CUDA
+memory. It bypasses the verbs stack for direct kernel driver access.
+
+```bash
+export NCCL_NET_PLUGIN=ODL_TB5
+export NCCL_PLUGIN_DIR=/path/to/build/nccl
+```
 
 ### Prerequisites
 - NVIDIA GPU with `nvidia-drm` modeset enabled (`nvidia-drm.modeset=1`)
 - CUDA 11.7+ for `cuMemGetHandleForAddressRange` (DMA-buf FD export)
 - NCCL 2.12+ (supports net plugin v4/v5)
-
-### Usage
-
-```bash
-export NCCL_NET_PLUGIN=ODL_TB5
-export NCCL_PLUGIN_DIR=/path/to/build/nccl
-
-# Or specify the full path:
-export NCCL_NET_PLUGIN=/path/to/build/nccl/libnccl-net-ODL_TB5.so
-
-# Run your NCCL application (e.g., PyTorch distributed training)
-torchrun --nproc_per_node=1 --nnodes=2 \
-    --node_rank=0 --master_addr=192.168.1.1 --master_port=12345 \
-    your_training_script.py
-```
 
 ### Environment Variables
 
