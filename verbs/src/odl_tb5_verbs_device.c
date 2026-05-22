@@ -215,6 +215,17 @@ int odl_free_context(struct ibv_context *context)
     ODL_TRACE_ENTRY();
     if (!context) return -EINVAL;
 
+    /* Provider plugin path: handle was stashed in abi_compat.
+     * Close it and free the plain context. */
+    if (context->abi_compat) {
+        odl_tb5_t handle = (odl_tb5_t)(intptr_t)context->abi_compat;
+        odl_loginfo("closing provider context %p (handle=%p)",
+                     (void*)context, (void*)handle);
+        odl_tb5_close(handle);
+        free(context);
+        ODL_TRACE_EXIT_VAL(0);
+    }
+
     struct odl_verbs_context *ctx = odl_ctx_from_ibv(context);
 
     odl_loginfo("closing context %p (handle=%p)",
