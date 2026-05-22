@@ -134,9 +134,16 @@ if(BUILD_TRAY)
     add_subdirectory(tray)
 endif()
 
+# Verbs provider plugin (libibverbs-compatible RDMA)
+option(BUILD_VERBS "Build OdinLink TB5 verbs provider plugin" ON)
+if(BUILD_VERBS)
+    add_subdirectory(verbs)
+endif()
+
 message(STATUS "BUILD_DAEMON: ${BUILD_DAEMON}")
 message(STATUS "BUILD_TRAY:   ${BUILD_TRAY}")
 message(STATUS "BUILD_NCCL:   ${BUILD_NCCL}")
+message(STATUS "BUILD_VERBS:  ${BUILD_VERBS}")
 
 # =============================================================================
 # DKMS kernel module install (source files for DKMS to compile per-kernel)

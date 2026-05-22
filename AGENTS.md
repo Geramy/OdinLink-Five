@@ -17,6 +17,7 @@ mkdir build && cd build && cmake .. && make -j$(nproc)
 - Single binary: `build/tests/odl_tb5_test` (3 suites: device, lib_api, plugin).
 - **Prerequisites**: kernel module loaded (`sudo insmod driver/odl_tb5.ko`), device readable (`sudo chmod 666 /dev/odl_tb5_0`).
 - No test framework — plain C `main()` returning failure count.
+- Verbs provider test: `build/verbs/tests/test_verbs_basic` (link with `-lodl_tb5_verbs -libverbs`).
 
 ## Architecture
 
