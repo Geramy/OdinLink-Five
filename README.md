@@ -26,33 +26,21 @@ OdinLink turns a Thunderbolt cable into a high-speed RDMA interconnect between m
 
 ## Quick Start
 
-### 1. Build
+### Build & Run
 
 ```bash
 sudo apt install build-essential cmake linux-headers-$(uname -r) libibverbs-dev rdma-core pkg-config gcc-14
 git clone https://github.com/johndpope/OdinLink-Five.git
 cd OdinLink-Five && mkdir build && cd build
-cmake .. -DBUILD_VERBS=ON
-make -j$(nproc) odl_tb5_verbs odl_tb5_verbs_provider
-```
+cmake .. -DBUILD_VERBS=ON && make -j$(nproc) odl_tb5_verbs odl_tb5_verbs_provider
 
-### 2. Install
-
-```bash
-sudo cp driver/71-odl-tb5.rules /etc/udev/rules.d/ && sudo udevadm control --reload-rules
-sudo mkdir -p /usr/lib/aarch64-linux-gnu/libibverbs
-sudo cp verbs/libodl_tb5-rdmav34.so /usr/lib/aarch64-linux-gnu/libibverbs/
-```
-
-### 3. Test without a cable
-
-```bash
+# Test without cable:
 sudo insmod driver/odl_tb5.ko loopback=1
 ibv_devinfo                     # Should show odl_tb5 device
 build/verbs/tests/test_verbs_basic
 ```
 
-### 4. Point-to-point (two machines)
+### Point-to-Point (two machines)
 
 ```bash
 # Machine A:
@@ -63,6 +51,8 @@ build/cli/odl_tb5_cli --server --device 0
 sudo insmod driver/odl_tb5.ko
 build/cli/odl_tb5_cli --client --device 0 --test bandwidth
 ```
+
+Full install guide → [`docs/INSTALL.md`](docs/INSTALL.md)
 
 ## Architecture
 
@@ -90,11 +80,13 @@ build/cli/odl_tb5_cli --client --device 0 --test bandwidth
 | Library | `libodl_tb5.so` | C API wrapping ioctls, streams, mmap |
 | Verbs provider | `libodl_tb5_verbs.so` | Standalone `ibv_*` via symbol interposition |
 | Verbs plugin | `libodl_tb5-rdmav34.so` | rdma-core provider plugin (`ibv_devinfo`) |
-| NCCL plugin | `libnccl-net-ODL_TB5.so` | NVIDIA GPU collectives (CUDA DMA-buf) |
+| NCCL plugin | `libnccl-net-ODL_TB5.so` | NVIDIA GPU collectives |
 | RCCL plugin | `librccl_net_odl_tb5.so` | AMD GPU collectives |
 | CLI tool | `odl_tb5_cli` | Bandwidth, latency, jitter, MIMO tests |
 | Loopback module | `loopback=1` param | Fake peer for no-cable testing |
 | Mock library | `libodl_tb5_mock.so` | LD_PRELOAD simulation (no kernel needed) |
+
+### GPU and daemon/tray → [`docs/GPU.md`](docs/GPU.md), [`docs/INSTALL.md`](docs/INSTALL.md)
 
 ## Verbs API Coverage
 
@@ -153,13 +145,28 @@ export ODL_VERBS_DEBUG=5     # Trace all verbs calls
 sudo dmesg -w | grep odl_tb5 # Kernel driver logs
 ```
 
+Troubleshooting → [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)
+
 ## Cross-Platform: macOS
 
-Apple ships `libthunderboltrdma.dylib` + `libibverbs` on macOS 26.5, but the kernel extension (`AppleThunderboltRDMA.kext`) is a stub with no binary — `IORDMAFamily` is not shipped. Mac Thunderbolt RDMA is not currently functional on macOS 26.5.
+Apple ships `libthunderboltrdma.dylib` + `libibverbs` on macOS 26.5, but
+the kernel extension is a stub — `IORDMAFamily` is not shipped. Mac
+Thunderbolt RDMA is not currently functional. OdinLink is the only
+working implementation. See [`COMPAT.md`](COMPAT.md).
 
-OdinLink is the only working Thunderbolt RDMA implementation. See [`COMPAT.md`](COMPAT.md) for details.
+## Repository
+
+| Resource | Link |
+|----------|------|
+| Install guide | [`docs/INSTALL.md`](docs/INSTALL.md) |
+| GPU / NCCL / RCCL | [`docs/GPU.md`](docs/GPU.md) |
+| Troubleshooting | [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) |
+| Packaging / .deb | [`docs/PACKAGING.md`](docs/PACKAGING.md) |
+| Agent instructions | [`AGENTS.md`](AGENTS.md) |
+| Verbs provider manual | [`verbs/VERBS_PROVIDER.md`](verbs/VERBS_PROVIDER.md) |
+| Cross-platform compat | [`COMPAT.md`](COMPAT.md) |
 
 ## License
 
-- **Kernel driver** (`odl_tb5.ko`): GPL v2 (required by GPL-only kernel symbols)
-- **All userspace** (library, plugins, CLI, daemon, tray, verbs): MIT
+- **Kernel driver** (`odl_tb5.ko`): GPL v2
+- **All userspace**: MIT
