@@ -258,20 +258,32 @@ verbs/src/odl_tb5_verbs_*.c   # Verbs provider
 verbs/VERBS_PROVIDER.md       # Verbs provider manual
 ```
 
-## Cross-Platform Protocol Investigation (WIP)
+## Reverse-Engineered Apple ThunderboltRDMA Details
 
-To determine Apple's exact XDomain login message format:
+Disassembled from `libthunderboltrdma.dylib` (dyld shared cache, macOS 26.5):
 
-1. **Kext binary**: `AppleThunderboltRDMA.kext` — no Mach-O on macOS 26.5
-   (may be built into kernel cache or DriverKit-based)
-2. **User-space driver**: `libthunderboltrdma.dylib` — in dyld shared cache
-3. **IORDMAFamily**: Dependency but binary not easily accessible
-4. **XDomain protocol**: Uses `IOThunderboltXDomainService` for messages
+| Property | Value |
+|----------|-------|
+| Protocol key | `"rdma"` |
+| Protocol ID | `64087` (`0xFA57`) |
+| Device modalias | `"rdma_device:*Ntbt*"` |
+| Provider name | `"thunderboltrdma"` |
+| Provider plugin | `libthunderboltrdma-rdmav34.so` |
+| IOKit service | `com.apple.AppleThunderboltRDMA` |
+| DMA interface | `IORDMAInterface` |
+| NHI ring size | Configurable, managed via `IORDMAFamily` |
 
-The login message format can be determined by:
-- Running Ghidra on an extracted copy of `libthunderboltrdma.dylib`
-- Monitoring XDomain events with `ioreg` or custom IOKit tracing
-- Protocol analysis: capture login packets between two Macs
+Login handler flexibility implemented in OdinLink:
+- Accepts login messages with just the XDomain header (40+ bytes)
+- Lenient response parsing in Apple protocol mode (skip UUID/type check)
+- `protocol=1` mode now ready for real hardware testing
+
+### What's unknown (needs real hardware test)
+
+1. **Login message TYPE**: Apple might use a different `hdr->type` value
+2. **Response format**: Exact layout of the login response payload
+3. **Hop ID negotiation**: How TX/RX hop IDs are exchanged
+4. **Ring configuration**: NHI ring descriptors format compatibility
 
 ## Development Notes
 
