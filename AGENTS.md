@@ -30,7 +30,8 @@ mkdir build && cd build && cmake .. && make -j$(nproc)
 | CLI tool | `cli/odl_tb5_cli` | MIT |
 | Daemon | `daemon/odl_tb5_daemon` (GLib/D-Bus) | MIT |
 | Tray app | `tray/odl_tb5_tray` (GTK3/AppIndicator) | MIT |
-| Verbs provider | `verbs/libodl_tb5_verbs.so` (ibv_* API wrapper) | MIT |
+| Verbs provider (standalone) | `verbs/libodl_tb5_verbs.so` (symbol interposition) | MIT |
+| Verbs provider (plugin) | `verbs/libodl_tb5-rdmav34.so` (rdma-core provider) | MIT |
 
 - Library source: `lib/src/odl_tb5_{dev,xfer,peer,completion,stream}.c`, header at `lib/include/odl_tb5/odl_tb5.h`.
 - Kernel uapi header: `driver/uapi/odl_tb5_uapi.h` (ioctl defs shared with userspace).
@@ -44,6 +45,8 @@ mkdir build && cd build && cmake .. && make -j$(nproc)
 ## Gotchas
 
 - `/dev/odl_tb5_N` appears **only when a TB5 peer connects** (XDomain event). No peer → no device node. Exception: `loopback=1` module parameter creates fake devices for testing without a cable.
+- Verbs provider plugin (`libodl_tb5-rdmav34.so`) auto-registers with rdma-core — install to `/usr/lib/*/libibverbs/` for `ibv_devinfo` discovery.
+- Kernel module `hrtimer_setup` compat macro checks `< KERNEL_VERSION(6, 11, 0)`. Ubuntu 24.04 (6.8) uses the fallback.
 - udev rule: `driver/71-odl-tb5.rules`. Install with `sudo cp ... /etc/udev/rules.d/ && sudo udevadm control --reload-rules`.
 - Two API layers in the uapi header: legacy double-buffer ioctls (0x01–0x0D) and stream-based multiplexed I/O (0x20–0x27). Both coexist.
 - NCCL plugin env: `NCCL_NET_PLUGIN=ODL_TB5`, `NCCL_PLUGIN_DIR=<build>/nccl`. Requires CUDA 11.7+, nvidia-drm modeset, NCCL 2.12+.
