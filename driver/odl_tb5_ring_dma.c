@@ -1745,6 +1745,26 @@ wait_pending:
 }
 
 /*
+ * Non-blocking availability checks (for poll/epoll + async ioctl).
+ * Returns true if a send/recv would not block.
+ */
+bool odl_tb5_stream_can_send(struct odl_tb5_stream *stream)
+{
+	struct odl_tb5_device *dev = stream->dev;
+	struct odl_tb5_frame_pool *pool = &dev->frame_pool;
+
+	/* Can send if we have frames available and state is ready */
+	return dev->state == ODL_TB5_STATE_READY &&
+	       pool && pool->free_count > ODL_TB5_TX_POOL_RESERVE;
+}
+
+bool odl_tb5_stream_can_recv(struct odl_tb5_stream *stream)
+{
+	/* Can recv if data is already in the RX queue */
+	return atomic_read(&stream->rx_complete) > 0;
+}
+
+/*
  * Stream send — adaptive dispatcher.
  *
  * Evaluates TX mode (latency vs throughput) based on message size and

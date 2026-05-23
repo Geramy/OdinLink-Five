@@ -11,6 +11,28 @@
 #include <string.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <fcntl.h>
+/* Private libibverbs symbols resolved at runtime */
+/* verbs_context is defined in <infiniband/verbs.h> (rdma-core ≥ 50) */
+typedef void *(*verbs_init_alloc_fn_t)(struct ibv_device *, int, size_t,
+                                        struct verbs_context *, uint32_t);
+typedef void (*verbs_set_ops_fn_t)(struct verbs_context *, const void *);
+
+static verbs_init_alloc_fn_t  p_verbs_init_alloc = NULL;
+static verbs_set_ops_fn_t     p_verbs_set_ops    = NULL;
+
+static int resolve_verbs_private(void)
+{
+    static int done = 0;
+    if (done) return 0;
+    void *h = dlopen("libibverbs.so.1", RTLD_LAZY | RTLD_NOLOAD);
+    if (!h) return -1;
+    p_verbs_init_alloc = dlsym(h, "_verbs_init_and_alloc_context");
+    p_verbs_set_ops    = dlsym(h, "verbs_set_ops");
+    dlclose(h);
+    done = (p_verbs_init_alloc && p_verbs_set_ops);
+    return done ? 0 : -1;
+}
 
 /* ── Chaining to real libibverbs ────────────────────────────────────── */
 
@@ -75,6 +97,17 @@ struct ibv_context *odl_ibv_open_device(struct ibv_device *device)
         free(ctx);
         errno = ENODEV;
         return NULL;
+    }
+
+    /* Set non-blocking mode on the device fd so stream_send/recv
+     * ioctls return -EAGAIN instead of blocking. The verbs provider
+     * uses poll() + non-blocking ioctls for true async behavior. */
+    int dev_fd = odl_tb5_get_fd(handle);
+    if (dev_fd >= 0) {
+        int flags = fcntl(dev_fd, F_GETFL, 0);
+        if (flags >= 0)
+            fcntl(dev_fd, F_SETFL, flags | O_NONBLOCK);
+        ctx->base.cmd_fd = dev_fd;
     }
 
     /* Initialize context fields */

@@ -8,6 +8,7 @@ mkdir build && cd build && cmake .. && make -j$(nproc)
 
 - **GCC version must match kernel build compiler** (`cat /proc/version`). CMake probes `gcc-15`, `gcc-14`, then `gcc`.
 - Kernel module (`driver/odl_tb5.ko`) is built via CMake custom target — not `add_subdirectory`. It runs `make` inside `driver/`.
+- Kernel module is NOT part of `ALL` (excluded from default `make`). Build explicitly with `make driver` or `cmake --build . --target driver`.
 - Daemon and tray are **auto-disabled** if dependency `pkg-config` checks fail. Run `cmake ..` to see which components are ON.
 - `gdbus-codegen` (from `libglib2.0-dev-bin`) is required at build time — generates D-Bus C bindings from XML.
 - .deb packages: `cpack` (individual), `make meta-packages` (bundled: minimal/server/desktop/full).
@@ -33,7 +34,8 @@ mkdir build && cd build && cmake .. && make -j$(nproc)
 | Verbs provider (standalone) | `verbs/libodl_tb5_verbs.so` (symbol interposition) | MIT |
 | Verbs provider (plugin) | `verbs/libodl_tb5-rdmav34.so` (rdma-core provider) | MIT |
 
-Cross-platform compat docs at `COMPAT.md`. Apple's TB RDMA protocol ID = 64087 (0xFA57); OdinLink uses 0x4F4C. They must match for Mac↔Linux interop.
+- Cross-platform compat docs at `COMPAT.md`. Apple's TB RDMA protocol ID = 64087 (0xFA57); OdinLink uses 0x4F4C. They must match for Mac↔Linux interop.
+- Apple's `IORDMAFamily` kernel extension is **not shipped** on macOS 26.5 — `AppleThunderboltRDMA.kext` is a stub with no binary. Mac Thunderbolt RDMA is not currently functional on current macOS. OdinLink is the only working implementation.
 
 - Library source: `lib/src/odl_tb5_{dev,xfer,peer,completion,stream}.c`, header at `lib/include/odl_tb5/odl_tb5.h`.
 - Kernel uapi header: `driver/uapi/odl_tb5_uapi.h` (ioctl defs shared with userspace).

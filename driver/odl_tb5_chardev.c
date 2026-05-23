@@ -116,6 +116,8 @@ static long odl_tb5_ioctl(struct file *filp, unsigned int cmd,
 		struct odl_tb5_stream_xfer req;
 		struct odl_tb5_stream *stream;
 		int ret;
+		bool nonblock = filp->f_flags & O_NONBLOCK;
+		const void __user *data;
 
 		if (copy_from_user(&req, uarg, sizeof(req)))
 			return -EFAULT;
@@ -124,9 +126,14 @@ static long odl_tb5_ioctl(struct file *filp, unsigned int cmd,
 		if (!stream)
 			return -ENOENT;
 
-		ret = odl_tb5_stream_send(stream, req.dst_id,
-					  (const void __user *)req.data,
-					  req.len);
+		/* Non-blocking send: fail immediately if no frames available */
+		if (nonblock && !odl_tb5_stream_can_send(stream)) {
+			odl_tb5_stream_put(stream);
+			return -EAGAIN;
+		}
+
+		data = (const void __user *)(uintptr_t)req.data;
+		ret = odl_tb5_stream_send(stream, req.dst_id, data, req.len);
 		odl_tb5_stream_put(stream);
 		return ret;
 	}
@@ -135,6 +142,7 @@ static long odl_tb5_ioctl(struct file *filp, unsigned int cmd,
 		struct odl_tb5_stream_xfer req;
 		struct odl_tb5_stream *stream;
 		int ret;
+		bool nonblock = filp->f_flags & O_NONBLOCK;
 
 		if (copy_from_user(&req, uarg, sizeof(req)))
 			return -EFAULT;
@@ -143,8 +151,14 @@ static long odl_tb5_ioctl(struct file *filp, unsigned int cmd,
 		if (!stream)
 			return -ENOENT;
 
+		/* Non-blocking recv: fail if no data available */
+		if (nonblock && !odl_tb5_stream_can_recv(stream)) {
+			odl_tb5_stream_put(stream);
+			return -EAGAIN;
+		}
+
 		ret = odl_tb5_stream_recv(stream,
-					  (void __user *)req.data,
+					  (void __user *)(uintptr_t)req.data,
 					  req.len,
 					  &req.src_id,
 					  &req.actual_len);
@@ -163,9 +177,13 @@ static long odl_tb5_ioctl(struct file *filp, unsigned int cmd,
 		struct odl_tb5_stream_wait req;
 		struct odl_tb5_stream *stream;
 		int ret;
+		bool nonblock = filp->f_flags & O_NONBLOCK;
 
 		if (copy_from_user(&req, uarg, sizeof(req)))
 			return -EFAULT;
+
+		if (nonblock)
+			return -EAGAIN; /* Use poll() for non-blocking wait */
 
 		stream = odl_tb5_stream_lookup(dev, req.stream_id);
 		if (!stream)
@@ -180,9 +198,13 @@ static long odl_tb5_ioctl(struct file *filp, unsigned int cmd,
 		struct odl_tb5_stream_wait req;
 		struct odl_tb5_stream *stream;
 		int ret;
+		bool nonblock = filp->f_flags & O_NONBLOCK;
 
 		if (copy_from_user(&req, uarg, sizeof(req)))
 			return -EFAULT;
+
+		if (nonblock)
+			return -EAGAIN; /* Use poll() for non-blocking wait */
 
 		stream = odl_tb5_stream_lookup(dev, req.stream_id);
 		if (!stream)
@@ -465,12 +487,47 @@ static int odl_tb5_mmap(struct file *filp, struct vm_area_struct *vma)
 				 buf->size);
 }
 
+static __poll_t odl_tb5_poll(struct file *filp, poll_table *wait)
+{
+	struct odl_tb5_file_ctx *ctx = filp->private_data;
+	struct odl_tb5_device *dev = ctx->dev;
+	__poll_t mask = 0;
+
+	/* Wait for TX/RX completion events */
+	poll_wait(filp, &dev->tx.waitq, wait);
+	poll_wait(filp, &dev->rx.waitq, wait);
+
+	/* Readable if RX completions are available */
+	if (atomic_read(&dev->rx.completed) > 0)
+		mask |= EPOLLIN | EPOLLRDNORM;
+
+	/* Writable if TX has room (completed tx < submitted tx means
+	 * some TX completions have drained) */
+	if (atomic_read(&dev->tx.completed) > 0)
+		mask |= EPOLLOUT | EPOLLWRNORM;
+
+	/* Per-stream readability: check if any stream has pending RX */
+	struct odl_tb5_stream *stream;
+	spin_lock(&ctx->lock);
+	list_for_each_entry(stream, &ctx->streams, owner_list) {
+		poll_wait(filp, &stream->rx_waitq, wait);
+		spin_lock(&stream->rx_lock);
+		if (stream->rx_complete > 0)
+			mask |= EPOLLIN | EPOLLRDNORM;
+		spin_unlock(&stream->rx_lock);
+	}
+	spin_unlock(&ctx->lock);
+
+	return mask;
+}
+
 static const struct file_operations odl_tb5_fops = {
 	.owner		= THIS_MODULE,
 	.open		= odl_tb5_open,
 	.release	= odl_tb5_release,
 	.unlocked_ioctl	= odl_tb5_ioctl,
 	.mmap		= odl_tb5_mmap,
+	.poll		= odl_tb5_poll,
 };
 
 int odl_tb5_chardev_create(struct odl_tb5_device *dev)

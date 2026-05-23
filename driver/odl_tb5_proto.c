@@ -116,16 +116,32 @@ static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
 	case ODL_TB5_MSG_LOGIN: {
 		const struct odl_tb5_login_msg *pkg = buf;
 		struct odl_tb5_login_response resp = { };
+		u32 remote_tx_hopid = 0;
+		u32 proto_ver = 0;
 		int ret;
 
-		if (size < sizeof(*pkg)) {
+		/* Minimum: XDomain header (40 bytes). The payload fields
+		 * (transmit_path, proto_version) may be absent if the peer
+		 * uses a different login format (e.g., Apple ThunderboltRDMA).
+		 * Default missing fields to 0 and proceed. */
+		if (size < sizeof(struct odl_tb5_xd_header)) {
 			mutex_unlock(&odl_tb5_devices_lock);
 			return 0;
 		}
 
+		if (size >= sizeof(*pkg)) {
+			remote_tx_hopid = pkg->transmit_path;
+			proto_ver = pkg->proto_version;
+		} else if (size >= sizeof(struct odl_tb5_xd_header) + 8) {
+			/* Apple-style: transmit_path at offset 40, version at 44 */
+			const u32 *payload = (const u32 *)(hdr + 1);
+			remote_tx_hopid = payload[1];
+			proto_ver = payload[0];
+		}
+
 		pr_info("OdinLink: received login from peer "
-			"(version=%u, tx_path=%u)\n",
-			pkg->proto_version, pkg->transmit_path);
+			"(version=%u, tx_path=%u, size=%zu)\n",
+			proto_ver, remote_tx_hopid, size);
 
 		resp.xd_hdr.route_hi  = upper_32_bits(dev->xd->route);
 		resp.xd_hdr.route_lo  = lower_32_bits(dev->xd->route);
@@ -150,7 +166,7 @@ static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
 			pr_info("OdinLink: peer restarted (our state=%d), "
 				"scheduling restart\n", dev->state);
 			dev->stale_remote_tx_hopid = dev->remote_tx_hopid;
-			dev->remote_tx_hopid = pkg->transmit_path;
+			dev->remote_tx_hopid = remote_tx_hopid;
 			dev->login_received = true;
 			mutex_unlock(&dev->state_lock);
 			mutex_unlock(&odl_tb5_devices_lock);
@@ -158,7 +174,7 @@ static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
 			return 1;
 		}
 
-		dev->remote_tx_hopid = pkg->transmit_path;
+		dev->remote_tx_hopid = remote_tx_hopid;
 		dev->login_received = true;
 		if (dev->login_sent)
 			need_complete = true;
@@ -229,6 +245,16 @@ int odl_tb5_proto_send_login(struct odl_tb5_device *dev)
 		return ret;
 	}
 
+	/* In Apple protocol mode, be lenient with response format.
+	 * The peer might use a different UUID and response structure.
+	 * Accept any response that follows the XDomain response format. */
+	if (odl_protocol_mode == 1) {
+		/* Apple mode: accept any response that looks reasonable.
+		 * The transmit_path is at a fixed offset in the response. */
+		dev->remote_tx_hopid = resp.transmit_path;
+		goto login_ok;
+	}
+
 	if (!uuid_equal(&resp.xd_hdr.uuid, &odl_tb5_proto_uuid)) {
 		pr_warn("OdinLink: login response UUID mismatch\n");
 		return -EPROTO;
@@ -246,8 +272,8 @@ int odl_tb5_proto_send_login(struct odl_tb5_device *dev)
 		return -ECONNREFUSED;
 	}
 
-	mutex_lock(&dev->state_lock);
 	dev->remote_tx_hopid = resp.transmit_path;
+login_ok:
 	dev->login_sent = true;
 	if (dev->login_received && dev->state == ODL_TB5_STATE_HANDSHAKE)
 		need_complete = true;

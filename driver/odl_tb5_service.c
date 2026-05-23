@@ -26,7 +26,7 @@ module_param_named(loopback, odl_loopback_count, int, 0444);
 MODULE_PARM_DESC(loopback,
 	"Create N software loopback devices (max 16, default 0; no NHI hw needed)");
 
-static int odl_protocol_mode = 0;
+int odl_protocol_mode = 0;
 module_param_named(protocol, odl_protocol_mode, int, 0444);
 MODULE_PARM_DESC(protocol,
 	"XDomain protocol mode: 0=OdinLink (0x4F4C, default), 1=Apple (0xFA57)");
