@@ -36,6 +36,10 @@ jobs:
       - name: Build kernel module
         continue-on-error: true
         run: cd build && make -j$(nproc) driver 2>&1 | tail -10
+      - name: Test with Docker Compose
+        run: |
+          docker compose build odl-test 2>&1 | tail -5
+          docker compose run --rm odl-test 2>&1 | grep -E "PASS|FAIL|ALL TESTS"
       - name: Package .deb
         run: |
           cd build

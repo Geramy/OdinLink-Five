@@ -1,0 +1,26 @@
+version: "3.9"
+
+services:
+  odl-test:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    image: odl-tb5-test
+    container_name: odl-tb5-simulator
+    environment:
+      - ODL_VERBS_DEBUG=5
+    command: >
+      sh -c "
+        mkfifo /dev/odl_tb5_0 2>/dev/null || true &&
+        LD_PRELOAD=/app/tests/libodl_tb5_mock.so
+        /app/tests/test_verbs_mock_loopback
+      "
+
+  # Future: two-container test over a simulated link
+  # odl-node-a:
+  #   build: .
+  #   command: odl_tb5_cli --server
+  # odl-node-b:
+  #   build: .
+  #   depends_on: [odl-node-a]
+  #   command: odl_tb5_cli --client --test bandwidth
