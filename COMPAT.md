@@ -43,10 +43,10 @@ protocol is determined by the NHI hardware. What differs is:
 | Zero-copy GPU | ✅ Metal → IOSurface dmabuf | ❌ Needs NCCL plugin |
 | No-cable test | ❌ Requires TB5 cable | ✅ `loopback=1` module param |
 | Kernel driver | ⚠️ **Not shipped** — `AppleThunderboltRDMA.kext` is a stub (no binary); `IORDMAFamily` missing on macOS 26.5 | ✅ `odl_tb5.ko` — working kernel module |
-| Userspace lib | ✅ `libthunderboltrdma.dylib` — full verbs library but no kernel target | ✅ `libodl_tb5.so` |
-| Verbs API | ⚠️ Will work if Apple ships the kernel side | ✅ `libodl_tb5-rdmav34.so` |
-| `ibv_open_device` | ❌ Can't open — `IORDMAInterface` doesn't exist in kernel | ✅ |
-| No-cable test | ❌ Requires TB5 cable + kernel driver | ✅ `loopback=1` module param |
+| Userspace lib | ✅ `libthunderboltrdma.dylib` — full verbs library, kernel driver never shipped | ✅ `libodl_tb5.so` |
+| Verbs API | ❌ Can't open device — `IORDMAInterface` kernel service doesn't exist | ✅ `libodl_tb5-rdmav34.so` |
+| `ibv_open_device` | ❌ No kernel target to connect to | ✅ |
+| No-cable test | ❌ Requires hardware + kernel driver | ✅ `loopback=1` module param |
 
 ## Apple's Protocol Details
 
