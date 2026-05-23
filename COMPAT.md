@@ -42,11 +42,30 @@ protocol is determined by the NHI hardware. What differs is:
 | `ibv_devinfo` | ✅ Yes | ✅ Yes (via provider plugin) |
 | Zero-copy GPU | ✅ Metal → IOSurface dmabuf | ❌ Needs NCCL plugin |
 | No-cable test | ❌ Requires TB5 cable | ✅ `loopback=1` module param |
-| Kernel driver | ⚠️ **Not shipped** — `AppleThunderboltRDMA.kext` is a stub (no binary); `IORDMAFamily` missing on macOS 26.5 | ✅ `odl_tb5.ko` — working kernel module |
+| Kernel driver | ✅ Shipped with macOS 26.2+ for **TB5 hardware** — enable via `rdma_ctl` in Recovery | ✅ `odl_tb5.ko` — working kernel module |
+| Hardware required | **Thunderbolt 5** ports + TB5 cable | Any Thunderbolt 3+ port (NHI DMA) |
 | Userspace lib | ✅ `libthunderboltrdma.dylib` — full verbs library, kernel driver never shipped | ✅ `libodl_tb5.so` |
 | Verbs API | ❌ Can't open device — `IORDMAInterface` kernel service doesn't exist | ✅ `libodl_tb5-rdmav34.so` |
 | `ibv_open_device` | ❌ No kernel target to connect to | ✅ |
 | No-cable test | ❌ Requires hardware + kernel driver | ✅ `loopback=1` module param |
+
+## Apple TN3205 — Official RDMA Documentation
+
+Apple published **Technical Note TN3205** (April 2026):
+[Low-latency communication with RDMA over Thunderbolt](https://developer.apple.com/documentation/technotes/tn3205-low-latency-communication-with-rdma-over-thunderbolt)
+
+Key points:
+- **Available starting macOS 26.2** on Apple Silicon with **Thunderbolt 5**
+- Enable in **macOS Recovery** → Terminal → **`rdma_ctl enable`**
+- Exposes a **Verbs-compatible API** (`ibv_*` interface)
+- IP over Thunderbolt runs in **parallel** — hardware load-balances between protocols
+- RDMA interfaces are **point-to-point** between directly-connected Macs
+- **TB5 hardware required** — TB3/TB4 cables won't work for RDMA
+- Check connectivity with `ibv_devinfo` and `ibv_rc_pingpong`
+
+> **Why our TB3 test failed:** TN3205 confirms Thunderbolt 5 hardware is required.
+> The M4 Mac Mini has TB5 ports, the M1 MacBook Pro has TB3. With a TB5 cable
+> between two TB5-equipped Macs, RDMA should work.
 
 ## Apple's Protocol Details
 
