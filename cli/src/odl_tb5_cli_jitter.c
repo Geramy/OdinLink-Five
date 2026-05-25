@@ -1,5 +1,10 @@
 /*
- * OdinLink Thunderbolt 5 - CLI Jitter Test
+ * OdinLink — CLI: Jitter Test
+ *
+ * Measures the variation in round-trip latency over time (jitter).
+ * Sends periodic ping-pong messages and records the min/avg/max
+ * and standard deviation of latency. Important for real-time
+ * and isochronous workloads.
  */
 #include "odl_tb5_cli.h"
 

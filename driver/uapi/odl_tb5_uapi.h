@@ -1,16 +1,20 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * OdinLink Thunderbolt 5 - Userspace API
+ * OdinLink — Userspace API: ioctl Commands and Structures
  *
- * Defines the ioctl interface between kernel driver (odl_tb5.ko)
- * and userspace (libodl_tb5.so / odl_tb5_cli).
+ * This header defines the contract between userspace programs
+ * (libodl_tb5.so, odl_tb5_cli, NCCL plugins) and the kernel driver.
+ * Both sides include this file so they agree on message formats.
  *
- * Stream-based multiplexed I/O model:
- *   - Multiple streams per device, each identified by u8 stream_id
- *   - Per-stream TX/RX queues with interrupt-driven completion
- *   - Two buffer modes:
- *     1. Kernel-managed DMA (STREAM_SEND/RECV) - for CLI / daemon
- *     2. User-provided dmabuf (STREAM_SEND_DMABUF/RECV_DMABUF) - for RCCL / GPU
+ * Two API layers:
+ *   1. Stream-based (new) — open channels by ID, send/receive messages,
+ *      wait for completion. Supports multiple concurrent streams per
+ *      device, like separate phone lines through one cable.
+ *   2. Legacy double-buffer (old) — simple ping-pong buffers. Still
+ *      works, kept for backward compatibility.
+ *
+ * Constants here define frame size (4 KB), protocol IDs for peer
+ * discovery, stream header format, and all ioctl numbers.
  */
 #ifndef ODL_TB5_UAPI_H
 #define ODL_TB5_UAPI_H

@@ -1,15 +1,21 @@
 /*
- * OdinLink Verbs Provider — Queue Pairs
+ * OdinLink — Verbs: Queue Pairs (The Actual Data Path)
  *
- * Async Queue Pair with poll()-based non-blocking I/O:
+ * A QP (Queue Pair) is just a pair of send/receive queues — like a
+ * pipe between two machines. This file maps an RDMA QP to an OdinLink
+ * stream.
  *
- * ibv_post_send → enqueue to SQ → return immediately
- * Worker thread → poll(fd, EPOLLOUT) → dequeue WR → ioctl(nonblock)
- *              → on -EAGAIN → re-enqueue WR → poll again
- *              → on success → post WC to CQ → signal eventfd
+ * How async I/O works here:
+ * 1. ibv_post_send → enqueue the work request → return immediately
+ * 2. A background worker thread polls the device fd (EPOLLOUT)
+ * 3. When the hardware is ready, it dequeues a WR and calls the
+ *    kernel's stream_send ioctl (which is O_NONBLOCK)
+ * 4. If the kernel says EAGAIN (busy), re-enqueue and poll again
+ * 5. On success, post a Work Completion to the CQ and wake the app
+ *    via eventfd
  *
- * The device fd is set to O_NONBLOCK at context init time, so all
- * stream_send/recv ioctls return -EAGAIN instead of blocking.
+ * This gives true async I/O: the calling thread never blocks even
+ * though the kernel path is synchronous under the hood.
  */
 
 #include "odl_tb5_verbs.h"

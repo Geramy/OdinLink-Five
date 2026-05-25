@@ -1,7 +1,9 @@
 /*
- * OdinLink TB5 Daemon - RCCL Stats Collector
+ * OdinLink — Daemon: RCCL Stats Exporter
  *
- * Copyright (c) 2025-2026 OdinLink Project
+ * Writes RCCL (AMD GPU) collective operation statistics to a
+ * shared-memory file at /run/odl_tb5/rccl_stats so monitoring
+ * tools can read them without going through D-Bus.
  */
 #include "odl_tb5_daemon_rccl_stats.h"
 #include <stdio.h>

@@ -1,19 +1,23 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * OdinLink Thunderbolt 5 - Software Loopback Device
+ * OdinLink — Fake Peer for Testing Without a Cable
  *
- * Creates fake OdinLink-Five devices without Thunderbolt hardware.
- * Each device allocates an mmap-able buffer, sets state to READY, and
- * provides a complete ioctl interface. The "peer" is simulated locally.
+ * When you pass loopback=1 to the module, this file creates pretend
+ * Thunderbolt devices. No NHI hardware needed — data just loops back
+ * inside your own machine via memcpy.
  *
  * Use: sudo insmod driver/odl_tb5.ko loopback=1
- * Then: /dev/odl_tb5_0 appears, immediately ready.
+ * Then: /dev/odl_tb5_0 appears, immediately in READY state.
  *
- * Limitations:
- *   - No real NHI DMA — throughput equals memcpy speed
- *   - Stream sends copy to a software ring buffer
- *   - Completions are immediate (no interrupt latency)
- *   - Use for API/stack testing, not performance measurement
+ * What's fake:
+ *   - No real DMA — data moves at memcpy speed (not 80 Gbps)
+ *   - No real interrupts — completions are instant
+ *   - The "peer" is just another software buffer on the same machine
+ *
+ * What's real:
+ *   - The full ioctl API works (streams, legacy, mmap, poll)
+ *   - Good for testing apps, protocol logic, and verbs provider
+ *   - Bad for benchmarking
  */
 
 #include "odl_tb5_core.h"

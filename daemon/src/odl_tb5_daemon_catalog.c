@@ -1,6 +1,9 @@
 /*
+ * OdinLink — Daemon: File Catalog (Index of Peer Files)
+ *
+ * Maintains a local index of which files exist on the peer and their
+ * checksums. Used by the sync engine to decide what needs updating.
  * SPDX-License-Identifier: MIT
- * Copyright (c) 2025-2026 OdinLink Project
  */
 #include "odl_tb5_daemon_catalog.h"
 #include "odl_tb5_daemon_sync_proto.h"

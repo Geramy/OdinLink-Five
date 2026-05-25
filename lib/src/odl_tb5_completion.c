@@ -1,5 +1,13 @@
 /*
- * OdinLink Thunderbolt 5 - Completion Polling and Waiting
+ * OdinLink — Completion Polling: Did My Send/Recv Finish?
+ *
+ * After submitting data, you need to know when the DMA is actually done
+ * so you can reuse the buffer. This file provides:
+ *   - poll() — non-blocking check, "done yet?"
+ *   - wait_tx() — block until the current TX finishes
+ *   - wait_rx() — block until data arrives
+ *
+ * The kernel tracks completed vs submitted frame counts under the hood.
  */
 #include "odl_tb5_priv.h"
 #include <odl_tb5/odl_tb5_ioctl.h>

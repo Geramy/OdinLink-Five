@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: MIT
 /*
- * OdinLink Thunderbolt 5 - Service Driver Registration
+ * OdinLink — Driver Lifecycle: Load, Probe, Remove
  *
- * Thunderbolt service probe/remove, module init/exit, and global device list.
- * Part of the odl_tb5.ko multi-file module alongside:
- *   odl_tb5_ring_dma.c  - NHI ring allocation, DMA buffer management
- *   odl_tb5_chardev.c   - Character device (ioctl / mmap interface)
- *   odl_tb5_proto.c     - OdinLink login/logout handshake protocol
+ * What happens when you run `sudo insmod odl_tb5.ko`:
+ *   1. Advertises "OdinLink is here" to any Thunderbolt peer on the other
+ *      end of the cable (via XDomain property directories).
+ *   2. When a peer matches our protocol ID, the kernel calls probe(),
+ *      which creates a device struct, allocates DMA rings, and kicks off
+ *      the login handshake.
+ *   3. remove() tears everything down when the cable is unplugged or the
+ *      module is unloaded.
+ *
+ * Also handles module parameters: ring_size, loopback, protocol, e2e.
  */
 
 #include "odl_tb5_core.h"
@@ -30,6 +35,12 @@ int odl_protocol_mode = 0;
 module_param_named(protocol, odl_protocol_mode, int, 0444);
 MODULE_PARM_DESC(protocol,
 	"XDomain protocol mode: 0=OdinLink (0x4F4C, default), 1=Apple (0xFA57)");
+
+bool odl_e2e = true;
+module_param_named(e2e, odl_e2e, bool, 0444);
+MODULE_PARM_DESC(e2e,
+	"Enable end-to-end flow control (default=1). Set 0 for TB3 controllers "
+	"that do not support RING_FLAG_E2E.");
 
 /* Apple protocol uses its own property key and registers as an alternate
  * service so macOS ThunderboltRDMA can discover us via XDomain matching. */

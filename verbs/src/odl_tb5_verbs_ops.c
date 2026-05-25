@@ -1,13 +1,16 @@
 /*
- * OdinLink Verbs Provider — ibv_context Ops Dispatch Table + Interposition
+ * OdinLink — Verbs: The Wiring That Connects ibv_* Calls to Our Code
  *
- * On modern rdma-core, ibv_query_device and ibv_query_port dispatch
- * through the internal verbs_context struct (not ibv_context_ops).
- * We provide symbol interposition for these functions so they work
- * with our contexts.
+ * When an app calls ibv_query_device, ibv_post_send, ibv_poll_cq, etc.,
+ * libibverbs looks up the function pointer in a dispatch table. This
+ * file sets up that table so every standard verbs call routes to our
+ * OdinLink implementation.
  *
- * Other ibv_* functions (poll_cq, post_send, post_recv, etc.)
- * DO dispatch through ibv_context_ops fields that we set here.
+ * For ibv_query_device and ibv_query_port, modern rdma-core uses an
+ * internal struct (verbs_context) instead of the old ops table, so we
+ * intercept those symbols directly via symbol interposition. The rest
+ * (poll_cq, post_send, post_recv, etc.) go through the ops fields we
+ * populate here.
  */
 
 #include "odl_tb5_verbs.h"

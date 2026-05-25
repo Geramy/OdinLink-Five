@@ -208,6 +208,23 @@ build/cli/odl_tb5_cli --client --device 0 --test bandwidth
 ibv_devinfo     # should list an odl_tb5 device
 ```
 
+## Module Parameters
+
+| Param | Default | What it does |
+|-------|---------|--------------|
+| `e2e=0` | 1 (on) | Disables end-to-end flow control handshake. **Only needed for old TB3 controllers** that choke on E2E. TB4/TB5 leave this alone. |
+| `loopback=1` | 0 (off) | Creates fake devices with no cable — data loops back inside your own machine. For testing without a peer. |
+| `protocol=1` | 0 (OdinLink) | Switches to Apple's protocol ID (0xFA57) so macOS peers can discover OdinLink. For Mac↔Linux only. |
+| `ring_size=1024` | 4096 | Number of DMA packet slots per ring. Larger = smoother bursts, more RAM. Fine at 4096 for all TB generations. Lower for RAM-constrained machines. |
+
+```bash
+# Examples:
+sudo insmod driver/odl_tb5.ko                  # TB4/TB5, default everything
+sudo insmod driver/odl_tb5.ko e2e=0            # old TB3 controller
+sudo insmod driver/odl_tb5.ko loopback=1        # no cable, just testing
+sudo insmod driver/odl_tb5.ko protocol=1        # talk to macOS
+```
+
 ## Debug
 
 ```bash

@@ -1,25 +1,22 @@
 // SPDX-License-Identifier: MIT
 /*
- * OdinLink Thunderbolt 5 - Login/Logout Handshake Protocol
+ * OdinLink — The Handshake: How Two Machines Agree to Talk
  *
- * Implements the XDomain login/logout handshake between two OdinLink
- * peers.  The protocol follows the same pattern as thunderbolt-net
- * (drivers/net/thunderbolt.c):
+ * Before any data moves, both sides need to agree on which DMA slots to
+ * use. This is the XDomain login/logout protocol:
  *
- *   1. Both sides advertise the "odinlink" protocol via their property
- *      directory so that XDomain discovery matches the service.
- *   2. Both sides schedule a login work item that sends a login request
- *      via tb_xdomain_request() and waits for a response.
- *   3. A global protocol handler receives incoming login requests from
- *      the peer and sends back a login response.
- *   4. When a side has both sent and received a successful login the
- *      XDomain paths are enabled, DMA rings are started, and the
- *      connection enters the CONNECTED state.
+ *   1. Each machine advertises its protocol ID ("OdinLink" = 0x4F4C, or
+ *      "Apple" = 0xFA57 for macOS compat) so the other end can find it.
+ *   2. Both sides send a "login" request saying "hey, use DMA slot X for
+ *      your outgoing data" and wait for the other to reply.
+ *   3. When both have sent and received a login, we enable the paths
+ *      (like opening a gate), start the DMA rings, and sanity-check the
+ *      link with a ping/pong exchange.
+ *   4. If either side disconnects, a "logout" tears it all down so the
+ *      next connection starts fresh.
  *
- * Part of the odl_tb5.ko multi-file module alongside:
- *   odl_tb5_service.c   - Thunderbolt service probe / remove
- *   odl_tb5_ring_dma.c  - NHI ring allocation, DMA buffer management
- *   odl_tb5_chardev.c   - Character device (ioctl / mmap interface)
+ * This is the same pattern Linux uses for Thunderbolt networking —
+ * just with our own protocol ID so we don't collide with IP-over-TB.
  */
 
 #include "odl_tb5_core.h"

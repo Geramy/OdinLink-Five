@@ -1,11 +1,13 @@
 /*
- * OdinLink Thunderbolt 5 - Test Suite Runner
+ * OdinLink — Test Suite: Smoke Tests for the Whole Stack
  *
- * Runs all test suites and reports results.
+ * Runs three test suites in sequence:
+ *   1. device  — kernel ioctl interface
+ *   2. lib_api — userspace library API
+ *   3. plugin  — NCCL/RCCL plugin stubs
  *
- * Prerequisites:
- *   - Kernel module loaded: sudo insmod driver/odl_tb5.ko
- *   - Device permissions: sudo chmod 666 /dev/odl_tb5_0
+ * Prerequisites: sudo insmod driver/odl_tb5.ko, device readable.
+ * No test framework — plain C main(), returns number of failures.
  */
 #include <stdio.h>
 #include <stdlib.h>

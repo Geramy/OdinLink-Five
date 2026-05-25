@@ -1,13 +1,14 @@
 /*
- * OdinLink Verbs Provider — Memory Region Registration
+ * OdinLink — Verbs: Memory Regions (Pinning RAM and GPU Memory for DMA)
  *
- * ibv_reg_mr:        Register host memory for DMA. The kernel driver
- *                    handles host memory via its mmap'd buffers.
+ * ibv_reg_mr:        Tell the kernel "this chunk of host RAM is safe to
+ *                    DMA from/to." Pins the pages so they don't get
+ *                    swapped out while the transfer is in flight.
  *
- * ibv_reg_dmabuf_mr: Register a DMA-buf file descriptor for zero-copy
- *                    GPU memory. The fd is passed to the kernel driver's
- *                    send_dmabuf/recv_dmabuf ioctls. This is the same
- *                    approach as Apple's ibv_reg_dmabuf_mr on macOS.
+ * ibv_reg_dmabuf_mr: Same thing, but for GPU memory. Passes a DMA-buf
+ *                    file descriptor to the kernel driver so it can DMA
+ *                    directly from/to GPU VRAM — zero copies. This is
+ *                    the key to fast GPU collectives (NCCL).
  */
 
 #include "odl_tb5_verbs.h"

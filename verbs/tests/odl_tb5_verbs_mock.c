@@ -1,24 +1,15 @@
 /*
- * OdinLink-Five User-Space Mock Device
+ * OdinLink — Fake Kernel Driver (Userspace Mock)
  *
- * Simulates two OdinLink-Five "peers" connected via shared memory,
- * without any kernel module or Thunderbolt hardware.
+ * Simulates two Thunderbolt peers communicating over shared memory.
+ * No kernel module, no Thunderbolt hardware — just two buffers
+ * that loop data back and forth. Useful for CI and development
+ * when you don't have a cable.
  *
  * How it works:
- *   Creates two simulated device contexts connected by a shared-memory
- *   ring buffer. Each context exposes odl_tb5_t handles that can be
- *   opened and used with the standard odl_tb5_* API.
- *
- *   Data sent on one side is immediately available for receive on the
- *   other side. The mock supports both the legacy double-buffer and
- *   stream-based APIs.
- *
- * Build: gcc -shared -fPIC -o libodl_tb5_mock.so \
- *            odl_tb5_verbs_mock.c -lpthread
- *
- * Usage:
- *   LD_PRELOAD=libodl_tb5_mock.so <any verbs app>
- *   This intercepts both libodl_tb5 and provides simulated devices.
+ *   Creates two pretend "device" contexts connected by an in-memory
+ *   ring buffer. Send data on side A, it's immediately available on
+ *   side B. Supports both the legacy double-buffer and stream APIs.
  */
 
 #define _GNU_SOURCE

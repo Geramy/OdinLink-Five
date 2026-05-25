@@ -1,3 +1,10 @@
+/*
+ * OdinLink — CLI: Server Mode
+ *
+ * Listens for a client connection, then accepts and runs whatever test
+ * the client requests (bandwidth, latency, jitter, MIMO). Runs until
+ * the client disconnects.
+ */
 #include "odl_tb5_cli.h"
 
 #include <stdio.h>

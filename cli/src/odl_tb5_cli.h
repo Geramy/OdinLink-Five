@@ -1,3 +1,10 @@
+/*
+ * OdinLink — CLI: Bandwidth, Latency, Jitter Tests Over Thunderbolt
+ *
+ * The command-line tool for measuring real-world performance:
+ * point-to-point bandwidth, round-trip latency, jitter patterns,
+ * and MIMO (multiple simultaneous streams).
+ */
 #ifndef ODL_TB5_CLI_H
 #define ODL_TB5_CLI_H
 

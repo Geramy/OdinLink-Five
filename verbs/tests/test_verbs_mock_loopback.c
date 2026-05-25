@@ -1,20 +1,13 @@
 /*
- * OdinLink Verbs Provider — End-to-end loopback test via mock
+ * OdinLink — Verbs Loopback Test (No Hardware Needed)
  *
- * Uses the mock libodl_tb5_mock.so to simulate two TB5 peers
- * communicating. Tests the full verbs API lifecycle:
- *   ibv_open_device → ibv_alloc_pd → ibv_reg_mr →
- *   ibv_create_cq → ibv_create_qp → ibv_post_send →
- *   ibv_poll_cq → cleanup
+ * Uses the mock library (libodl_tb5_mock.so) so you can test the
+ * full verbs API without a Thunderbolt cable or even the kernel
+ * module. Two simulated "peers" on the same machine talk to each
+ * other via shared memory.
  *
- * Build:
- *   gcc -o test_verbs_mock_loopback test_verbs_mock_loopback.c \
- *       -I../../verbs/src -L../.. -lodl_tb5_verbs -libverbs -lpthread
- *
- * Run:
- *   LD_PRELOAD=/tmp/libodl_tb5_mock.so \
- *   LD_LIBRARY_PATH=build/verbs:build/lib \
- *   ./test_verbs_mock_loopback
+ * Full lifecycle: open device → PD → MR → CQ → QP → post_send →
+ * poll_cq → cleanup.
  */
 
 #include <stdio.h>

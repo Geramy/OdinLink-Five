@@ -1,6 +1,10 @@
 /*
+ * OdinLink — Daemon: FUSE Filesystem (Peer's Files Look Local)
+ *
+ * Mounts the peer's file system via FUSE so you can browse it like a
+ * local directory. Uses the sync engine's catalog to fetch file metadata
+ * and content on demand. Think "sshfs but over Thunderbolt DMA."
  * SPDX-License-Identifier: MIT
- * Copyright (c) 2025-2026 OdinLink Project
  */
 #define _GNU_SOURCE
 #define FUSE_USE_VERSION 31

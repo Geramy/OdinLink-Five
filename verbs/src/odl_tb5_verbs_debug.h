@@ -9,13 +9,11 @@
 #include <time.h>
 
 /*
- * OdinLink Verbs — Debug & Assertion Layer
+ * OdinLink — Verbs: Tracing Every Call (for debugging)
  *
- * Enable with: export ODL_VERBS_DEBUG=1
- * Levels: 0=off, 1=errors, 2=warnings, 3=info, 4=verbose, 5=trace
- *
- * At level 5, every verbs API entry/exit is logged with
- * parameters and return values.
+ * Set ODL_VERBS_DEBUG to see every ibv_* call logged to stderr:
+ *   export ODL_VERBS_DEBUG=1
+ * Levels: 0=off, 1=errors only, 5=everything (entry/exit + params)
  */
 
 extern int odl_verbs_debug_level;

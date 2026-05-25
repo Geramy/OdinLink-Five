@@ -1,5 +1,10 @@
 /*
- * OdinLink Thunderbolt 5 - Shared Type Definitions
+ * OdinLink — Shared Types: Structs Both Kernel and Userspace Agree On
+ *
+ * Connection states (disconnected → handshake → connected → ready),
+ * peer info (UUID, speed, vendor), completion counters, and buffer
+ * sizes. These structs are passed across the kernel-userspace boundary
+ * via ioctl and must match exactly on both sides.
  */
 #ifndef ODL_TB5_TYPES_H
 #define ODL_TB5_TYPES_H

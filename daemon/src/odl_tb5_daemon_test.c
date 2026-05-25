@@ -1,5 +1,12 @@
-/* SPDX-License-Identifier: MIT */
-/* Copyright (c) 2025-2026 OdinLink Project */
+/*
+ * OdinLink — Daemon: Test Server (Responds to CLI Benchmarks)
+ *
+ * Runs inside the daemon process and waits for CLI test requests
+ * (bandwidth, latency, etc.). Responds by sending/receiving data
+ * on the appropriate stream. Eliminates the need for a separate
+ * CLI server process when the daemon is running.
+ * SPDX-License-Identifier: MIT
+ */
 #include "odl_tb5_daemon_test.h"
 #include "odl_tb5_daemon_dbus.h"
 #include "odl_tb5_daemon_monitor.h"

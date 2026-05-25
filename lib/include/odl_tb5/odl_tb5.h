@@ -1,5 +1,10 @@
 /*
- * OdinLink Thunderbolt 5 - Public Userspace API
+ * OdinLink — Public API: What Programs Use to Talk Over Thunderbolt
+ *
+ * This is the header that applications #include. It declares every
+ * function in libodl_tb5.so: open/close devices, send/receive data
+ * (both legacy double-buffer and stream-based), poll completions,
+ * and register memory for GPU zero-copy via DMA-buf.
  */
 #ifndef ODL_TB5_H
 #define ODL_TB5_H

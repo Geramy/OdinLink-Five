@@ -1,25 +1,20 @@
 /*
- * OdinLink Verbs Provider — Device Discovery & ibv_open_device Interposition
+ * OdinLink — Verbs: Finding Devices and Opening Connections
  *
- * Two operating modes:
+ * Two ways to hook into libibverbs:
  *
- * 1. Standalone shared library (primary):
- *    libodl_tb5_verbs.so provides ibv_open_device via symbol interposition.
- *    For OdinLink-Five devices, creates a fully functional ibv_context with
- *    all standard ibv_* operations. For non-ODL devices, chains to the real
- *    libibverbs.
+ * 1. LD_PRELOAD (standalone library):
+ *    libodl_tb5_verbs.so intercepts ibv_open_device. If the device is
+ *    an OdinLink Thunderbolt device, it wraps it with our implementation.
+ *    If it's a real InfiniBand/RoCE card, it passes through to the real
+ *    libibverbs. This lets any verbs app work with Thunderbolt without
+ *    recompiling.
  *
- *    Usage: LD_PRELOAD=libodl_tb5_verbs.so <any verbs app>
- *           or: gcc ... -lodl_tb5_verbs (resolves ibv_open_device at link time)
+ * 2. rdma-core plugin (auto-discovery):
+ *    libodl_tb5-rdmav34.so registers as a proper rdma-core provider so
+ *    ibv_devinfo lists odl_tb5 alongside other RDMA devices automatically.
  *
- * 2. rdma-core provider plugin (requires private headers):
- *    libodl_tb5-rdmav34.so registers via PROVIDER_DRIVER for full
- *    rdma-core integration (ibv_devinfo, etc.). Build with
- *    -DHAVE_RDMA_CORE_DRIVER_H.
- *
- * Device discovery: scans /dev/odl_tb5_N entries.
- * Zero-copy GPU:   ibv_reg_dmabuf_mr passes dmabuf fd to kernel driver.
- * Async model:     ibv_post_send → workqueue → worker thread → completion CQ.
+ * Device discovery: scans /dev/odl_tb5_* entries to find OdinLink hardware.
  */
 
 #include "odl_tb5_verbs.h"

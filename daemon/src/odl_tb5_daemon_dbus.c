@@ -1,7 +1,10 @@
 /*
- * OdinLink TB5 Daemon - D-Bus Service Implementation
+ * OdinLink — Daemon: D-Bus API (Other Apps Ask Us Questions)
  *
- * Copyright (c) 2025-2026 OdinLink Project
+ * Exposes peer status, connection info, and link statistics over
+ * D-Bus so system tools, desktop widgets, and monitoring scripts
+ * can ask "is the Thunderbolt link up?" without talking to the
+ * kernel directly.
  */
 #include "odl_tb5_daemon_dbus.h"
 #include "odl_tb5_daemon_monitor.h"

@@ -1,5 +1,9 @@
 /*
- * OdinLink Thunderbolt 5 - Bandwidth Test Implementation
+ * OdinLink — CLI: Bandwidth Test
+ *
+ * Sends a large buffer from client to server as fast as possible and
+ * reports throughput (Gbps). Measures how close to the wire speed
+ * (40/80 Gbps) you can get with the OdinLink stack.
  */
 #include "odl_tb5_cli.h"
 

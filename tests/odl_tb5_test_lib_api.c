@@ -1,7 +1,9 @@
 /*
- * OdinLink Thunderbolt 5 - Library API Tests
+ * OdinLink — Test: Userspace Library API
  *
- * Tests the userspace library (libodl_tb5.so) interface.
+ * Exercises every function in libodl_tb5.so: open/close, send/recv,
+ * swap buffers, poll/wait completions, stream open/close/send/recv.
+ * Verifies the library behaves correctly under normal and error paths.
  */
 #include <stdio.h>
 #include <stdlib.h>
