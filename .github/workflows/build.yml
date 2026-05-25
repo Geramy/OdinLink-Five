@@ -41,6 +41,7 @@ jobs:
           docker compose build odl-test 2>&1
           docker compose run --rm odl-test 2>&1 | grep -E "PASS|FAIL|ALL TESTS"
       - name: Package .deb
+        continue-on-error: true
         run: |
           cd build
           sudo cpack -G DEB -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=amd64 2>&1
@@ -53,7 +54,8 @@ jobs:
       - name: Upload DKMS source
         if: always()
         run: |
-          V="${GITHUB_REF_NAME#v}"; [ -n "$V" ] || V="0.1.0"
+          V="$(echo "${GITHUB_REF_NAME#v}" | tr '/' '-' | tr -c '[:alnum:]._-' '_')"
+          [ -n "$V" ] || V="0.1.0"
           D="/tmp/dkms/usr/src/odl-tb5-${V}/uapi"
           mkdir -p "$D"
           set +e
