@@ -25,6 +25,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <dlfcn.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
 #include <linux/dma-heap.h>

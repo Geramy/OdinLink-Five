@@ -1,0 +1,10 @@
+build/
+.git/
+*.swp
+*.o
+*.o.d
+*.ko
+*.mod
+*.mod.c
+*.symvers
+*.order
