@@ -2,7 +2,7 @@ FROM ubuntu:24.04 AS builder
 
 RUN apt-get update -qq && apt-get install -y -qq \
     build-essential cmake pkg-config libibverbs-dev rdma-core \
-    libglib2.0-dev 2>&1 | tail -3
+    libglib2.0-dev 2>&1
 
 WORKDIR /src
 COPY . .
@@ -11,22 +11,29 @@ RUN mkdir build && cd build && \
     cmake .. -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_DAEMON=OFF -DBUILD_TRAY=OFF -DBUILD_VERBS=ON \
       -DBUILD_KERNEL_MODULE=OFF && \
-    make -j$(nproc) odl_tb5 odl_tb5_verbs 2>&1 | tail -5
+    make -j$(nproc) odl_tb5 odl_tb5_verbs 2>&1
 
 # Build the mock library
 RUN mkdir -p /tmp/test_build && \
     gcc -shared -fPIC -o /tmp/test_build/libodl_tb5_mock.so \
-    /src/verbs/tests/odl_tb5_verbs_mock.c -lpthread -lrt -ldl -libverbs 2>&1
+    /src/verbs/tests/odl_tb5_verbs_mock.c -lpthread -lrt -ldl -libverbs
 
 # Build the end-to-end test
 RUN gcc -o /tmp/test_build/test_verbs_mock_loopback \
     /src/verbs/tests/test_verbs_mock_loopback.c \
     -I/src/verbs/src \
     -L/src/build/verbs -L/src/build/lib \
-    -lodl_tb5_verbs -lodl_tb5 -libverbs -lpthread -ldl 2>&1
+    -lodl_tb5_verbs -lodl_tb5 -libverbs -lpthread -ldl
+
+# Build the dmabuf MR test
+RUN gcc -o /tmp/test_build/test_verbs_dmabuf \
+    /src/verbs/tests/test_verbs_dmabuf.c \
+    -I/src/verbs/src \
+    -L/src/build/verbs -L/src/build/lib \
+    -lodl_tb5_verbs -lodl_tb5 -libverbs -lpthread -ldl
 
 FROM ubuntu:24.04
-RUN apt-get update -qq && apt-get install -y -qq libibverbs1 libc6 2>&1 | tail -3
+RUN apt-get update -qq && apt-get install -y -qq libibverbs1 libc6 2>&1
 COPY --from=builder /src/build /app
 COPY --from=builder /tmp/test_build /app/tests
 RUN mkfifo /dev/odl_tb5_0 2>/dev/null || true

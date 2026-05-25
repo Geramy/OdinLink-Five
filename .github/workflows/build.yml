@@ -35,15 +35,15 @@ jobs:
           make -j$(nproc) odl_tb5_cli odl_tb5_daemon odl_tb5_tray
       - name: Build kernel module
         continue-on-error: true
-        run: cd build && make -j$(nproc) driver 2>&1 | tail -10
+        run: cd build && make -j$(nproc) driver 2>&1
       - name: Test with Docker Compose
         run: |
-          docker compose build odl-test 2>&1 | tail -5
+          docker compose build odl-test 2>&1
           docker compose run --rm odl-test 2>&1 | grep -E "PASS|FAIL|ALL TESTS"
       - name: Package .deb
         run: |
           cd build
-          sudo cpack -G DEB -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=amd64 2>&1 | tail -20
+          sudo cpack -G DEB -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=amd64 2>&1
           ls *.deb
       - name: Upload packages
         uses: actions/upload-artifact@v4
@@ -54,16 +54,19 @@ jobs:
         if: always()
         run: |
           V="${GITHUB_REF_NAME#v}"; [ -n "$V" ] || V="0.1.0"
-          D="/tmp/dkms/usr/src/odl-tb5-${V}/uapi"; mkdir -p "$D"
-          cp driver/*.c "$D/../" 2>/dev/null || true
-          cp driver/*.h "$D/../" 2>/dev/null || true
-          cp driver/Kbuild "$D/../" 2>/dev/null || true
-          cp driver/Makefile "$D/../" 2>/dev/null || true
-          cp driver/uapi/odl_tb5_uapi.h "$D/" 2>/dev/null || true
-          cp packaging/dkms.conf "$D/../" 2>/dev/null || true
-          cp packaging/dkms-postinst.sh "$D/../" 2>/dev/null || true
-          cp packaging/dkms-prerm.sh "$D/../" 2>/dev/null || true
-          cp driver/71-odl-tb5.rules /tmp/dkms/ 2>/dev/null || true
+          D="/tmp/dkms/usr/src/odl-tb5-${V}/uapi"
+          mkdir -p "$D"
+          set +e
+          cp driver/*.c "$D/../" 2>/dev/null
+          cp driver/*.h "$D/../" 2>/dev/null
+          cp driver/Kbuild "$D/../" 2>/dev/null
+          cp driver/Makefile "$D/../" 2>/dev/null
+          cp driver/uapi/odl_tb5_uapi.h "$D/" 2>/dev/null
+          cp packaging/dkms.conf "$D/../" 2>/dev/null
+          cp packaging/dkms-postinst.sh "$D/../" 2>/dev/null
+          cp packaging/dkms-prerm.sh "$D/../" 2>/dev/null
+          cp driver/71-odl-tb5.rules /tmp/dkms/ 2>/dev/null
+          set -e
           cd /tmp && tar czf "odl-tb5-dkms-${V}.tar.gz" dkms/
       - name: Upload DKMS tarball
         if: always()
