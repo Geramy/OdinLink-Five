@@ -138,6 +138,76 @@ LD_PRELOAD=verbs/tests/libodl_tb5_mock.so \
   build/verbs/tests/test_verbs_mock_loopback
 ```
 
+## Smoke Tests (with hardware)
+
+Verbose logging is essential for diagnosing failures. Use the provided helper
+script which captures everything automatically:
+
+```bash
+# Full smoke test suite — all logs go to smoke-test-<timestamp>/:
+./scripts/smoke-test.sh
+
+# Run only the verbs provider test:
+./scripts/smoke-test.sh -t verbs
+
+# Bandwidth test (two machines, machine A first):
+sudo ./scripts/smoke-test.sh -t bandwidth -m server   # Machine A
+sudo ./scripts/smoke-test.sh -t bandwidth -m client   # Machine B
+
+# Custom output directory:
+./scripts/smoke-test.sh -o /tmp/odl-debug
+```
+
+Verbose logging is also available manually:
+
+```bash
+# Watch kernel driver logs (run in a separate terminal):
+sudo dmesg -w | grep odl_tb5
+
+# Trace all verbs calls — set level 1–5 (5 = most verbose):
+export ODL_VERBS_DEBUG=5
+```
+
+### Manual smoke test steps
+
+**1. Kernel module + device node**
+
+```bash
+sudo insmod driver/odl_tb5.ko
+sudo chmod 666 /dev/odl_tb5_0    # allow non-root access
+ls -l /dev/odl_tb5_0             # appears only when a TB5 peer is connected
+```
+
+**2. Full test suite** (3 suites: device, lib API, plugin)
+
+```bash
+build/tests/odl_tb5_test
+```
+
+**3. Verbs provider lifecycle test**
+
+```bash
+build/verbs/tests/test_verbs_basic
+```
+
+Exercises: device discovery, context open, PD/MR/CQ/QP lifecycle, post_send/post_recv.
+
+**4. End-to-end bandwidth** (two machines)
+
+```bash
+# Machine A:
+build/cli/odl_tb5_cli --server --device 0
+
+# Machine B (wait for server to be ready):
+build/cli/odl_tb5_cli --client --device 0 --test bandwidth
+```
+
+**5. ibv_devinfo discovery**
+
+```bash
+ibv_devinfo     # should list an odl_tb5 device
+```
+
 ## Debug
 
 ```bash
