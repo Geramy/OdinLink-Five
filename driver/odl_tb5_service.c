@@ -356,11 +356,9 @@ static void __exit odl_tb5_exit(void)
 		goto out;
 	}
 
-	/*
-	 * Explicit cleanup of remaining devices.
-	 * This is a safeguard in case tb_unregister_service_driver()
-	 * did not remove all devices (e.g., due to a hotplug error).
-	 */
+	/* Unregister first so tb core removes bound services before orphan cleanup. */
+	tb_unregister_service_driver(&odl_tb5_driver);
+
 	mutex_lock(&odl_tb5_devices_lock);
 	list_for_each_entry_safe(dev, tmp, &odl_tb5_devices_list, list) {
 		pr_warn("odl_tb5: cleaning up orphaned device at exit\n");
@@ -387,7 +385,6 @@ static void __exit odl_tb5_exit(void)
 	}
 	mutex_unlock(&odl_tb5_devices_lock);
 
-	tb_unregister_service_driver(&odl_tb5_driver);
 	odl_tb5_proto_unregister();
 
 	/* Unregister property dirs: main dir under its protocol key,
