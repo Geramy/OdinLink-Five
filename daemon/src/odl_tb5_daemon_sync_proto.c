@@ -9,22 +9,38 @@
 
 #include <odl_tb5/odl_tb5.h>
 #include <openssl/evp.h>
+#include <openssl/hmac.h>
+
+/* Pre-shared key for HMAC-SHA256 message authentication.
+ * Override at build time with -DODL_SYNC_HMAC_KEY="..." */
+#ifndef ODL_SYNC_HMAC_KEY
+#define ODL_SYNC_HMAC_KEY  "odinlink-sync-default-key"
+#endif
 
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
-/* Fill the common sync header fields. */
+/* Fill the common sync header fields and stamp a truncated HMAC-SHA256
+ * authentication tag into the reserved field. */
 static void fill_header(struct odl_sync_header *hdr, uint32_t type,
 			uint32_t payload_len, uint32_t seq)
 {
+	uint8_t digest[32];
+	unsigned int dlen = sizeof(digest);
+
 	memset(hdr, 0, sizeof(*hdr));
 	hdr->magic       = ODL_SYNC_MAGIC;
 	hdr->version     = ODL_SYNC_VERSION;
 	hdr->type        = type;
 	hdr->payload_len = payload_len;
 	hdr->sequence    = seq;
+	/* Compute HMAC over the authenticated fields (all except reserved). */
+	HMAC(EVP_sha256(), ODL_SYNC_HMAC_KEY, sizeof(ODL_SYNC_HMAC_KEY) - 1,
+	     (const uint8_t *)hdr, sizeof(*hdr) - sizeof(hdr->reserved),
+	     digest, &dlen);
+	memcpy(&hdr->reserved, digest, sizeof(hdr->reserved));
 }
 
 /* Send an assembled message via stream. */
@@ -47,8 +63,7 @@ int odl_sync_send_file_meta(odl_tb5_t h, uint8_t sid, uint8_t dst,
 	fill_header(&msg.hdr, ODL_SYNC_MSG_FILE_META,
 		    sizeof(msg) - sizeof(msg.hdr), *seq);
 
-	strncpy(msg.rel_path, rel_path, ODL_SYNC_PATH_MAX - 1);
-	msg.rel_path[ODL_SYNC_PATH_MAX - 1] = '\0';
+	snprintf(msg.rel_path, sizeof(msg.rel_path), "%s", rel_path);
 	msg.file_size   = file_size;
 	msg.mtime_ns    = mtime_ns;
 	msg.mode        = mode;
@@ -101,8 +116,7 @@ int odl_sync_send_file_ack(odl_tb5_t h, uint8_t sid, uint8_t dst,
 	fill_header(&msg.hdr, ODL_SYNC_MSG_FILE_ACK,
 		    sizeof(msg) - sizeof(msg.hdr), *seq);
 
-	strncpy(msg.rel_path, rel_path, ODL_SYNC_PATH_MAX - 1);
-	msg.rel_path[ODL_SYNC_PATH_MAX - 1] = '\0';
+	snprintf(msg.rel_path, sizeof(msg.rel_path), "%s", rel_path);
 	msg.status = status;
 
 	return send_ctrl(h, sid, dst, &msg, sizeof(msg));
@@ -119,8 +133,7 @@ int odl_sync_send_file_delete(odl_tb5_t h, uint8_t sid, uint8_t dst,
 	fill_header(&msg.hdr, ODL_SYNC_MSG_FILE_DELETE,
 		    sizeof(msg) - sizeof(msg.hdr), *seq);
 
-	strncpy(msg.rel_path, rel_path, ODL_SYNC_PATH_MAX - 1);
-	msg.rel_path[ODL_SYNC_PATH_MAX - 1] = '\0';
+	snprintf(msg.rel_path, sizeof(msg.rel_path), "%s", rel_path);
 	msg.mtime_ns = mtime_ns;
 
 	return send_ctrl(h, sid, dst, &msg, sizeof(msg));
@@ -138,8 +151,7 @@ int odl_sync_send_dir_create(odl_tb5_t h, uint8_t sid, uint8_t dst,
 	fill_header(&msg.hdr, ODL_SYNC_MSG_DIR_CREATE,
 		    sizeof(msg) - sizeof(msg.hdr), *seq);
 
-	strncpy(msg.rel_path, rel_path, ODL_SYNC_PATH_MAX - 1);
-	msg.rel_path[ODL_SYNC_PATH_MAX - 1] = '\0';
+	snprintf(msg.rel_path, sizeof(msg.rel_path), "%s", rel_path);
 	msg.mtime_ns = mtime_ns;
 	msg.mode     = mode;
 
@@ -157,8 +169,7 @@ int odl_sync_send_dir_delete(odl_tb5_t h, uint8_t sid, uint8_t dst,
 	fill_header(&msg.hdr, ODL_SYNC_MSG_DIR_DELETE,
 		    sizeof(msg) - sizeof(msg.hdr), *seq);
 
-	strncpy(msg.rel_path, rel_path, ODL_SYNC_PATH_MAX - 1);
-	msg.rel_path[ODL_SYNC_PATH_MAX - 1] = '\0';
+	snprintf(msg.rel_path, sizeof(msg.rel_path), "%s", rel_path);
 	msg.mtime_ns = mtime_ns;
 
 	return send_ctrl(h, sid, dst, &msg, sizeof(msg));
@@ -360,6 +371,20 @@ int odl_sync_recv_msg(odl_tb5_t h, uint8_t sid, void *buf, size_t buf_size,
 
 	if (hdr->version != ODL_SYNC_VERSION)
 		return -EPROTO;
+
+	/* Verify HMAC-SHA256 authentication tag in reserved field. */
+	{
+		uint8_t digest[32];
+		unsigned int dlen = sizeof(digest);
+		uint32_t expected_tag;
+
+		HMAC(EVP_sha256(), ODL_SYNC_HMAC_KEY, sizeof(ODL_SYNC_HMAC_KEY) - 1,
+		     (const uint8_t *)hdr, sizeof(*hdr) - sizeof(hdr->reserved),
+		     digest, &dlen);
+		memcpy(&expected_tag, digest, sizeof(expected_tag));
+		if (hdr->reserved != expected_tag)
+			return -EPROTO;
+	}
 
 	total_len = sizeof(struct odl_sync_header) + hdr->payload_len;
 	if (total_len > actual_len)
