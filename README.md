@@ -257,7 +257,3 @@ working implementation. See [`COMPAT.md`](COMPAT.md).
 
 - **Kernel driver** (`odl_tb5.ko`): GPL v2
 - **All userspace**: MIT
-
----
-
-*Sponsored by [Scrya](https://scrya.com)*
