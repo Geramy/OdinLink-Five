@@ -1,3 +1,9 @@
+/*
+ * OdinLink — CLI: Entry Point (Parses Arguments, Dispatches)
+ *
+ * Decides whether to run as server (wait for peer) or client (connect
+ * and run a test). Dispatches to bandwidth/latency/jitter/MIMO tests.
+ */
 #include "odl_tb5_cli.h"
 
 #include <stdio.h>

@@ -1,12 +1,15 @@
 /*
- * OdinLink Verbs Provider — Basic API smoke test
+ * OdinLink — Verbs Smoke Test: Can We Open a Device and Send Data?
  *
- * Tests the verbs provider library interface:
- *   - Device discovery
- *   - Context creation
- *   - PD, MR, CQ, QP lifecycle
- *   - post_send/post_recv
+ * Walks through a standard RDMA lifecycle:
+ *   - Find an OdinLink device
+ *   - Open it, query capabilities
+ *   - Create a PD, register memory, create a CQ
+ *   - Create and connect a QP
+ *   - post_send a message, poll CQ for completion
+ *   - Clean up everything
  *
+ * This is the verbs equivalent of "hello world."
  * Build: gcc -o test_verbs_basic test_verbs_basic.c -lodl_tb5_verbs -libverbs
  * Run:   ./test_verbs_basic  (requires /dev/odl_tb5_0 with peer connected)
  */

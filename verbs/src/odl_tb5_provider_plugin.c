@@ -1,16 +1,15 @@
 /*
- * OdinLink Verbs — rdma-core provider plugin
+ * OdinLink — Verbs: rdma-core Provider Plugin (Auto-Discovery)
  *
- * Built as libodl_tb5-rdmav34.so and installed to the libibverbs
- * provider directory. At dlopen time, the constructor registers
- * with rdma-core. Applications using ibv_open_device, ibv_devinfo,
- * etc. discover OdinLink-Five devices automatically.
+ * When you install libodl_tb5-rdmav34.so to the libibverbs provider
+ * directory, rdma-core loads it automatically. From then on, every
+ * rdma-core app (ibv_devinfo, ibv_rc_pingpong, NCCL's IB transport)
+ * sees OdinLink as just another RDMA device alongside your Mellanox
+ * or SoftiWARP cards. No LD_PRELOAD needed.
  *
- * This file uses ONLY public libibverbs headers + dlsym for the
- * few private symbols needed (verbs_register_driver_34).
- *
- * Struct layouts are replicated from rdma-core's private driver.h
- * to avoid a build dependency on unreleased header packages.
+ * This file manually replicates the provider struct layouts from
+ * rdma-core's private driver.h to avoid depending on unreleased
+ * header packages.
  */
 
 #define _GNU_SOURCE

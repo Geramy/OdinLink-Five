@@ -1,3 +1,9 @@
+/*
+ * OdinLink — CLI: Client Mode
+ *
+ * Connects to the peer server and runs a requested test (bandwidth,
+ * latency, jitter, or MIMO). Reports results to stdout.
+ */
 #include "odl_tb5_cli.h"
 
 #include <stdio.h>

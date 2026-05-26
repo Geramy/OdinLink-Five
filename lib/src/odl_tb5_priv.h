@@ -1,8 +1,9 @@
 /*
- * OdinLink Thunderbolt 5 - Private Library Header
+ * OdinLink — Internal Library Plumbing
  *
- * Internal handle definition shared across library source files.
- * NOT part of the public API.
+ * The handle struct that every library function uses behind the scenes.
+ * Holds the device fd, mmap'd buffer pointers, and buffer sizes.
+ * NOT exposed to users — this is implementation detail.
  */
 #ifndef ODL_TB5_PRIV_H
 #define ODL_TB5_PRIV_H

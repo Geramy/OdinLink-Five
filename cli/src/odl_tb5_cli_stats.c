@@ -1,5 +1,9 @@
 /*
- * OdinLink Thunderbolt 5 - Statistics Engine
+ * OdinLink — CLI: Statistics Engine
+ *
+ * Accumulates and prints test results: throughput (Gbps), latency
+ * (microseconds), packet loss, and timing histograms. Used by all
+ * the test modes (bandwidth, latency, jitter, MIMO).
  */
 #include "odl_tb5_cli.h"
 

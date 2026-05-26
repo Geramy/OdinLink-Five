@@ -2,23 +2,23 @@
 #define ODL_TB5_VERBS_H
 
 /*
- * OdinLink Verbs Provider — Internal Header
+ * OdinLink — Verbs Provider: Making OdinLink Look Like Any RDMA Card
  *
- * This provider implements the full libibverbs API backed by
- * OdinLink-Five Thunderbolt 5 DMA transport.
+ * This is the magic that makes standard RDMA programs (NCCL, PyTorch,
+ * ibv_rc_pingpong) work over a Thunderbolt cable without code changes.
+ * It implements the ibv_* API (ibv_open_device, ibv_post_send, etc.)
+ * on top of OdinLink's kernel driver.
  *
- * Architecture:
- *   ibv_context     → odl_tb5_handle (device fd + mmap'd buffers)
- *   ibv_pd          → lightweight permission boundary
- *   ibv_mr          → DMA-buf fd (GPU) or host memory pointer
- *   ibv_cq          → completion ring + eventfd notification
- *   ibv_qp          → odl_tb5_stream with async workqueue worker
+ * How it maps RDMA concepts to OdinLink:
+ *   ibv_context     → an open /dev/odl_tb5_N + mmap'd buffers
+ *   ibv_pd          → a permission domain (lightweight, just tracking)
+ *   ibv_mr          → a pinned memory region (host RAM or GPU dmabuf)
+ *   ibv_cq          → a completion queue backed by an eventfd
+ *   ibv_qp          → a stream — messages go over one stream ID
  *
- * Async model:
- *   ibv_post_send enqueues a work request → worker thread drains →
- *   calls blocking odl_tb5_stream_send → posts completion to CQ.
- *   This provides non-blocking submission even with the current
- *   synchronous kernel driver.
+ * Async model: ibv_post_send drops work in a queue → a worker thread
+ * picks it up → calls odl_tb5_stream_send → posts result to CQ.
+ * This way the caller never blocks even though the kernel ioctl may.
  */
 
 #include <infiniband/verbs.h>

@@ -31,8 +31,9 @@ if(NOT GDBUS_CODEGEN_EXE AND BUILD_DAEMON)
     list(APPEND ODL_MISSING_DEPS "libglib2.0-dev-bin")
 endif()
 
-# Only check for kernel headers on Linux (required for kernel module build)
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+# Kernel module build — optional. Skip header check when building userspace only.
+option(BUILD_KERNEL_MODULE "Build the odl_tb5 kernel module" ON)
+if(BUILD_KERNEL_MODULE AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     execute_process(COMMAND uname -r OUTPUT_VARIABLE KERNEL_RELEASE OUTPUT_STRIP_TRAILING_WHITESPACE)
     if(NOT EXISTS "/lib/modules/${KERNEL_RELEASE}/build")
         list(APPEND ODL_MISSING_DEPS "linux-headers-${KERNEL_RELEASE}")
@@ -82,14 +83,14 @@ if(ODL_MISSING_DEPS)
         "  Then re-run cmake.\n"
         "============================================================\n")
     # Fail only if a required dep is missing (not optional fuse3/openssl)
-    # On macOS, skip linux-headers check (kernel module not built there)
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        if(NOT KERNEL_GCC OR NOT PKG_CONFIG_EXE OR NOT GDBUS_CODEGEN_EXE
-           OR NOT EXISTS "/lib/modules/${KERNEL_RELEASE}/build")
+    if(BUILD_KERNEL_MODULE)
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+           (NOT KERNEL_GCC OR NOT PKG_CONFIG_EXE OR NOT GDBUS_CODEGEN_EXE
+            OR NOT EXISTS "/lib/modules/${KERNEL_RELEASE}/build"))
             message(FATAL_ERROR "Cannot continue without required dependencies.")
         endif()
     else()
-        if(NOT PKG_CONFIG_EXE OR NOT GDBUS_CODEGEN_EXE)
+        if(NOT PKG_CONFIG_EXE)
             message(FATAL_ERROR "Cannot continue without required dependencies.")
         endif()
     endif()

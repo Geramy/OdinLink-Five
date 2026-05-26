@@ -1,3 +1,10 @@
+/*
+ * OdinLink — CLI: Wire Protocol for Client/Server Communication
+ *
+ * Defines how the CLI client and server talk to each other over
+ * OdinLink streams: message types (HELLO, TEST_REQ, PING, DATA, etc.)
+ * and serialization/deserialization of test parameters and results.
+ */
 #include "odl_tb5_cli.h"
 
 #include <stdio.h>

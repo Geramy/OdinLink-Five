@@ -1,7 +1,14 @@
 /*
- * OdinLink TB5 Daemon
+ * OdinLink — Daemon: Background Service for Monitoring & Sync
  *
- * Copyright (c) 2025-2026 OdinLink Project
+ * A GLib-based daemon that runs in the background and provides:
+ *   - D-Bus API for other apps to query peer status
+ *   - Connection monitoring (auto-detect cable plug/unplug)
+ *   - File sync engine (like Dropbox over Thunderbolt)
+ *   - RCCL shared-memory stats export
+ *   - FUSE mount for peer filesystem access
+ *
+ * Can be disabled at build time (auto-detected via pkg-config).
  */
 #include "odl_tb5_daemon_dbus.h"
 #include "odl_tb5_daemon_monitor.h"

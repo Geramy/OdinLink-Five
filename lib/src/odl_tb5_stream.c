@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: MIT
 /*
- * OdinLink Thunderbolt 5 - Stream-Based Multiplexed I/O
+ * OdinLink — Stream I/O: Multiple Channels Through One Cable
+ *
+ * Like having separate phone lines (streams) instead of one shared
+ * walkie-talkie. Each stream has its own ID (1-255), TX/RX queue,
+ * and can be used by a different application or thread simultaneously.
+ *
+ * This file wraps the stream ioctls: open a stream by ID, send a
+ * message to a destination stream, receive from a source stream,
+ * and close when done.
  */
 #include <odl_tb5/odl_tb5.h>
 #include <odl_tb5/odl_tb5_ioctl.h>

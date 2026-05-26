@@ -1,5 +1,9 @@
 /*
- * OdinLink Thunderbolt 5 - Latency Under Load Test
+ * OdinLink — CLI: Latency Under Load
+ *
+ * Measures how round-trip latency changes when the link is also
+ * carrying bandwidth traffic. Realistic for multi-tenant scenarios
+ * where latency-sensitive messages compete with bulk transfers.
  */
 #include "odl_tb5_cli.h"
 

@@ -1,7 +1,9 @@
 /*
- * OdinLink TB5 Daemon - Device Monitor
+ * OdinLink — Daemon: Watches for Cable Plug/Unplug Events
  *
- * Copyright (c) 2025-2026 OdinLink Project
+ * Polls /dev/odl_tb5_N periodically and emits D-Bus signals when
+ * a peer connects or disconnects. Also tracks link state transitions
+ * (handshake → connected → ready).
  */
 #include "odl_tb5_daemon_monitor.h"
 #include "odl_tb5_daemon_dbus.h"

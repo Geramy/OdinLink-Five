@@ -1,7 +1,9 @@
 /*
- * OdinLink TB5 Daemon - Sync Wire Protocol Implementation
+ * OdinLink — Daemon: Sync Wire Protocol (Messages Between Peers)
  *
- * Copyright (c) 2025-2026 OdinLink Project
+ * Serializes and deserializes the messages the sync engine exchanges
+ * with the peer: file change notifications, chunk requests, checksums,
+ * and transfer completions. Runs over OdinLink stream 2.
  */
 #include "odl_tb5_daemon_sync_proto.h"
 

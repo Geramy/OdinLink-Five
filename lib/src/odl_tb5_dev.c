@@ -1,5 +1,10 @@
 /*
- * OdinLink Thunderbolt 5 - Device Lifecycle
+ * OdinLink — Device Lifecycle: Open, Close, mmap Buffers
+ *
+ * Userspace counterpart to the char device. When a program calls
+ * odl_tb5_open(), this code opens /dev/odl_tb5_N, queries the kernel
+ * for buffer sizes, and mmap's the DMA buffers so the program can
+ * read/write directly to/from the Thunderbolt hardware without copying.
  */
 #include "odl_tb5_priv.h"
 #include <odl_tb5/odl_tb5_ioctl.h>

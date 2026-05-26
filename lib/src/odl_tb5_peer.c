@@ -1,5 +1,10 @@
 /*
- * OdinLink Thunderbolt 5 - Peer Discovery
+ * OdinLink — Peer Discovery: Find Out Who's on the Other End
+ *
+ * Query the kernel driver for info about the connected peer:
+ * its UUID, link speed/width, vendor name, and connection state.
+ * Also provides odl_tb5_wait_peer() which blocks until a peer
+ * shows up (useful for scripts and init sequences).
  */
 #include "odl_tb5_priv.h"
 #include <odl_tb5/odl_tb5_ioctl.h>

@@ -1,7 +1,9 @@
 /*
- * OdinLink Thunderbolt 5 - Device Tests
+ * OdinLink — Test: Kernel Device Interface
  *
- * Tests kernel device accessibility and basic ioctl behavior.
+ * Opens /dev/odl_tb5_N, checks that it responds to ioctls, swaps
+ * buffers, and reports peer info. Verifies the kernel <-> userspace
+ * contract works at the most basic level.
  */
 #include <stdio.h>
 #include <stdlib.h>

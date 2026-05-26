@@ -1,5 +1,13 @@
 /*
- * OdinLink Thunderbolt 5 - Data Transfer
+ * OdinLink — Data Transfer: Send and Receive Buffers
+ *
+ * Wraps the legacy double-buffer ioctls. Userspace writes data into
+ * an mmap'd TX buffer, calls odl_tb5_send() to ship it across the
+ * cable, then odl_tb5_swap_tx() to flip to the next buffer so the
+ * kernel can DMA the previous one while userspace fills the next.
+ *
+ * Same pattern for RX: swap to get a fresh buffer, recv to wait for
+ * data, read from the mmap'd region.
  */
 #include "odl_tb5_priv.h"
 #include <odl_tb5/odl_tb5_ioctl.h>

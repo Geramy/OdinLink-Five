@@ -1,5 +1,7 @@
 # AGENTS.md — OdinLink-Five
 
+**When explaining anything, prefer plain English over jargon.** No "RING_FLAG_E2E" — say "a handshake that keeps packets in order." No "NHI ring" — say "DMA packet slot." Assume the reader knows Linux basics but not Thunderbolt internals. Use analogies. Keep it short.
+
 ## Build
 
 ```bash
@@ -19,6 +21,8 @@ mkdir build && cd build && cmake .. && make -j$(nproc)
 - **Prerequisites**: kernel module loaded (`sudo insmod driver/odl_tb5.ko`), device readable (`sudo chmod 666 /dev/odl_tb5_0`).
 - No test framework — plain C `main()` returning failure count.
 - Verbs provider test: `build/verbs/tests/test_verbs_basic` (link with `-lodl_tb5_verbs -libverbs`).
+- Verbs dmabuf MR test: `build/verbs/tests/test_verbs_dmabuf` (link with `-lodl_tb5_verbs -libverbs -lpthread`). Falls back from DMA heap → CUDA → memfd.
+- RCCL dmabuf test: `build/tests/odl_tb5_test_rccl_dmabuf` (link with `-lodl_tb5 -lpthread`). Tests the same fd-plumbing path the RCCL plugin uses (no verbs layer). Falls back from DMA heap → AMDGPU → memfd.
 
 ## Architecture
 
@@ -44,7 +48,7 @@ mkdir build && cd build && cmake .. && make -j$(nproc)
 
 ## Module Parameters
 
-`ring_size=4096` (range 64–16384, power of 2). Each entry = 4 KB. Pass as `sudo insmod driver/odl_tb5.ko ring_size=1024`.
+`ring_size=4096` (range 64–16384, power of 2, 4 KB per entry). `e2e=1` (default, RING_FLAG_E2E). Pass `e2e=0` for TB3 controllers that don't support end-to-end flow control. `protocol=0` (OdinLink, default) or `1` (Apple/macOS compat).
 
 ## Gotchas
 

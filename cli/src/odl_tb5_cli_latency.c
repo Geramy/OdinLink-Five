@@ -1,5 +1,9 @@
 /*
- * OdinLink Thunderbolt 5 - Latency Ping-Pong Test
+ * OdinLink — CLI: Round-Trip Latency Test
+ *
+ * Bounces small messages back and forth (ping-pong) and measures
+ * the round-trip time in microseconds. Reports min/avg/max latency
+ * and jitter. This is the latency that RDMA apps will see.
  */
 #include "odl_tb5_cli.h"
 

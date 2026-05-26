@@ -1,15 +1,16 @@
 /*
- * OdinLink Verbs Provider — Completion Queues
+ * OdinLink — Verbs: Completion Queues (Where Finished Ops Are Reported)
  *
- * Completion queues aggregate per-operation completion events.
- * Supports eventfd-based notification for async wakeup.
+ * After you post a send or recv, the result shows up in a CQ —
+ * a ring buffer of "done" notifications. This file implements:
  *
- * CQ lifecycle:
- *   odl_create_cq  → allocate ring buffer + eventfd
- *   odl_cq_post    → push completion (from worker thread)
- *   odl_poll_cq    → drain completions (from application)
- *   odl_req_notify_cq → arm eventfd for edge-triggered notification
- *   odl_destroy_cq → close eventfd + free
+ *   odl_create_cq     → allocate the ring + an eventfd for wakeups
+ *   odl_cq_post       → push a completion (called by the worker thread)
+ *   odl_poll_cq       → application checks what's done (non-blocking)
+ *   odl_req_notify_cq → arm the eventfd so poll/select wakes the app
+ *   odl_destroy_cq    → cleanup
+ *
+ * The eventfd is how the worker thread tells the app "hey, new results".
  */
 
 #include "odl_tb5_verbs.h"

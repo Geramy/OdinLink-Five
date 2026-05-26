@@ -1,5 +1,10 @@
-/* SPDX-License-Identifier: MIT */
-/* Copyright (c) 2025-2026 OdinLink Project */
+/*
+ * OdinLink — Daemon: Configuration File Parser
+ *
+ * Reads and writes the daemon's config file (sync paths, log level,
+ * auto-start settings). Uses GLib's key-value file format.
+ * SPDX-License-Identifier: MIT
+ */
 #include "odl_tb5_daemon_config.h"
 #include <glib.h>
 #include <stdio.h>

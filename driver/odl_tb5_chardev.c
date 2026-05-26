@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: MIT
 /*
- * OdinLink Thunderbolt 5 - Character Device Interface
+ * OdinLink — The /dev/odl_tb5_N Door: Userspace <-> Kernel Interface
  *
- * Provides the /dev/odl_tb5_N nodes for userspace access via stream ioctls,
- * legacy double-buffer ioctls, and mmap.
- * Part of the odl_tb5.ko multi-file module alongside:
- *   odl_tb5_service.c   - Thunderbolt service probe / remove
- *   odl_tb5_ring_dma.c  - NHI ring allocation, DMA frame pool, TX/RX workers
- *   odl_tb5_proto.c     - OdinLink login/logout handshake protocol
+ * When userspace opens /dev/odl_tb5_0, they're talking to this file.
+ * It provides:
+ *   - Stream ioctls — open a data channel by ID, send/receive messages,
+ *     wait for completions (the modern interface)
+ *   - Legacy ioctls — the older double-buffer API (still works)
+ *   - mmap — maps DMA buffers directly into userspace so the CLI and
+ *     daemon can read/write without extra copies
+ *   - poll — for async I/O without busy-waiting
+ *
+ * Each open file descriptor gets its own context so multiple programs
+ * can talk through the same Thunderbolt cable simultaneously.
  */
 
 #include <linux/uaccess.h>

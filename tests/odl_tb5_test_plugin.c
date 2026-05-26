@@ -1,7 +1,10 @@
 /*
- * OdinLink Thunderbolt 5 - RCCL Plugin Tests
+ * OdinLink — Test: RCCL/NCCL Plugin Interface
  *
- * Tests the RCCL net v7 plugin interface.
+ * Loads the RCCL net v7 plugin (librccl_net_odl_tb5.so) and verifies
+ * that the plugin entry points (open, close, send, recv, etc.) work
+ * correctly. This is the path AMD GPUs use for collective operations
+ * over Thunderbolt.
  */
 #include <stdio.h>
 #include <stdlib.h>

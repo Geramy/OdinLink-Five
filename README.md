@@ -138,6 +138,93 @@ LD_PRELOAD=verbs/tests/libodl_tb5_mock.so \
   build/verbs/tests/test_verbs_mock_loopback
 ```
 
+## Smoke Tests (with hardware)
+
+Verbose logging is essential for diagnosing failures. Use the provided helper
+script which captures everything automatically:
+
+```bash
+# Full smoke test suite — all logs go to smoke-test-<timestamp>/:
+./scripts/smoke-test.sh
+
+# Run only the verbs provider test:
+./scripts/smoke-test.sh -t verbs
+
+# Bandwidth test (two machines, machine A first):
+sudo ./scripts/smoke-test.sh -t bandwidth -m server   # Machine A
+sudo ./scripts/smoke-test.sh -t bandwidth -m client   # Machine B
+
+# Custom output directory:
+./scripts/smoke-test.sh -o /tmp/odl-debug
+```
+
+Verbose logging is also available manually:
+
+```bash
+# Watch kernel driver logs (run in a separate terminal):
+sudo dmesg -w | grep odl_tb5
+
+# Trace all verbs calls — set level 1–5 (5 = most verbose):
+export ODL_VERBS_DEBUG=5
+```
+
+### Manual smoke test steps
+
+**1. Kernel module + device node**
+
+```bash
+sudo insmod driver/odl_tb5.ko
+sudo chmod 666 /dev/odl_tb5_0    # allow non-root access
+ls -l /dev/odl_tb5_0             # appears only when a TB5 peer is connected
+```
+
+**2. Full test suite** (3 suites: device, lib API, plugin)
+
+```bash
+build/tests/odl_tb5_test
+```
+
+**3. Verbs provider lifecycle test**
+
+```bash
+build/verbs/tests/test_verbs_basic
+```
+
+Exercises: device discovery, context open, PD/MR/CQ/QP lifecycle, post_send/post_recv.
+
+**4. End-to-end bandwidth** (two machines)
+
+```bash
+# Machine A:
+build/cli/odl_tb5_cli --server --device 0
+
+# Machine B (wait for server to be ready):
+build/cli/odl_tb5_cli --client --device 0 --test bandwidth
+```
+
+**5. ibv_devinfo discovery**
+
+```bash
+ibv_devinfo     # should list an odl_tb5 device
+```
+
+## Module Parameters
+
+| Param | Default | What it does |
+|-------|---------|--------------|
+| `e2e=0` | 1 (on) | Disables end-to-end flow control handshake. **Only needed for old TB3 controllers** that choke on E2E. TB4/TB5 leave this alone. |
+| `loopback=1` | 0 (off) | Creates fake devices with no cable — data loops back inside your own machine. For testing without a peer. |
+| `protocol=1` | 0 (OdinLink) | Switches to Apple's protocol ID (0xFA57) so macOS peers can discover OdinLink. For Mac↔Linux only. |
+| `ring_size=1024` | 4096 | Number of DMA packet slots per ring. Larger = smoother bursts, more RAM. Fine at 4096 for all TB generations. Lower for RAM-constrained machines. |
+
+```bash
+# Examples:
+sudo insmod driver/odl_tb5.ko                  # TB4/TB5, default everything
+sudo insmod driver/odl_tb5.ko e2e=0            # old TB3 controller
+sudo insmod driver/odl_tb5.ko loopback=1        # no cable, just testing
+sudo insmod driver/odl_tb5.ko protocol=1        # talk to macOS
+```
+
 ## Debug
 
 ```bash

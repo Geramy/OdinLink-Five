@@ -1,18 +1,17 @@
 /*
- * OdinLink Verbs Provider — Direct Wrapper API (standalone mode)
+ * OdinLink — Verbs: Helper API for Programs That Want to Find Us
  *
- * Applications can include this header to discover and open OdinLink-Five
- * devices directly, bypassing rdma-core's sysfs-based device discovery.
- *
- * For full rdma-core integration (ibv_devinfo, etc.), use the provider
- * plugin: libodl_tb5-rdmav34.so (auto-loaded by libibverbs).
+ * If you don't want to use the LD_PRELOAD or rdma-core plugin, you can
+ * include this header directly. It provides helper functions to scan
+ * /dev/odl_tb5_N, wrap the fd in an ibv_device struct, and open it
+ * with standard ibv_open_device.
  *
  * Usage:
  *   #include <odl_tb5/odl_tb5_verbs_wrapper.h>
  *   ...
  *   struct ibv_device *dev = odl_find_tb5_device(0);
  *   struct ibv_context *ctx = ibv_open_device(dev);
- *   // ... standard ibv_* API ...
+ *   // ... then standard ibv_* API as usual ...
  */
 
 #ifndef ODL_TB5_VERBS_WRAPPER_H

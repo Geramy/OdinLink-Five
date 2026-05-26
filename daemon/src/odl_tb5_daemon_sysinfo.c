@@ -1,5 +1,11 @@
-/* SPDX-License-Identifier: MIT */
-/* Copyright (c) 2025-2026 OdinLink Project */
+/*
+ * OdinLink — Daemon: System Info Collector
+ *
+ * Gathers hardware and software info about the local machine (CPU,
+ * memory, kernel version, GPU) to share with the peer. Used by the
+ * sysinfo test and for diagnostics.
+ * SPDX-License-Identifier: MIT
+ */
 
 #include "odl_tb5_daemon_sysinfo.h"
 

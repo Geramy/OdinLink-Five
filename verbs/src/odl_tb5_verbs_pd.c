@@ -1,3 +1,11 @@
+/*
+ * OdinLink — Verbs: Protection Domains (Permission Boundaries)
+ *
+ * A PD is a lightweight permission domain — it groups together memory
+ * regions and queue pairs that are allowed to talk to each other.
+ * In OdinLink, PDs are mostly tracking state; the real security is
+ * in the kernel driver.
+ */
 #include "odl_tb5_verbs.h"
 #include <stdlib.h>
 #include <errno.h>

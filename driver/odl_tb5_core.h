@@ -1,12 +1,19 @@
 /* SPDX-License-Identifier: MIT */
 /*
- * OdinLink Thunderbolt 5 - Internal Kernel Header
+ * OdinLink — Kernel Driver Internal Header
  *
- * Shared across the source files that compose odl_tb5.ko:
- *   odl_tb5_service.c   - Thunderbolt service probe / remove
- *   odl_tb5_ring_dma.c  - NHI ring allocation, DMA frame pool, TX/RX workers
- *   odl_tb5_chardev.c   - Character device (stream ioctl interface)
- *   odl_tb5_proto.c     - OdinLink login/logout handshake protocol
+ * The central wiring closet for the kernel module. Every .c file in the
+ * driver shares the types and functions declared here.
+ *
+ * Files that use this header:
+ *   odl_tb5_service.c   — Loading/unloading the driver, finding peer machines
+ *   odl_tb5_ring_dma.c  — Setting up the DMA packet slots (like a conveyor belt
+ *                         of fixed-size bins between two machines), sending and
+ *                         receiving data through them
+ *   odl_tb5_chardev.c   — The /dev/odl_tb5_N file that userspace programs open
+ *                         to talk to the driver
+ *   odl_tb5_proto.c     — The "hello/goodbye" handshake so both sides agree on
+ *                         which DMA slots to use
  */
 #ifndef ODL_TB5_CORE_H
 #define ODL_TB5_CORE_H
@@ -426,6 +433,7 @@ int  odl_tb5_proto_send_logout(struct odl_tb5_device *dev);
 
 extern int odl_loopback_count;
 extern int odl_protocol_mode;
+extern bool odl_e2e;
 int  odl_loopback_init(void);
 void odl_loopback_exit(void);
 

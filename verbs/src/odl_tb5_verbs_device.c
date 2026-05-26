@@ -1,8 +1,15 @@
 /*
- * OdinLink Verbs Provider — Device Open/Close and Queries
+ * OdinLink — Verbs: Opening and Querying an OdinLink Device
  *
- * Implements the core ibv_context lifecycle backed by OdinLink-Five.
- * Uses dlsym to chain to real libibverbs for non-ODL devices.
+ * When a program calls ibv_open_device on an OdinLink device, this
+ * code creates the ibv_context — the central handle that everything
+ * else (PDs, MRs, CQs, QPs) hangs off. It also implements
+ * ibv_query_device and ibv_query_port to report link speed, max
+ * QPs, etc.
+ *
+ * For non-OdinLink devices, it uses dlsym to pass through to the
+ * real libibverbs — so LD_PRELOAD of this library doesn't break
+ * your Mellanox card.
  */
 
 #include "odl_tb5_verbs.h"

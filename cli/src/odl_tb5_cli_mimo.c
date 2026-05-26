@@ -1,5 +1,10 @@
 /*
- * OdinLink Thunderbolt 5 - MIMO (Multiple Simultaneous Streams) Test
+ * OdinLink — CLI: MIMO Test (Multiple Streams at Once)
+ *
+ * Opens several streams in parallel and blasts data through all of them
+ * simultaneously. Tests how well the multiplexed I/O path handles
+ * concurrent traffic — relevant for NCCL collective operations where
+ * multiple GPUs are sending at the same time.
  */
 #include "odl_tb5_cli.h"
 

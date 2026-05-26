@@ -1,12 +1,22 @@
 // SPDX-License-Identifier: MIT
 /*
- * OdinLink Thunderbolt 5 - NHI Ring Allocation & DMA Buffer Management
+ * OdinLink — The DMA Engine: Sending and Receiving Packets
  *
- * DMA frame pool, stream TX/RX workers, and legacy double-buffer engine.
- * Part of the odl_tb5.ko multi-file module alongside:
- *   odl_tb5_service.c  - Thunderbolt service probe / remove
- *   odl_tb5_chardev.c  - Character device (stream ioctl interface)
- *   odl_tb5_proto.c    - OdinLink login/logout handshake protocol
+ * The Thunderbolt NHI (Native Host Interface) gives us a ring of fixed-size
+ * DMA slots — think of it like a circular conveyor belt of 4KB bins. You
+ * drop data into a bin on the TX belt, the hardware ships it across the
+ * cable, and the other end picks it up from their RX belt.
+ *
+ * This file handles:
+ *   - Allocating those DMA rings and the buffer memory behind them
+ *   - A "frame pool" of reusable 4KB slots (no re-allocation between sends)
+ *   - Two send modes: latency (one slot at a time, low delay) and throughput
+ *     (big 256KB batches, high bandwidth)
+ *   - RX assembly — the other side may split a message across multiple 4KB
+ *     frames; this reconstructs them into a single buffer
+ *   - Callbacks that fire when the hardware finishes a TX or completes an RX
+ *
+ * Also handles DMA-buf (GPU memory) transfers for zero-copy GPU→GPU.
  */
 
 #include "odl_tb5_core.h"
@@ -434,9 +444,13 @@ int odl_tb5_rings_alloc(struct odl_tb5_device *dev)
 	}
 	dev->local_tx_hopid = ret;
 
+	unsigned int ring_flags = RING_FLAG_FRAME;
+	if (odl_e2e)
+		ring_flags |= RING_FLAG_E2E;
+
 	dev->tx.ring = tb_ring_alloc_tx(xd->tb->nhi, -1,
 					rs,
-					RING_FLAG_FRAME | RING_FLAG_E2E);
+					ring_flags);
 	if (!dev->tx.ring) {
 		pr_err("odl_tb5: failed to allocate TX ring\n");
 		ret = -ENOMEM;
@@ -448,7 +462,7 @@ int odl_tb5_rings_alloc(struct odl_tb5_device *dev)
 
 	dev->rx.ring = tb_ring_alloc_rx(xd->tb->nhi, -1,
 					rs,
-					RING_FLAG_FRAME | RING_FLAG_E2E,
+					ring_flags,
 					dev->tx.ring->hop,
 					sof_mask, eof_mask,
 					NULL, NULL);

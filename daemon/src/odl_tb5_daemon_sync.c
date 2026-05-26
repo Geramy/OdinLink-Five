@@ -1,7 +1,10 @@
 /*
- * OdinLink TB5 Daemon - Hybrid inotify + On-Demand Streaming Engine
+ * OdinLink — Daemon: File Sync Engine (Like Dropbox Over Thunderbolt)
  *
- * Copyright (c) 2025-2026 OdinLink Project
+ * Watches a directory for changes via inotify and streams file deltas
+ * to the peer. Uses on-demand fetching so the peer only pulls data it
+ * actually needs. Designed for high-speed sync between two machines
+ * connected by cable.
  */
 #include "odl_tb5_daemon_sync.h"
 #include "odl_tb5_daemon_sync_proto.h"
