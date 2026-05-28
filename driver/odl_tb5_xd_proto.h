@@ -3,8 +3,8 @@
  * OdinLink — XDomain Protocol Definitions
  *
  * Shared between odl_tb5_proto.c (the protocol handler) and
- * odl_tb5_transport_nhi.c (the NHI backend).  The Apple backend
- * will need its own protocol definitions.
+ * odl_tb5_transport_nhi.c (the NHI backend). Apple-specific
+ * protocol definitions are in odl_tb5_xd_proto_apple.h.
  */
 #ifndef ODL_TB5_XD_PROTO_H
 #define ODL_TB5_XD_PROTO_H

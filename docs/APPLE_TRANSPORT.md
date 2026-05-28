@@ -42,25 +42,42 @@ to be reused by the NHI driver. Sven's cover letter says:
 ## Architecture: Apple Silicon Thunderbolt stack
 
 ```
-┌─────────────────────────────────────────────────┐
-│  OdinLink driver (transport_apple.c — TO WRITE) │
-│  Uses odl_tb5_transport_ops, same as NHI backend│
-├─────────────────────────────────────────────────┤
-│  Apple NHI driver (NOT YET UPSTREAM)            │
-│  - DMA ring alloc/submit/callback              │
-│  - XDomain / USB4 tunnel management            │
-│  - Interrupt handling                          │
-│  - DART (IOMMU) mappings                      │
-├─────────────────────────────────────────────────┤
-│  ATCPHY (UPSTREAM — atc.c)                     │
-│  - Lane muxing (USB3 / USB4 / TBT / DP)       │
-│  - Pipehandler (PIPE mux for DWC3)             │
-│  - Power/clock management                      │
-│  - Firmware tunable application                │
-├─────────────────────────────────────────────────┤
-│  Apple Fabric / ACIO (partially upstream)       │
-│  - Interconnect, power domains                  │
-└─────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────┐
+│  OdinLink driver (transport_apple.c — IMPLEMENTED)   │
+│  Uses odl_tb5_transport_ops, same as NHI backend     │
+│                                                       │
+│  • ACIO register layout parsed from DT tunables       │
+│  • Per-HopID MSI-X interrupt routing                  │
+│  • Shared TX descriptor buffer model                 │
+│  • Full stopDMA: disable intr → clear ENABLE → done  │
+│  • Apple XDomain login/logout (UUID 0xFA57)          │
+├───────────────────────────────────────────────────────┤
+│  apple_tb5_nhi_regs.h (STANDALONE SHARED HEADER)     │
+│  • Full register map, descriptor format, DART info    │
+│  • ACIO layout blob struct, HAL vtable offsets        │
+│  • Usable by any Apple TB driver, not just OdinLink   │
+├───────────────────────────────────────────────────────┤
+│  odl_tb5_xd_proto_apple.h (APPLE PROTOCOL HEADER)    │
+│  • Apple XDomain protocol UUID (0xFA57)               │
+│  • Apple-style login/response/logout messages         │
+│  • apple_tb5_xd_header_init() helper                  │
+├───────────────────────────────────────────────────────┤
+│  Apple NHI driver (NOT YET UPSTREAM)                  │
+│  - Creates platform device from DT                    │
+│  - DMA ring alloc/submit/callback                    │
+│  - XDomain / USB4 tunnel management                  │
+│  - Interrupt handling                                │
+│  - DART (IOMMU) mappings                            │
+├───────────────────────────────────────────────────────┤
+│  ATCPHY (UPSTREAM — atc.c)                           │
+│  - Lane muxing (USB3 / USB4 / TBT / DP)             │
+│  - Pipehandler (PIPE mux for DWC3)                   │
+│  - Power/clock management                            │
+│  - Firmware tunable application                      │
+├───────────────────────────────────────────────────────┤
+│  Apple Fabric / ACIO (partially upstream)             │
+│  - Interconnect, power domains                        │
+└───────────────────────────────────────────────────────┘
 ```
 
 ## Key ATCPHY details relevant to OdinLink
@@ -123,59 +140,73 @@ Converged IO) fabric and has separate MMIO.
 
 ### Transport ops → Apple NHI mapping
 
-| odl_tb5_transport_ops | Apple NHI equivalent |
-|------------------------|---------------------|
-| `ring_alloc` | Allocate DMA descriptor rings in Apple NHI MMIO |
-| `ring_free` | Free those rings |
-| `ring_start/stop` | Enable/disable NHI DMA engine |
-| `ring_tx` | Submit TX descriptor to Apple NHI ring |
-| `ring_rx` | Post RX descriptor to Apple NHI ring |
-| `dma_device` | Return device for DART-mapped coherent DMA |
-| `path_enable` | Configure ATCPHY for USB4 mode + enable ACIO path |
-| `path_disable` | Tear down USB4 path, return PHY to safe state |
-| `peer_send_login` | Send XDomain login via Apple's packet format |
-| `kick_tx/rx` | Ring the NHI doorbell / kick work queue |
+| odl_tb5_transport_ops | Apple NHI equivalent | Status |
+|------------------------|---------------------|--------|
+| `ring_alloc` | Allocate shared TX + per-ring RX DMA descriptor rings | Done (shared TX buffer) |
+| `ring_free` | Free those rings | Done |
+| `ring_start/stop` | Enable/disable NHI DMA engine + per-HopID interrupts | Done (full stopDMA) |
+| `ring_tx` | Submit TX descriptor to Apple NHI ring | Done |
+| `ring_rx` | Post RX descriptor to Apple NHI ring | Done |
+| `dma_device` | Return device for DART-mapped coherent DMA | Done |
+| `path_enable` | Configure ATCPHY for USB4 mode + enable ACIO path | Stub (needs ATCPHY) |
+| `path_disable` | Tear down USB4 path, return PHY to safe state | Done (stops rings) |
+| `peer_send_login` | Send XDomain login via Apple's packet format (UUID 0xFA57) | Done |
+| `peer_send_logout` | Send XDomain logout | Done |
+| `kick_tx/rx` | Ring the NHI doorbell / kick work queue | Done |
 
-### New concerns specific to Apple
+### New concerns specific to Apple (status)
 
 1. **DART (Apple IOMMU)**: All DMA addresses must go through DART translation.
-   `dma_device()` must return the DART-mapped device, not the raw platform device.
-   Apple's DART supports bypass mode but we should use proper mapping.
+   `dma_device()` returns the DART-mapped platform device. The Linux DMA API
+   handles DART translation transparently. See `apple_tb5_nhi_regs.h` for
+   DART SID ranges (0x00-0x0B, 0x10-0x1B).
 
 2. **Apple Fabric (ACIO)**: The NHI sits behind the Apple Fabric interconnect.
    Power domains and clock gating must be managed. The ATCPHY already handles
    its own power domains; the NHI will need separate ones.
 
-3. **Firmware tunables**: The NHI will need its own set of tunables (different
-   from ATCPHY's). The `apple_tunable_parse/apply` infrastructure is ready.
+3. **Firmware tunables**: The NHI uses firmware tunable blobs to set register
+   layouts. `apple_parse_acio_layout()` reads DT properties (falling back to
+   M4 Pro defaults). The `apple_tunable_parse/apply` infrastructure is ready
+   upstream.
 
-4. **Ring format**: Apple's DMA ring format must be determined from
-   Apple's `IORDMAFamily` kext and related XNU sources.
-   Intel NHI uses `struct ring_frame` with `buffer_phy`, `size`, `sof`/`eof`,
-   `callback`. Apple's format will be different.
+4. **Ring format**: Determined from analysis. Apple uses 16-byte DMA descriptors
+   (addr_lo, addr_hi, control, reserved). See `apple_tb5_nhi_regs.h` for the
+   `struct apple_tb5_dma_desc` definition. Control word bit positions are
+   inferred from Intel NHI and need hardware verification.
 
-5. **Protocol differences**: Apple's ThunderboltRDMA uses protocol ID 0xFA57
-   and key "rdma" (already handled by OdinLink's `protocol=1` mode). But the
-   actual on-wire packet format for login/response may differ (partially
-   handled by the existing Apple-compat code in `odl_tb5_proto.c`).
+5. **Protocol differences**: Apple's ThunderboltRDMA uses protocol ID 0xFA57.
+   `odl_tb5_xd_proto_apple.h` defines Apple-specific login/response/logout
+   messages with `apple_tb5_xd_header_init()`. The existing `protocol=1` mode
+   in `odl_tb5_proto.c` handles short Apple login packets on the RX side.
+
+### New files (shared resources for Asahi kernel devs)
+
+| File | Purpose |
+|------|---------|
+| `driver/apple_tb5_nhi_regs.h` | Standalone register map, descriptor format, DART info, HAL offsets. No OdinLink dependency. |
+| `driver/odl_tb5_xd_proto_apple.h` | Apple XDomain protocol UUID (0xFA57), login/response/logout messages, header init helper. |
 
 ## Dependencies and timeline
 
 ```
 ATCPHY (DONE) ──► Apple NHI driver (IN PROGRESS, Asahi)
                          │
-                         ├── DMA ring format analysis
+                         ├── DMA ring format analysis (DONE — apple_tb5_nhi_regs.h)
                          ├── DART integration
                          ├── ACIO/Fabric bring-up
                          └── USB4 tunnel management
                                 │
                                 ▼
-                    OdinLink Apple transport (US — can stub now)
+                    OdinLink Apple transport (IMPLEMENTED)
                          │
-                         ├── odl_tb5_transport_apple.c
-                         ├── ATCPHY integration (set USB4 mode)
-                         ├── DART-mapped DMA allocations
-                         └── Apple NHI ring submit/callback
+                         ├── odl_tb5_transport_apple.c (full impl)
+                         ├── apple_tb5_nhi_regs.h (shared register map)
+                         ├── odl_tb5_xd_proto_apple.h (Apple protocol)
+                         ├── ACIO tunable layout parser
+                         ├── Per-HopID MSI-X interrupt routing
+                         ├── Shared TX descriptor buffer
+                         └── Full stopDMA sequence
 ```
 
 The NHI driver is likely 1-2 years from upstream (estimate based on ATCPHY

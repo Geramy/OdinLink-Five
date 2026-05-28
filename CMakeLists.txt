@@ -176,6 +176,8 @@ install(FILES
     driver/odl_tb5_transport_apple.c
     driver/odl_tb5_transport.h
     driver/odl_tb5_xd_proto.h
+    driver/odl_tb5_xd_proto_apple.h
+    driver/apple_tb5_nhi_regs.h
     driver/odl_tb5_core.h
     driver/Kbuild
     driver/Makefile

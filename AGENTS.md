@@ -28,7 +28,7 @@ mkdir build && cd build && cmake .. && make -j$(nproc)
 
 | Component | Path | License |
 |-----------|------|---------|
-| Kernel driver | `driver/odl_tb5.ko` (4 .c files) | **GPL v2** |
+| Kernel driver | `driver/odl_tb5.ko` (8 .c files) | **GPL v2** |
 | Userspace library | `lib/libodl_tb5.so` | MIT |
 | RCCL plugin (AMD) | `rccl/librccl_net_odl_tb5.so` | MIT |
 | NCCL plugin (NVIDIA) | `nccl/libnccl-net-ODL_TB5.so` | MIT |
@@ -37,6 +37,8 @@ mkdir build && cd build && cmake .. && make -j$(nproc)
 | Tray app | `tray/odl_tb5_tray` (GTK3/AppIndicator) | MIT |
 | Verbs provider (standalone) | `verbs/libodl_tb5_verbs.so` (symbol interposition) | MIT |
 | Verbs provider (plugin) | `verbs/libodl_tb5-rdmav34.so` (rdma-core provider) | MIT |
+| Apple register map | `driver/apple_tb5_nhi_regs.h` (standalone, no OdinLink deps) | MIT |
+| Apple XDomain protocol | `driver/odl_tb5_xd_proto_apple.h` | MIT |
 
 - Cross-platform compat docs at `COMPAT.md`. Apple's TB RDMA protocol ID = 64087 (0xFA57); OdinLink uses 0x4F4C. They must match for Mac↔Linux interop.
 - Apple's `IORDMAFamily` kernel extension is **not shipped** on macOS 26.5 — `AppleThunderboltRDMA.kext` is a stub with no binary. Mac Thunderbolt RDMA is not currently functional on current macOS. OdinLink is the only working implementation.

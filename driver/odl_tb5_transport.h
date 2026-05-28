@@ -3,8 +3,8 @@
  * OdinLink — Transport Backend Interface
  *
  * A "transport" is the hardware-specific layer that moves bytes over
- * Thunderbolt.  The NHI (Intel's DMA engine) is one transport.  A future
- * Apple-Silicon backend would be another.
+ * Thunderbolt.  The NHI (Intel's DMA engine) is one transport.
+ * The Apple Silicon backend (odl_tb5_transport_apple.c) is another.
  *
  * The rest of the driver — character device, streams, frame pools,
  * protocol handshake — is transport-agnostic.  It calls these ops to
