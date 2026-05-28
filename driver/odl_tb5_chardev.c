@@ -374,23 +374,22 @@ static long odl_tb5_ioctl(struct file *filp, unsigned int cmd,
 
 		memset(&info, 0, sizeof(info));
 
-		if (dev->xd && dev->xd->remote_uuid)
-			memcpy(info.uuid, dev->xd->remote_uuid, 16);
-
-		if (dev->xd) {
+#ifdef CONFIG_THUNDERBOLT
+		if (dev->transport->type == ODL_TB5_TRANSPORT_NHI && dev->xd) {
+			if (dev->xd->remote_uuid)
+				memcpy(info.uuid, dev->xd->remote_uuid, 16);
 			info.link_speed = dev->xd->link_speed;
 			info.link_width = dev->xd->link_width;
+			if (dev->xd->vendor_name)
+				strscpy(info.vendor_name, dev->xd->vendor_name,
+					sizeof(info.vendor_name));
+			if (dev->xd->device_name)
+				strscpy(info.device_name, dev->xd->device_name,
+					sizeof(info.device_name));
 		}
+#endif
 
 		info.state = dev->state;
-
-		if (dev->xd && dev->xd->vendor_name)
-			strscpy(info.vendor_name, dev->xd->vendor_name,
-				sizeof(info.vendor_name));
-
-		if (dev->xd && dev->xd->device_name)
-			strscpy(info.device_name, dev->xd->device_name,
-				sizeof(info.device_name));
 
 		if (copy_to_user(uarg, &info, sizeof(info)))
 			return -EFAULT;
@@ -486,7 +485,10 @@ static int odl_tb5_mmap(struct file *filp, struct vm_area_struct *vma)
 
 	vma->vm_pgoff = 0;
 
-	dma_dev = tb_ring_dma_device(dev->tx.ring);
+	if (!dev->transport || !dev->transport->dma_device)
+		return -ENODEV;
+
+	dma_dev = dev->transport->dma_device(dev);
 
 	return dma_mmap_coherent(dma_dev, vma, buf->virt, buf->phys,
 				 buf->size);

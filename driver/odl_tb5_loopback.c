@@ -1,30 +1,22 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * OdinLink — Fake Peer for Testing Without a Cable
+ * OdinLink — Loopback Transport Backend
  *
- * When you pass loopback=1 to the module, this file creates pretend
- * Thunderbolt devices. No NHI hardware needed — data just loops back
- * inside your own machine via memcpy.
+ * Software-only transport for testing without Thunderbolt hardware.
+ * Data loops back at memcpy speed. No NHI, no DMA, no interrupts.
+ *
+ * Implements odl_tb5_transport_ops so the rest of the driver
+ * (chardev, streams, ioctl) works exactly like the real NHI path.
  *
  * Use: sudo insmod driver/odl_tb5.ko loopback=1
  * Then: /dev/odl_tb5_0 appears, immediately in READY state.
- *
- * What's fake:
- *   - No real DMA — data moves at memcpy speed (not 80 Gbps)
- *   - No real interrupts — completions are instant
- *   - The "peer" is just another software buffer on the same machine
- *
- * What's real:
- *   - The full ioctl API works (streams, legacy, mmap, poll)
- *   - Good for testing apps, protocol logic, and verbs provider
- *   - Bad for benchmarking
  */
 
 #include "odl_tb5_core.h"
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
-
-/* ── Loopback per-stream state ──────────────────────────────────────── */
+#include <linux/kthread.h>
+#include <linux/delay.h>
 
 #define LB_STREAM_MAX 256
 #define LB_QUEUE_DEPTH 512
@@ -44,8 +36,6 @@ struct lb_stream {
 	int               rx_count;
 };
 
-/* ── Loopback device instance ───────────────────────────────────────── */
-
 struct lb_device {
 	int               index;
 	void             *buf;
@@ -55,13 +45,134 @@ struct lb_device {
 	unsigned long     stream_bitmap[BITS_TO_LONGS(LB_STREAM_MAX)];
 };
 
-/* ── Create / Destroy ───────────────────────────────────────────────── */
+/* ── Loopback transport ops ────────────────────────────────────────── */
+
+static int lb_ring_alloc(struct odl_tb5_device *dev)
+{
+	struct lb_device *lb = dev->transport_priv;
+
+	dev->tx.ring_size = odl_ring_size;
+	dev->rx.ring_size = odl_ring_size;
+
+	lb->buf_size = ODL_TB5_FRAME_SIZE * 4096;
+	lb->buf = vmalloc(lb->buf_size);
+	if (!lb->buf)
+		return -ENOMEM;
+
+	return 0;
+}
+
+static void lb_ring_free(struct odl_tb5_device *dev)
+{
+	struct lb_device *lb = dev->transport_priv;
+
+	if (lb->buf) {
+		vfree(lb->buf);
+		lb->buf = NULL;
+	}
+}
+
+static int lb_ring_start(struct odl_tb5_device *dev)
+{
+	return 0;
+}
+
+static void lb_ring_stop(struct odl_tb5_device *dev)
+{
+}
+
+static void lb_ring_reset(struct odl_tb5_device *dev)
+{
+}
+
+static int lb_ring_tx(struct odl_tb5_device *dev, struct ring_frame *frame)
+{
+	return 0;
+}
+
+static int lb_ring_rx(struct odl_tb5_device *dev, struct ring_frame *frame)
+{
+	return 0;
+}
+
+static struct device *lb_dma_device(struct odl_tb5_device *dev)
+{
+	return dev->dev ? dev->dev->parent : NULL;
+}
+
+static struct odl_tb5_transport_ring_info lb_tx_ring_info(
+	struct odl_tb5_device *dev)
+{
+	return (struct odl_tb5_transport_ring_info){ .hop = 0 };
+}
+
+static struct odl_tb5_transport_ring_info lb_rx_ring_info(
+	struct odl_tb5_device *dev)
+{
+	return (struct odl_tb5_transport_ring_info){ .hop = 0 };
+}
+
+static int lb_local_tx_hopid(struct odl_tb5_device *dev)
+{
+	return 0;
+}
+
+static int lb_path_enable(struct odl_tb5_device *dev)
+{
+	return 0;
+}
+
+static void lb_path_disable(struct odl_tb5_device *dev)
+{
+}
+
+static int lb_peer_send_login(struct odl_tb5_device *dev)
+{
+	return 0;
+}
+
+static int lb_peer_send_logout(struct odl_tb5_device *dev)
+{
+	return 0;
+}
+
+static void lb_kick_tx(struct odl_tb5_device *dev)
+{
+}
+
+static void lb_kick_rx(struct odl_tb5_device *dev)
+{
+}
+
+static const struct odl_tb5_transport_ops odl_tb5_loopback_transport = {
+	.type		= ODL_TB5_TRANSPORT_LOOPBACK,
+	.name		= "loopback",
+	.ring_alloc	= lb_ring_alloc,
+	.ring_free	= lb_ring_free,
+	.ring_start	= lb_ring_start,
+	.ring_stop	= lb_ring_stop,
+	.ring_reset	= lb_ring_reset,
+	.ring_tx	= lb_ring_tx,
+	.ring_rx	= lb_ring_rx,
+	.dma_device	= lb_dma_device,
+	.tx_ring_info	= lb_tx_ring_info,
+	.rx_ring_info	= lb_rx_ring_info,
+	.local_tx_hopid = lb_local_tx_hopid,
+	.path_enable	= lb_path_enable,
+	.path_disable	= lb_path_disable,
+	.peer_send_login  = lb_peer_send_login,
+	.peer_send_logout = lb_peer_send_logout,
+	.kick_tx	= lb_kick_tx,
+	.kick_rx	= lb_kick_rx,
+};
+
+/* ── Loopback device create/destroy ────────────────────────────────── */
 
 static struct odl_tb5_device *lb_create(int index)
 {
 	struct odl_tb5_device *dev;
 	struct lb_device *lb;
-	int ret;
+	int ret, i;
 
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
 	if (!dev)
@@ -76,13 +187,19 @@ static struct odl_tb5_device *lb_create(int index)
 	mutex_init(&dev->stream_lock);
 	atomic_set(&dev->open_count, 0);
 	atomic_set(&dev->removing, 0);
+	INIT_WORK(&dev->tx_drain_work, odl_tb5_tx_drain_work_fn);
+	atomic_set(&dev->rx_posted, 0);
+	dev->rx_target = 0;
 
-	/* Char device */
+	dev->tx_adaptive.mode = ODL_TB5_TX_LATENCY;
+	dev->tx_adaptive.consecutive_low = 0;
+	dev->tx_adaptive.high_watermark = odl_ring_size * 3 / 4;
+	dev->tx_adaptive.low_watermark  = odl_ring_size / 4;
+
 	ret = odl_tb5_chardev_create(dev);
 	if (ret)
 		goto err_free;
 
-	/* Allocate mmap buffer (4 MB) */
 	lb = kzalloc(sizeof(*lb), GFP_KERNEL);
 	if (!lb) {
 		ret = -ENOMEM;
@@ -90,32 +207,29 @@ static struct odl_tb5_device *lb_create(int index)
 	}
 
 	lb->index = index;
-	lb->buf_size = ODL_TB5_FRAME_SIZE * 4096; /* 16 MB */
-	lb->buf = vmalloc(lb->buf_size);
-	if (!lb->buf) {
-		ret = -ENOMEM;
-		goto err_lb;
-	}
-
-	for (int i = 0; i < LB_STREAM_MAX; i++) {
+	for (i = 0; i < LB_STREAM_MAX; i++) {
 		struct lb_stream *s = &lb->streams[i];
 		INIT_LIST_HEAD(&s->rx_queue);
 		spin_lock_init(&s->rx_lock);
 		init_waitqueue_head(&s->rx_wait);
 		s->rx_count = 0;
 	}
-
 	mutex_init(&lb->stream_lock);
-	dev->loopback_data = lb;
 
-	/* Set READY immediately */
+	dev->transport = &odl_tb5_loopback_transport;
+	dev->transport_priv = lb;
+
+	ret = odl_tb5_rings_alloc(dev);
+	if (ret)
+		goto err_lb;
+
 	mutex_lock(&dev->state_lock);
 	dev->state = ODL_TB5_STATE_READY;
 	wake_up_all(&dev->state_waitq);
 	mutex_unlock(&dev->state_lock);
 
-	pr_info("odl_tb5: loopback device %d ready (buf=%zu MB)\n",
-		index, lb->buf_size >> 20);
+	pr_info("odl_tb5: loopback device %d ready (transport=%s)\n",
+		index, dev->transport->name);
 
 	return dev;
 
@@ -130,13 +244,16 @@ err_free:
 
 static void lb_destroy(struct odl_tb5_device *dev)
 {
-	struct lb_device *lb = dev->loopback_data;
-	if (!lb) return;
+	struct lb_device *lb = dev->transport_priv;
 
-	vfree(lb->buf);
-	mutex_destroy(&lb->stream_lock);
-	kfree(lb);
-	dev->loopback_data = NULL;
+	odl_tb5_rings_free(dev);
+
+	if (lb) {
+		vfree(lb->buf);
+		mutex_destroy(&lb->stream_lock);
+		kfree(lb);
+		dev->transport_priv = NULL;
+	}
 
 	odl_tb5_chardev_destroy(dev);
 	kfree(dev);
@@ -165,7 +282,8 @@ void odl_loopback_exit(void)
 	struct odl_tb5_device *dev, *tmp;
 	mutex_lock(&odl_tb5_devices_lock);
 	list_for_each_entry_safe(dev, tmp, &odl_tb5_devices_list, list) {
-		if (dev->loopback_data) {
+		if (dev->transport &&
+		    dev->transport->type == ODL_TB5_TRANSPORT_LOOPBACK) {
 			list_del(&dev->list);
 			mutex_unlock(&odl_tb5_devices_lock);
 			lb_destroy(dev);

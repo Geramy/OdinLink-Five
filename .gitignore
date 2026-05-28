@@ -65,3 +65,5 @@ NOTES
 TODO
 *.note
 *.scratch
+/tools/ghidra_projects
+UniversalMac_26.5_25F71_Restore.ipsw.download

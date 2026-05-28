@@ -10,7 +10,7 @@ on:
 
 jobs:
   linux:
-    name: Linux
+    name: Linux (x86_64)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -33,7 +33,7 @@ jobs:
           cd build
           make -j$(nproc) odl_tb5 odl_tb5_verbs odl_tb5_verbs_provider
           make -j$(nproc) odl_tb5_cli odl_tb5_daemon odl_tb5_tray
-      - name: Build kernel module
+      - name: Build kernel module (NHI)
         continue-on-error: true
         run: cd build && make -j$(nproc) driver 2>&1
       - name: Test with Docker Compose
@@ -77,8 +77,71 @@ jobs:
           name: odl-tb5-dkms
           path: /tmp/odl-tb5-dkms-*.tar.gz
 
+  linux-arm64:
+    name: Linux (arm64, Apple transport)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cross-compilation toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            crossbuild-essential-arm64 \
+            linux-headers-arm64 \
+            cmake pkg-config
+      - name: Install arm64 kernel headers
+        run: |
+          ARCH_KERNEL=$(ls /usr/src/ | grep linux-headers-.*-arm64 | head -1 | sed 's/linux-headers-//')
+          echo "KERNEL_VERSION=${ARCH_KERNEL}" >> $GITHUB_ENV
+          echo "Using kernel: ${ARCH_KERNEL}"
+          sudo ln -sf /usr/src/linux-headers-${ARCH_KERNEL} /lib/modules/${ARCH_KERNEL}/build 2>/dev/null || true
+          sudo mkdir -p /lib/modules/${ARCH_KERNEL}/build
+      - name: Build kernel module (Apple transport, cross-compile)
+        continue-on-error: true
+        run: |
+          KVER=$(ls /usr/src/ | grep linux-headers-.*-arm64 | head -1 | sed 's/linux-headers-//')
+          if [ -z "$KVER" ]; then
+            echo "No arm64 kernel headers found, attempting build with host headers"
+            KVER=$(uname -r)
+          fi
+          cd driver
+          make -C /lib/modules/${KVER}/build M=$(pwd) \
+            ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+            CONFIG_THUNDERBOLT=n \
+            modules 2>&1 || echo "Kernel module build failed (expected without arm64 Thunderbolt subsystem)"
+      - name: Build userspace (arm64 cross-compile)
+        run: |
+          mkdir build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
+            -DBUILD_DAEMON=OFF -DBUILD_TRAY=OFF -DBUILD_VERBS=OFF
+          make -j$(nproc) odl_tb5 2>&1 || true
+      - name: Collect driver sources
+        if: always()
+        run: |
+          mkdir -p /tmp/odl-tb5-driver-arm64
+          cp driver/*.c /tmp/odl-tb5-driver-arm64/
+          cp driver/*.h /tmp/odl-tb5-driver-arm64/
+          cp driver/Kbuild /tmp/odl-tb5-driver-arm64/
+          cp driver/Makefile /tmp/odl-tb5-driver-arm64/
+          cp -r driver/uapi /tmp/odl-tb5-driver-arm64/
+      - name: Upload driver sources (arm64)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: odl-tb5-driver-arm64
+          path: /tmp/odl-tb5-driver-arm64/
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: odl-tb5-arm64-logs
+          path: build/**/*.log
+
   mac:
-    name: macOS
+    name: macOS (userspace only)
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -96,10 +159,16 @@ jobs:
         with:
           name: odl-tb5-macos-logs
           path: build/**/*.log
+      - name: Upload macOS library
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: odl-tb5-macos
+          path: build/lib*.dylib
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [linux]
+    needs: [linux, linux-arm64, mac]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4

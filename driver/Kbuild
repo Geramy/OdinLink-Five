@@ -1,3 +1,11 @@
 obj-m := odl_tb5.o
-odl_tb5-y := odl_tb5_service.o odl_tb5_ring_dma.o odl_tb5_chardev.o odl_tb5_proto.o odl_tb5_loopback.o
+
+odl_tb5-y := odl_tb5_ring_dma.o odl_tb5_chardev.o odl_tb5_proto.o odl_tb5_loopback.o odl_tb5_transport_apple.o
+
+ifeq ($(CONFIG_THUNDERBOLT),y)
+odl_tb5-y += odl_tb5_service.o odl_tb5_transport_nhi.o
+else
+odl_tb5-y += odl_tb5_service_apple.o
+endif
+
 ccflags-y := -I$(src)/uapi

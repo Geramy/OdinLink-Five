@@ -19,7 +19,7 @@
 LIST_HEAD(odl_tb5_devices_list);
 DEFINE_MUTEX(odl_tb5_devices_lock);
 
-static DEFINE_IDA(odl_tb5_ida);
+struct ida odl_tb5_ida;
 
 unsigned int odl_ring_size = ODL_TB5_RING_SIZE_DEFAULT;
 module_param(odl_ring_size, uint, 0444);
@@ -44,7 +44,9 @@ MODULE_PARM_DESC(e2e,
 
 /* Apple protocol uses its own property key and registers as an alternate
  * service so macOS ThunderboltRDMA can discover us via XDomain matching. */
+#ifdef CONFIG_THUNDERBOLT
 static struct tb_property_dir *odl_tb5_apple_property_dir;
+#endif
 
 const uuid_t odl_tb5_proto_uuid =
 	UUID_INIT(0x4f444c4e, 0x4b54, 0x4235,
@@ -52,17 +54,28 @@ const uuid_t odl_tb5_proto_uuid =
 
 static struct tb_property_dir *odl_tb5_property_dir;
 
+#ifdef CONFIG_THUNDERBOLT
 static const struct tb_service_id odl_tb5_ids[] = {
 	{ TB_SERVICE(ODL_TB5_PROTOCOL_KEY, ODL_TB5_PROTOCOL_ID) },
 	{ TB_SERVICE(ODL_TB5_PROTOCOL_KEY_APPLE, ODL_TB5_PROTOCOL_ID_APPLE) },
 	{ }
 };
 MODULE_DEVICE_TABLE(tbsvc, odl_tb5_ids);
+#endif
+
+#ifdef CONFIG_THUNDERBOLT
+extern const struct odl_tb5_transport_ops odl_tb5_nhi_transport;
+
+struct nhi_priv {
+	struct tb_xdomain	*xd;
+	int			local_tx_hopid;
+};
 
 static int odl_tb5_probe(struct tb_service *svc,
 			 const struct tb_service_id *id)
 {
 	struct odl_tb5_device *dev;
+	struct nhi_priv *priv;
 	int ret;
 
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
@@ -78,7 +91,18 @@ static int odl_tb5_probe(struct tb_service *svc,
 		return ret;
 	}
 	dev->index = ret;
-	dev->local_tx_hopid = -1;
+
+	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	if (!priv) {
+		ida_free(&odl_tb5_ida, dev->index);
+		kfree(dev);
+		return -ENOMEM;
+	}
+	priv->xd = dev->xd;
+	priv->local_tx_hopid = -1;
+
+	dev->transport = &odl_tb5_nhi_transport;
+	dev->transport_priv = priv;
 
 	dev->state = ODL_TB5_STATE_DISCONNECTED;
 
@@ -144,8 +168,8 @@ static int odl_tb5_probe(struct tb_service *svc,
 
 	tb_service_set_drvdata(svc, dev);
 
-	pr_info("odl_tb5: probed device index %d on xdomain %pUb\n",
-		dev->index, dev->xd->remote_uuid);
+	pr_info("odl_tb5: probed device index %d (transport=%s)\n",
+		dev->index, dev->transport->name);
 
 	return 0;
 
@@ -208,18 +232,15 @@ static void odl_tb5_remove(struct tb_service *svc)
 
 	if (saved_state == ODL_TB5_STATE_CONNECTED ||
 	    saved_state == ODL_TB5_STATE_READY) {
-		tb_xdomain_disable_paths(dev->xd,
-					 dev->local_tx_hopid,
-					 dev->tx.ring ? dev->tx.ring->hop : -1,
-					 dev->remote_tx_hopid,
-					 dev->rx.ring ? dev->rx.ring->hop : -1);
-		tb_xdomain_release_in_hopid(dev->xd, dev->remote_tx_hopid);
+		if (dev->transport && dev->transport->path_disable)
+			dev->transport->path_disable(dev);
 	}
 
 	odl_tb5_chardev_destroy(dev);
 
 	pr_info("odl_tb5: removed device index %d\n", dev->index);
 
+	kfree(dev->transport_priv);
 	ida_free(&odl_tb5_ida, dev->index);
 	kfree(dev);
 }
@@ -230,6 +251,7 @@ static struct tb_service_driver odl_tb5_driver = {
 	.remove		= odl_tb5_remove,
 	.id_table	= odl_tb5_ids,
 };
+#endif /* CONFIG_THUNDERBOLT */
 
 static int __init odl_tb5_init(void)
 {
@@ -260,6 +282,7 @@ static int __init odl_tb5_init(void)
 		return 0;
 	}
 
+#ifdef CONFIG_THUNDERBOLT
 	odl_tb5_property_dir = tb_property_create_dir(&odl_tb5_proto_uuid);
 	if (!odl_tb5_property_dir) {
 		ret = -ENOMEM;
@@ -327,12 +350,16 @@ static int __init odl_tb5_init(void)
 	ret = tb_register_service_driver(&odl_tb5_driver);
 	if (ret)
 		goto err_proto;
+#endif
+
+	odl_tb5_apple_init();
 
 	pr_info("odl_tb5: OdinLink TB5 driver loaded (ring_size=%u)\n",
 		odl_ring_size);
 
 	return 0;
 
+#ifdef CONFIG_THUNDERBOLT
 err_proto:
 	odl_tb5_proto_unregister();
 err_dir:
@@ -341,6 +368,7 @@ err_dir:
 		odl_tb5_apple_property_dir = NULL;
 	}
 	tb_property_free_dir(odl_tb5_property_dir);
+#endif
 err_chardev:
 	odl_tb5_chardev_exit();
 	return ret;
@@ -356,8 +384,12 @@ static void __exit odl_tb5_exit(void)
 		goto out;
 	}
 
+#ifdef CONFIG_THUNDERBOLT
 	/* Unregister first so tb core removes bound services before orphan cleanup. */
 	tb_unregister_service_driver(&odl_tb5_driver);
+#endif
+
+	odl_tb5_apple_exit();
 
 	mutex_lock(&odl_tb5_devices_lock);
 	list_for_each_entry_safe(dev, tmp, &odl_tb5_devices_list, list) {
@@ -385,6 +417,7 @@ static void __exit odl_tb5_exit(void)
 	}
 	mutex_unlock(&odl_tb5_devices_lock);
 
+#ifdef CONFIG_THUNDERBOLT
 	odl_tb5_proto_unregister();
 
 	/* Unregister property dirs: main dir under its protocol key,
@@ -400,6 +433,7 @@ static void __exit odl_tb5_exit(void)
 					   odl_tb5_apple_property_dir);
 		tb_property_free_dir(odl_tb5_apple_property_dir);
 	}
+#endif
 out:
 	odl_tb5_chardev_exit();
 	ida_destroy(&odl_tb5_ida);

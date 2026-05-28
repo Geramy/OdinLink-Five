@@ -20,53 +20,18 @@
  */
 
 #include "odl_tb5_core.h"
+#include "odl_tb5_xd_proto.h"
 #include <linux/delay.h>
-
-#define ODL_TB5_MSG_LOGIN      1
-#define ODL_TB5_MSG_LOGIN_RSP  2
-#define ODL_TB5_MSG_LOGOUT     3
-
-#define ODL_TB5_LOGIN_TIMEOUT  500
-#define ODL_TB5_ENABLE_RETRIES 5
-#define ODL_TB5_ENABLE_DELAY   200
-
-struct odl_tb5_xd_header {
-	u32	route_hi;
-	u32	route_lo;
-	u32	length_sn;
-	uuid_t	uuid;
-	u32	type;
-};
-
-struct odl_tb5_login_msg {
-	struct odl_tb5_xd_header xd_hdr;
-	u32 proto_version;
-	u32 transmit_path;
-	u32 reserved[2];
-};
-
-struct odl_tb5_login_response {
-	struct odl_tb5_xd_header xd_hdr;
-	u32 status;
-	u32 transmit_path;
-	u32 reserved[2];
-};
-
-struct odl_tb5_logout_msg {
-	struct odl_tb5_xd_header xd_hdr;
-};
 
 static void odl_tb5_login_work_fn(struct work_struct *work);
 static void odl_tb5_connect_work_fn(struct work_struct *work);
 static void odl_tb5_restart_work_fn(struct work_struct *work);
 static int  odl_tb5_complete_connection(struct odl_tb5_device *dev);
 
-#define XD_HDR_SIZE_DW  3
-#define XD_SN_MASK      0x18000000u
-
-static void odl_tb5_xd_header_init(struct odl_tb5_xd_header *hdr,
-				    struct tb_xdomain *xd, u32 type,
-				    size_t total_size)
+#ifdef CONFIG_THUNDERBOLT
+void odl_tb5_xd_header_init(struct odl_tb5_xd_header *hdr,
+			     struct tb_xdomain *xd, u32 type,
+			     size_t total_size)
 {
 	hdr->route_hi  = upper_32_bits(xd->route);
 	hdr->route_lo  = lower_32_bits(xd->route);
@@ -80,7 +45,8 @@ static struct odl_tb5_device *odl_tb5_find_device_by_route(u64 route)
 	struct odl_tb5_device *dev;
 
 	list_for_each_entry(dev, &odl_tb5_devices_list, list) {
-		if (dev->xd->route == route)
+		if (dev->transport->type == ODL_TB5_TRANSPORT_NHI &&
+		    dev->xd && dev->xd->route == route)
 			return dev;
 	}
 	return NULL;
@@ -148,7 +114,7 @@ static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
 		resp.xd_hdr.uuid      = odl_tb5_proto_uuid;
 		resp.xd_hdr.type      = ODL_TB5_MSG_LOGIN_RSP;
 		resp.status            = 0;
-		resp.transmit_path     = dev->local_tx_hopid;
+		resp.transmit_path     = dev->transport->local_tx_hopid(dev);
 
 		ret = tb_xdomain_response(dev->xd, &resp, sizeof(resp),
 					  TB_CFG_PKG_XDOMAIN_RESP);
@@ -156,7 +122,7 @@ static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
 			"sn=%u, tx_hopid=%d)\n",
 			ret, dev->xd->route,
 			(hdr->length_sn & XD_SN_MASK) >> 27,
-			dev->local_tx_hopid);
+			dev->transport->local_tx_hopid(dev));
 
 		mutex_lock(&dev->state_lock);
 		if (dev->state != ODL_TB5_STATE_HANDSHAKE) {
@@ -218,59 +184,33 @@ void odl_tb5_proto_unregister(void)
 {
 	tb_unregister_protocol_handler(&odl_tb5_handler);
 }
+#endif /* CONFIG_THUNDERBOLT */
 
-/* Send a login request to the peer and process the response. */
+#ifndef CONFIG_THUNDERBOLT
+int odl_tb5_proto_register(void)
+{
+	return 0;
+}
+
+void odl_tb5_proto_unregister(void)
+{
+}
+#endif
+
 int odl_tb5_proto_send_login(struct odl_tb5_device *dev)
 {
-	struct odl_tb5_login_msg msg = { };
-	struct odl_tb5_login_response resp = { };
 	bool need_complete = false;
 	int ret;
 
-	odl_tb5_xd_header_init(&msg.xd_hdr, dev->xd, ODL_TB5_MSG_LOGIN,
-			       sizeof(msg));
-	msg.proto_version = ODL_TB5_PROTOCOL_VER;
-	msg.transmit_path = dev->local_tx_hopid;
+	if (!dev->transport || !dev->transport->peer_send_login)
+		return -ENODEV;
 
-	ret = tb_xdomain_request(dev->xd, &msg, sizeof(msg),
-				 TB_CFG_PKG_XDOMAIN_REQ,
-				 &resp, sizeof(resp),
-				 TB_CFG_PKG_XDOMAIN_RESP,
-				 ODL_TB5_LOGIN_TIMEOUT);
+	ret = dev->transport->peer_send_login(dev);
 	if (ret) {
 		pr_warn("OdinLink: login request failed: %d\n", ret);
 		return ret;
 	}
 
-	/* In Apple protocol mode, be lenient with response format.
-	 * The peer might use a different UUID and response structure.
-	 * Accept any response that follows the XDomain response format. */
-	if (odl_protocol_mode == 1) {
-		/* Apple mode: accept any response that looks reasonable.
-		 * The transmit_path is at a fixed offset in the response. */
-		dev->remote_tx_hopid = resp.transmit_path;
-		goto login_ok;
-	}
-
-	if (!uuid_equal(&resp.xd_hdr.uuid, &odl_tb5_proto_uuid)) {
-		pr_warn("OdinLink: login response UUID mismatch\n");
-		return -EPROTO;
-	}
-
-	if (resp.xd_hdr.type != ODL_TB5_MSG_LOGIN_RSP) {
-		pr_warn("OdinLink: unexpected response type %u\n",
-			resp.xd_hdr.type);
-		return -EPROTO;
-	}
-
-	if (resp.status != 0) {
-		pr_warn("OdinLink: peer rejected login with status %u\n",
-			resp.status);
-		return -ECONNREFUSED;
-	}
-
-	dev->remote_tx_hopid = resp.transmit_path;
-login_ok:
 	dev->login_sent = true;
 	if (dev->login_received && dev->state == ODL_TB5_STATE_HANDSHAKE)
 		need_complete = true;
@@ -290,15 +230,20 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 {
 	int ret, i;
 
-	ret = tb_xdomain_alloc_in_hopid(dev->xd, dev->remote_tx_hopid);
-	if (ret < 0) {
-		pr_err("OdinLink: failed to allocate input HopID: %d\n", ret);
+	if (!dev->transport)
+		return -ENODEV;
+
+	ret = dev->transport->path_enable(dev);
+	if (ret) {
+		pr_err("OdinLink: failed to enable paths: %d\n", ret);
 		return ret;
 	}
+
 	ret = odl_tb5_rings_start(dev);
 	if (ret) {
 		pr_err("OdinLink: failed to start rings: %d\n", ret);
-		tb_xdomain_release_in_hopid(dev->xd, dev->remote_tx_hopid);
+		if (dev->transport->path_disable)
+			dev->transport->path_disable(dev);
 		return ret;
 	}
 
@@ -309,39 +254,12 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 		if (ret) {
 			pr_err("OdinLink: failed to prime RX: %d\n", ret);
 			odl_tb5_rings_stop(dev);
-			tb_xdomain_release_in_hopid(dev->xd,
-						    dev->remote_tx_hopid);
+			if (dev->transport->path_disable)
+				dev->transport->path_disable(dev);
 			return ret;
 		}
 		pr_info("OdinLink: RX primed with 16 frames before "
 			"enable_paths\n");
-	}
-
-	for (i = 0; i < ODL_TB5_ENABLE_RETRIES; i++) {
-		ret = tb_xdomain_enable_paths(dev->xd,
-					      dev->local_tx_hopid,
-					      dev->tx.ring->hop,
-					      dev->remote_tx_hopid,
-					      dev->rx.ring->hop);
-		if (!ret)
-			break;
-
-		if (i < ODL_TB5_ENABLE_RETRIES - 1) {
-			pr_warn("OdinLink: enable_paths failed (%d), "
-				"retry %d/%d in %d ms\n",
-				ret, i + 1, ODL_TB5_ENABLE_RETRIES,
-				ODL_TB5_ENABLE_DELAY);
-			msleep(ODL_TB5_ENABLE_DELAY);
-		}
-	}
-
-	if (ret) {
-		pr_err("OdinLink: failed to enable XDomain paths "
-		       "after %d attempts: %d\n",
-		       ODL_TB5_ENABLE_RETRIES, ret);
-		odl_tb5_rings_stop(dev);
-		tb_xdomain_release_in_hopid(dev->xd, dev->remote_tx_hopid);
-		return ret;
 	}
 
 	mutex_lock(&dev->state_lock);
@@ -349,13 +267,23 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 	wake_up_all(&dev->state_waitq);
 	mutex_unlock(&dev->state_lock);
 
-	pr_info("OdinLink: connected to peer "
-		"(local_tx_hopid=%d, remote_tx_hopid=%d, "
-		"tx_ring_hop=%d, rx_ring_hop=%d, "
-		"ring_size=%d, E2E enabled)\n",
-		dev->local_tx_hopid, dev->remote_tx_hopid,
-		dev->tx.ring->hop, dev->rx.ring->hop,
-		dev->tx.ring_size);
+	{
+		struct odl_tb5_transport_ring_info tx_info = { .hop = -1 };
+		struct odl_tb5_transport_ring_info rx_info = { .hop = -1 };
+
+		if (dev->transport->tx_ring_info)
+			tx_info = dev->transport->tx_ring_info(dev);
+		if (dev->transport->rx_ring_info)
+			rx_info = dev->transport->rx_ring_info(dev);
+
+		pr_info("OdinLink: connected to peer "
+			"(remote_tx_hopid=%d, "
+			"tx_ring_hop=%d, rx_ring_hop=%d, "
+			"ring_size=%d, E2E enabled)\n",
+			dev->remote_tx_hopid,
+			tx_info.hop, rx_info.hop,
+			dev->tx.ring_size);
+	}
 
 	/* Allocate frame pool early so verify uses the non-blocking
 	 * pool path for PING/PONG instead of the legacy submit_tx
@@ -434,7 +362,7 @@ static int odl_tb5_send_dma_msg(struct odl_tb5_device *dev, u32 type)
 		slot->frame.callback = odl_tb5_tx_callback;
 		slot->tx_msg = NULL;
 
-		ret = tb_ring_tx(dev->tx.ring, &slot->frame);
+		ret = dev->transport->ring_tx(dev, &slot->frame);
 		if (ret < 0) {
 			odl_tb5_frame_pool_put(&dev->frame_pool, slot);
 			return ret;
@@ -598,14 +526,11 @@ static void odl_tb5_restart_work_fn(struct work_struct *work)
 	dev->pong_received = false;
 
 	if (dev->tx.started) {
-		tb_xdomain_disable_paths(dev->xd,
-					 dev->local_tx_hopid,
-					 dev->tx.ring->hop,
-					 dev->stale_remote_tx_hopid,
-					 dev->rx.ring->hop);
+		if (dev->transport && dev->transport->path_disable) {
+			dev->stale_remote_tx_hopid = dev->remote_tx_hopid;
+			dev->transport->path_disable(dev);
+		}
 		odl_tb5_rings_stop(dev);
-		tb_xdomain_release_in_hopid(dev->xd,
-					    dev->stale_remote_tx_hopid);
 	}
 
 	mutex_lock(&dev->state_lock);
@@ -650,17 +575,8 @@ static void odl_tb5_login_work_fn(struct work_struct *work)
 /* Send a logout notification to the peer. */
 int odl_tb5_proto_send_logout(struct odl_tb5_device *dev)
 {
-	struct odl_tb5_logout_msg msg = { };
-	struct odl_tb5_xd_header resp = { };
-
-	odl_tb5_xd_header_init(&msg.xd_hdr, dev->xd, ODL_TB5_MSG_LOGOUT,
-			       sizeof(msg));
-
-	tb_xdomain_request(dev->xd, &msg, sizeof(msg),
-			   TB_CFG_PKG_XDOMAIN_REQ,
-			   &resp, sizeof(resp),
-			   TB_CFG_PKG_XDOMAIN_RESP,
-			   ODL_TB5_LOGIN_TIMEOUT);
+	if (dev->transport && dev->transport->peer_send_logout)
+		dev->transport->peer_send_logout(dev);
 
 	mutex_lock(&dev->state_lock);
 	dev->state = ODL_TB5_STATE_DISCONNECTED;

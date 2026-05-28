@@ -167,10 +167,15 @@ set(DKMS_SRC_DIR "src/odl-tb5-${PROJECT_VERSION}")
 
 install(FILES
     driver/odl_tb5_service.c
+    driver/odl_tb5_service_apple.c
     driver/odl_tb5_chardev.c
     driver/odl_tb5_ring_dma.c
     driver/odl_tb5_proto.c
     driver/odl_tb5_loopback.c
+    driver/odl_tb5_transport_nhi.c
+    driver/odl_tb5_transport_apple.c
+    driver/odl_tb5_transport.h
+    driver/odl_tb5_xd_proto.h
     driver/odl_tb5_core.h
     driver/Kbuild
     driver/Makefile
