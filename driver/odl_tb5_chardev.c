@@ -15,6 +15,7 @@
  * can talk through the same Thunderbolt cable simultaneously.
  */
 
+#include <linux/poll.h>
 #include <linux/uaccess.h>
 
 #include "odl_tb5_core.h"
@@ -517,7 +518,7 @@ static __poll_t odl_tb5_poll(struct file *filp, poll_table *wait)
 	list_for_each_entry(stream, &ctx->streams, owner_list) {
 		poll_wait(filp, &stream->rx_waitq, wait);
 		spin_lock(&stream->rx_lock);
-		if (stream->rx_complete > 0)
+		if (atomic_read(&stream->rx_complete) > 0)
 			mask |= EPOLLIN | EPOLLRDNORM;
 		spin_unlock(&stream->rx_lock);
 	}
