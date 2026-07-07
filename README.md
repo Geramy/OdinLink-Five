@@ -8,6 +8,14 @@ OdinLink turns a Thunderbolt cable into a high-speed RDMA interconnect between m
 80 Gbps  ·  sub-µs latency  ·  zero-copy GPU  ·  standard ibv_verbs API
 ```
 
+
+#Thunderbolt 4 Test / USB4v1
+
+![USB4v1 / Thunderbolt 4 Test](https://github.com/Geramy/OdinLink-Five/blob/main/assets/Screenshot_2026-02-20_13-50-36.png)
+
+
+#Thunderbolt 5 Test / USB4v2
+![USB4v2 / Thunderbolt 5 Test](https://github.com/Geramy/OdinLink-Five/blob/main/assets/Screenshot_2026-02-27_10-07-33.png)
 ---
 
 ## Progress
