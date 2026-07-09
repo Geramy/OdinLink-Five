@@ -1344,14 +1344,17 @@ struct odl_tb5_stream *odl_tb5_stream_create(struct odl_tb5_device *dev,
 	INIT_LIST_HEAD(&stream->rx_queue);
 	spin_lock_init(&stream->rx_lock);
 	stream->rx_queue_len = 0;
-	stream->rx_queue_max = 256;
+	stream->rx_queue_max = 65536;   /* was 256: a single ~1MB msg = ~264 frames;
+					 * under load the sender runs >256 frames ahead
+					 * and the old cap silently DROPPED frames ->
+					 * plugin framing desync -> vLLM hang. */
 	atomic_set(&stream->rx_complete, 0);
 	init_waitqueue_head(&stream->rx_waitq);
 
 	kref_init(&stream->refcount);
 
 	mutex_lock(&dev->stream_lock);
-	hash_add(dev->streams, &stream->node, stream->id);
+	hash_add_rcu(dev->streams, &stream->node, stream->id);
 	mutex_unlock(&dev->stream_lock);
 
 	if (owner) {
@@ -1427,9 +1430,12 @@ struct odl_tb5_stream *odl_tb5_stream_lookup(struct odl_tb5_device *dev,
 	struct odl_tb5_stream *stream;
 
 	rcu_read_lock();
-	hash_for_each_possible(dev->streams, stream, node, stream_id) {
+	hash_for_each_possible_rcu(dev->streams, stream, node, stream_id) {
 		if (stream->id == stream_id) {
-			kref_get(&stream->refcount);
+			/* Stream may be concurrently freed (hash_del_rcu in
+			 * stream_destroy); only take a ref if still alive. */
+			if (!kref_get_unless_zero(&stream->refcount))
+				break;
 			rcu_read_unlock();
 			return stream;
 		}
