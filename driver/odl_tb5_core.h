@@ -434,6 +434,7 @@ int  odl_tb5_proto_send_logout(struct odl_tb5_device *dev);
 extern int odl_loopback_count;
 extern int odl_protocol_mode;
 extern bool odl_e2e;
+extern unsigned int odl_busy_poll_us;
 int  odl_loopback_init(void);
 void odl_loopback_exit(void);
 

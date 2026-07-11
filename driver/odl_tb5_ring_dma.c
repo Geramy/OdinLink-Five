@@ -1911,6 +1911,25 @@ int odl_tb5_stream_wait_tx(struct odl_tb5_stream *stream, u32 timeout_ms)
  * Stream RX Path
  * ══════════════════════════════════════════════════════════════════════ */
 
+/* Optional bounded busy-poll for an RX completion before sleeping.  The RX
+ * softirq (odl_tb5_rx_callback) increments rx_complete on another CPU, so a
+ * spinning reader sees it within cache-coherency latency and skips the
+ * context-switch wake (~10-15 us on this box).  Bounded + falls back to
+ * wait_event, so it never hangs.  Off unless odl_busy_poll_us > 0. */
+static inline void odl_tb5_rx_busy_poll(struct odl_tb5_stream *stream)
+{
+	ktime_t deadline;
+
+	if (!odl_busy_poll_us || atomic_read(&stream->rx_complete) > 0)
+		return;
+	deadline = ktime_add_ns(ktime_get(), (u64)odl_busy_poll_us * 1000);
+	while (atomic_read(&stream->rx_complete) == 0) {
+		if (ktime_after(ktime_get(), deadline))
+			break;
+		cpu_relax();
+	}
+}
+
 int odl_tb5_stream_recv(struct odl_tb5_stream *stream,
 			void __user *buf, size_t buf_len,
 			u8 *src_id, u32 *actual_len)
@@ -1920,6 +1939,7 @@ int odl_tb5_stream_recv(struct odl_tb5_stream *stream,
 	int ret = 0;
 
 	/* Wait for a complete assembled message */
+	odl_tb5_rx_busy_poll(stream);
 	ret = wait_event_interruptible(stream->rx_waitq,
 		atomic_read(&stream->rx_complete) > 0);
 	if (ret)
@@ -1954,6 +1974,7 @@ int odl_tb5_stream_wait_rx(struct odl_tb5_stream *stream, u32 timeout_ms)
 {
 	long ret;
 
+	odl_tb5_rx_busy_poll(stream);
 	if (timeout_ms == 0) {
 		ret = wait_event_interruptible(stream->rx_waitq,
 			atomic_read(&stream->rx_complete) > 0);
