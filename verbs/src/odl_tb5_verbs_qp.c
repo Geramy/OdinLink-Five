@@ -445,6 +445,19 @@ int odl_modify_qp(struct ibv_qp *qp, struct ibv_qp_attr *attr,
 
 /* ── Post Send (async) ──────────────────────────────────────────────── */
 
+/* ODL_VERBS_INLINE=0 disables the inline send fast path, so its benefit can be
+ * A/B measured at a fixed payload size. Default on. */
+static bool odl_inline_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) {
+        const char *e = getenv("ODL_VERBS_INLINE");
+        cached = (e && e[0] == '0') ? 0 : 1;
+    }
+    return cached != 0;
+}
+
 int odl_post_send(struct ibv_qp *qp, struct ibv_send_wr *wr,
                    struct ibv_send_wr **bad_wr)
 {
@@ -465,7 +478,8 @@ int odl_post_send(struct ibv_qp *qp, struct ibv_send_wr *wr,
      * promises. Only taken when the SQ is empty, so ordering cannot be
      * violated; on -EAGAIN we fall through to the queued path.
      */
-    if (wr && !wr->next && wr->num_sge == 1 &&
+    if (odl_inline_enabled() &&
+        wr && !wr->next && wr->num_sge == 1 &&
         oqp->sq_count == 0 && !oqp->tx_inflight &&
         wr->sg_list[0].length <= ODL_VERBS_INLINE_MAX &&
         odl_lookup_dmabuf_pub(oqp->ctx, wr->sg_list[0].lkey) < 0) {

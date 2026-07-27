@@ -39,6 +39,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <math.h>
 #include <infiniband/verbs.h>
 #include <pthread.h>
 
@@ -54,6 +55,7 @@ static const char *opt_dev   = NULL;
 static int      opt_gid_idx  = -1;
 static bool     opt_bidir    = false;  /* both peers send AND receive */
 static bool     opt_mixed    = false;  /* interleave small control msgs */
+static bool     opt_latency  = false;  /* ping-pong RTT through the verbs path */
 
 struct conn_info {
     uint32_t qpn;
@@ -365,6 +367,95 @@ static int tx_loop(struct rdma_ctx *r, uint64_t nmsg)
     return 0;
 }
 
+
+/* ── verbs-path latency: ping-pong through post_send/post_recv/poll_cq ──
+ *
+ * The CLI latency tool talks straight to ioctls and never enters the verbs
+ * shim, so it cannot see changes there (inline fast path, RX worker sleep
+ * behaviour). This does, and it verifies the echoed payload so an inline-path
+ * overtake or a stale buffer fails loudly instead of quietly producing a
+ * good-looking number.
+ */
+static int cmp_double(const void *a, const void *b)
+{
+    double x = *(const double *)a, y = *(const double *)b;
+    return (x > y) - (x < y);
+}
+
+static int latency_pingpong(struct rdma_ctx *r, bool server, uint64_t iters)
+{
+    double *samples = calloc(iters, sizeof(*samples));
+    uint64_t warmup = iters / 10 ? iters / 10 : 1;
+    int rc = 0;
+
+    if (!samples) return 1;
+
+    for (uint64_t i = 0; i < iters + warmup; i++) {
+        double t0 = now_s();
+
+        if (!server) {
+            fill_chunk(r->tx_buf, opt_chunk, i);
+            struct ibv_sge sge = { .addr = (uintptr_t)r->tx_buf,
+                                   .length = opt_chunk, .lkey = r->tx_mr->lkey };
+            struct ibv_send_wr wr = {0}, *bad = NULL;
+            wr.wr_id = i; wr.opcode = IBV_WR_SEND;
+            wr.sg_list = &sge; wr.num_sge = 1;
+            wr.send_flags = IBV_SEND_SIGNALED;
+            if (ibv_post_send(r->qp, &wr, &bad)) { rc = 3; goto out; }
+
+            struct ibv_wc wc;
+            if (poll_one(r->scq, &wc, now_s() + opt_stall_s) < 0) { rc = 3; goto out; }
+            if (poll_one(r->rcq, &wc, now_s() + opt_stall_s) < 0) { rc = 3; goto out; }
+            if (verify_chunk(r->rx_buf + (size_t)wc.wr_id * opt_chunk,
+                             wc.byte_len < opt_chunk ? wc.byte_len : opt_chunk,
+                             i) >= 0) {
+                fprintf(stderr, "CORRUPTION in echo at iter %llu\n",
+                        (unsigned long long)i);
+                rc = 2; goto out;
+            }
+            if (!post_rx(r, (int)wc.wr_id)) { rc = 3; goto out; }
+        } else {
+            struct ibv_wc wc;
+            if (poll_one(r->rcq, &wc, now_s() + opt_stall_s) < 0) { rc = 3; goto out; }
+            int slot = (int)wc.wr_id;
+            memcpy(r->tx_buf, r->rx_buf + (size_t)slot * opt_chunk, opt_chunk);
+            if (!post_rx(r, slot)) { rc = 3; goto out; }
+
+            struct ibv_sge sge = { .addr = (uintptr_t)r->tx_buf,
+                                   .length = opt_chunk, .lkey = r->tx_mr->lkey };
+            struct ibv_send_wr wr = {0}, *bad = NULL;
+            wr.wr_id = i; wr.opcode = IBV_WR_SEND;
+            wr.sg_list = &sge; wr.num_sge = 1;
+            wr.send_flags = IBV_SEND_SIGNALED;
+            if (ibv_post_send(r->qp, &wr, &bad)) { rc = 3; goto out; }
+            if (poll_one(r->scq, &wc, now_s() + opt_stall_s) < 0) { rc = 3; goto out; }
+        }
+
+        if (i >= warmup)
+            samples[i - warmup] = (now_s() - t0) * 1e6;   /* us */
+    }
+
+    if (!server) {
+        qsort(samples, iters, sizeof(*samples), cmp_double);
+        double sum = 0;
+        for (uint64_t i = 0; i < iters; i++) sum += samples[i];
+        double mean = sum / iters, var = 0;
+        for (uint64_t i = 0; i < iters; i++)
+            var += (samples[i] - mean) * (samples[i] - mean);
+        printf("\n=== verbs-path RTT, %llu iters, %zu B payload ===\n",
+               (unsigned long long)iters, opt_chunk);
+        printf("  min    %8.2f us\n", samples[0]);
+        printf("  median %8.2f us\n", samples[iters / 2]);
+        printf("  p95    %8.2f us\n", samples[(uint64_t)(iters * 0.95)]);
+        printf("  p99    %8.2f us\n", samples[(uint64_t)(iters * 0.99)]);
+        printf("  max    %8.2f us\n", samples[iters - 1]);
+        printf("  mean   %8.2f us  stddev %.2f us\n", mean, sqrt(var / iters));
+    }
+out:
+    free(samples);
+    return rc;
+}
+
 /* ── bootstrap ───────────────────────────────────────────────────────── */
 
 static int bootstrap(bool server, const char *peer_ip, struct conn_info *local,
@@ -426,6 +517,9 @@ static void usage(void)
            "                    This is what ggml-rpc actually does, and it is\n"
            "                    the only mode that exercises TX/RX contention\n"
            "                    for the shared frame pool.\n"
+           "  --latency         ping-pong RTT through the VERBS path (not\n"
+           "                    ioctls), with echo verification. Use with a\n"
+           "                    small --chunk to exercise the inline fast path.\n"
            "  --mixed           interleave small control messages with bulk,\n"
            "                    as the RPC protocol does (exercises the\n"
            "                    latency/throughput dispatcher and odd sizes)\n");
@@ -459,6 +553,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--stall") && i + 1 < argc) opt_stall_s = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--bidir")) opt_bidir = true;
         else if (!strcmp(argv[i], "--mixed")) opt_mixed = true;
+        else if (!strcmp(argv[i], "--latency")) opt_latency = true;
         else { usage(); return 1; }
     }
     if (!server && !peer_ip) { usage(); return 1; }
@@ -488,6 +583,12 @@ int main(int argc, char **argv)
     double t0 = now_s();
     int rc = 0;
 
+    if (opt_latency) {
+        rc = latency_pingpong(&r, server, nmsg > 20000 ? 20000 : nmsg);
+        if (rc) goto done;
+        goto summary;
+    }
+
     if (opt_bidir) {
         /* Both peers send AND receive concurrently on the same QP -- the
          * pattern ggml-rpc actually uses, and the only one that makes TX and
@@ -510,6 +611,8 @@ int main(int argc, char **argv)
     }
     if (rc) goto done;
 
+summary:
+    if (opt_latency) { close(bfd); return 0; }
     {
         double dt = now_s() - t0;
         double mib = (double)nmsg * opt_chunk / 1048576.0;
