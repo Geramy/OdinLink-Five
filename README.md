@@ -28,7 +28,7 @@ make -C driver
 ```
 
 End-to-end recipes, the full bug ledger, and the raw measurements live in
-[wkljohn/llama.cpp-strix-halo-RCCL-RDMA](https://github.com/wkljohn/llama.cpp-strix-halo-RCCL-RDMA/tree/main/odinlink).
+[wkljohn/llama.cpp-strix-halo-RCCL-RDMA](https://github.com/wkljohn/llama.cpp-strix-halo-RCCL-RDMA/tree/master/odinlink).
 
 ### What this branch fixes
 
