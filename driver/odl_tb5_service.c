@@ -125,6 +125,9 @@ static int odl_tb5_probe(struct tb_service *svc,
 	mutex_init(&dev->stream_lock);
 	INIT_WORK(&dev->tx_drain_work, odl_tb5_tx_drain_work_fn);
 	atomic_set(&dev->rx_posted, 0);
+	/* rx_posted_min is a low-water mark: start high so the first real
+	 * value wins. The rest are plain counters and kzalloc zeroed them. */
+	atomic_set(&dev->rx_posted_min, INT_MAX);
 	dev->rx_target = 0;
 
 	atomic_set(&dev->removing, 0);

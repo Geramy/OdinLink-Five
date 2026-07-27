@@ -227,9 +227,43 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 			atomic_dec(&dev->rx_posted);
 
 			if (canceled) {
+				atomic_inc(&dev->rx_canceled);
 				odl_tb5_frame_pool_put(&dev->frame_pool, slot);
 				return;
 			}
+
+			/*
+			 * The NHI tells us when a frame is bad. Until now
+			 * nothing here looked. A CRC failure or a buffer
+			 * overrun means the payload cannot be trusted, and
+			 * accepting it hands corruption straight to the
+			 * consumer — while dropping it without a counter is
+			 * why missing frames have been impossible to
+			 * attribute.
+			 *
+			 * Count, warn once in a while, and drop. Do not
+			 * rate-limit away the only evidence: the counters are
+			 * exact, only the printing is throttled.
+			 */
+			if (frame->flags & RING_DESC_CRC_ERROR) {
+				atomic_inc(&dev->rx_err_crc);
+				pr_warn_ratelimited("odl_tb5: RX CRC error (size=%u flags=0x%x) - frame dropped, total=%d\n",
+						    frame->size, frame->flags,
+						    atomic_read(&dev->rx_err_crc));
+				odl_tb5_frame_pool_put(&dev->frame_pool, slot);
+				return;
+			}
+
+			if (frame->flags & RING_DESC_BUFFER_OVERRUN) {
+				atomic_inc(&dev->rx_err_overrun);
+				pr_warn_ratelimited("odl_tb5: RX buffer overrun (size=%u flags=0x%x) - frame dropped, total=%d\n",
+						    frame->size, frame->flags,
+						    atomic_read(&dev->rx_err_overrun));
+				odl_tb5_frame_pool_put(&dev->frame_pool, slot);
+				return;
+			}
+
+			atomic_inc(&dev->rx_frames_ok);
 
 			/* First check for raw DMA control message
 			 * (no stream header — used during verify). */
@@ -297,9 +331,24 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 						 */
 						if (fidx != stream->rx_asm_next_frag) {
 							if (!stream->rx_asm_bad)
-								pr_warn_ratelimited("odl_tb5: stream %u fragment gap: got %u expected %u - dropping message\n",
+								/*
+								 * Report the NHI error counters with the gap.
+								 * If the missing frames were dropped by
+								 * hardware, crc/ovr moved too and the cause is
+								 * settled in one line. If every counter is
+								 * zero, the frames were lost somewhere this
+								 * driver can see, and the search moves inward.
+								 */
+								pr_warn_ratelimited("odl_tb5: stream %u fragment gap: got %u expected %u (lost %u) - dropping message; rx crc=%d ovr=%d cancel=%d short=%d len=%d ok=%d\n",
 										    dst_id, fidx,
-										    stream->rx_asm_next_frag);
+										    stream->rx_asm_next_frag,
+										    fidx - stream->rx_asm_next_frag,
+										    atomic_read(&dev->rx_err_crc),
+										    atomic_read(&dev->rx_err_overrun),
+										    atomic_read(&dev->rx_canceled),
+										    atomic_read(&dev->rx_err_short),
+										    atomic_read(&dev->rx_err_len),
+										    atomic_read(&dev->rx_frames_ok));
 							stream->rx_asm_bad = true;
 							atomic_inc(&stream->rx_frag_drops);
 						}
@@ -2134,8 +2183,24 @@ void odl_tb5_rx_repost(struct odl_tb5_device *dev)
 		struct odl_tb5_frame_slot *slot;
 
 		slot = odl_tb5_frame_pool_get(&dev->frame_pool);
-		if (!slot)
+		if (!slot) {
+			/*
+			 * Pool exhausted: the receive ring stays short of
+			 * rx_target and inbound frames will be dropped by the
+			 * NHI with no error flag set. Record it — this used to
+			 * be a bare break, which is why the loss had no
+			 * fingerprint.
+			 */
+			int shortfall = target - posted;
+
+			atomic_inc(&dev->rx_repost_starved);
+			if (shortfall > atomic_read(&dev->rx_repost_short))
+				atomic_set(&dev->rx_repost_short, shortfall);
+			pr_warn_ratelimited("odl_tb5: RX repost starved: posted=%d target=%d short=%d pool_free=%d (frames will be dropped unflagged)\n",
+					    posted, target, shortfall,
+					    dev->frame_pool.free_count);
 			break;
+		}
 
 		slot->frame.buffer_phy = slot->phys;
 		slot->frame.size = 0; /* NHI fills this on RX completion */
@@ -2151,4 +2216,9 @@ void odl_tb5_rx_repost(struct odl_tb5_device *dev)
 		atomic_inc(&dev->rx_posted);
 		posted++;
 	}
+
+	/* Low-water mark, so a transient dip that never fully starves is still
+	 * visible after the fact. */
+	if (posted < atomic_read(&dev->rx_posted_min))
+		atomic_set(&dev->rx_posted_min, posted);
 }

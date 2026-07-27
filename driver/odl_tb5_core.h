@@ -358,6 +358,37 @@ struct odl_tb5_device {
 
 	/* RX repost tracking */
 	atomic_t		rx_posted;
+
+	/*
+	 * RX diagnostics. The receive callback used to validate only
+	 * frame->size, so a frame the NHI had already flagged as bad was
+	 * consumed as if it were good — and, worse, frames that never arrived
+	 * left no trace anywhere. These count what was previously discarded in
+	 * silence. They are reported alongside the fragment-gap warning, so a
+	 * gap and its possible cause appear in the same log line.
+	 */
+	atomic_t		rx_err_crc;        /* NHI reported a CRC failure   */
+	atomic_t		rx_err_overrun;    /* NHI reported buffer overrun  */
+	atomic_t		rx_canceled;       /* ring teardown reclaimed it   */
+	atomic_t		rx_err_short;      /* smaller than a stream header */
+	atomic_t		rx_err_len;        /* payload_len exceeds the frame*/
+	atomic_t		rx_frames_ok;      /* accepted, for a denominator  */
+
+	/*
+	 * RX repost starvation. odl_tb5_rx_repost() gives up silently when the
+	 * shared frame pool has nothing left, leaving the receive ring short.
+	 * Frames that then arrive with no posted buffer are dropped by the NHI
+	 * itself — with no CRC or overrun flag, because nothing was wrong with
+	 * them. That is invisible at every layer, and it is the leading
+	 * candidate for the duplex fragment loss.
+	 *
+	 * This has bitten before: the pool sizing comment above records
+	 * "32-fragment burst losses under bidirectional load" from exactly this
+	 * cause. rx_posted_min is a low-water mark, initialised to INT_MAX.
+	 */
+	atomic_t		rx_repost_starved; /* repost gave up: pool empty   */
+	atomic_t		rx_repost_short;   /* worst shortfall vs rx_target */
+	atomic_t		rx_posted_min;     /* low-water mark of rx_posted  */
 	int			rx_target;
 
 	struct list_head	list;
