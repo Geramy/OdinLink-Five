@@ -9,13 +9,110 @@ OdinLink turns a Thunderbolt cable into a high-speed RDMA interconnect between m
 ```
 
 
-#Thunderbolt 4 Test / USB4v1
+## About this fork
 
-![USB4v1 / Thunderbolt 4 Test](https://github.com/Geramy/OdinLink-Five/blob/main/assets/Screenshot_2026-02-20_13-50-36.png)
+This is an additive fork of [Geramy/OdinLink-Five](https://github.com/Geramy/OdinLink-Five).
+It keeps the upstream design and adds focused driver and RDMA verbs fixes found
+while bringing up real cross-node workloads.
 
+The work is on `strix-halo-verbs-fixes`, on top of upstream `ed60505`
+([full diff](https://github.com/Geramy/OdinLink-Five/compare/ed60505...wkljohn:strix-halo-verbs-fixes)).
+It was developed and measured on two AMD Ryzen AI MAX+ 395 systems (Strix Halo,
+`gfx1151`), running Ubuntu 26.04 and kernel 7.0.0-28.
 
-#Thunderbolt 5 Test / USB4v2
-![USB4v2 / Thunderbolt 5 Test](https://github.com/Geramy/OdinLink-Five/blob/main/assets/Screenshot_2026-02-27_10-07-33.png)
+```bash
+git clone -b strix-halo-verbs-fixes https://github.com/wkljohn/OdinLink-Five.git
+cd OdinLink-Five
+cmake -B build -DBUILD_VERBS=ON -DBUILD_TRAY=OFF && cmake --build build -j$(nproc)
+make -C driver
+```
+
+End-to-end recipes, the full bug ledger, and the raw measurements live in
+[wkljohn/llama.cpp-strix-halo-RCCL-RDMA](https://github.com/wkljohn/llama.cpp-strix-halo-RCCL-RDMA/tree/main/odinlink).
+
+### What this branch fixes
+
+The correctness bugs below are not AMD-specific. They affect **all users** of
+the upstream paths involved. The discovery workaround was developed and tested
+on Strix Halo; other platforms have not been measured here.
+
+- **All users — standard RDMA discovery.** Upstream's rdma-core provider looks
+  for an old library entry point and has no kernel RDMA device to enumerate.
+  As a result, `ibv_devices` was empty and standard verbs applications could
+  not find OdinLink. This branch adds the missing discovery half of the verbs
+  API. For now it is delivered as an `LD_PRELOAD` shim because OdinLink still
+  does not register a kernel `ib_device`; this is a practical bridge, not a
+  complete kernel-provider integration.
+
+- **All users — full-size frame loss.** A completely filled frame was exactly
+  as large as its receive buffer, leaving no room for the cable framing around
+  it. The hardware silently dropped every full fragment and delivered only the
+  short tail. Every multi-frame transfer could therefore stall or arrive
+  incomplete. This branch leaves safe headroom in each frame.
+
+- **All verbs users — real receive posting.** `ibv_post_recv` used to wait for
+  data immediately. Verbs programs expect it to leave an empty buffer for data
+  that arrives later, like putting an empty tray on a conveyor belt. This
+  branch adds a receive queue and a worker that fills posted buffers.
+
+- **All verbs users — safe sends and identifiable completions.**
+  `ibv_post_send` kept a pointer to the caller's temporary stack data, then a
+  worker read it after the calling function had returned. This branch keeps a
+  safe private copy for normal host-memory sends. It also returns `wr_id` in
+  completions so applications can match each completion to its request.
+
+- **All verbs users — completion progress.** `ibv_poll_cq` could wait while
+  holding the same lock needed to publish a completion. The producer and
+  consumer blocked each other. Polling is now non-blocking, so completions can
+  be posted and collected.
+
+- **All users — bidirectional progress.** One stream was shared by send and
+  receive, and the send-side safety reserve was sized like the full receive
+  queue. Two-way traffic could stop with healthy buffers still available. This
+  branch uses separate streams and receive progress for each direction, and a
+  smaller reserve that protects receive traffic without starving sends.
+
+- **All users — dropped-fragment detection.** Each fragment now carries a
+  sequence number. A gap is reported as an error and the damaged message is
+  dropped, instead of quietly returning a shorter, corrupt message. This
+  detects loss; it does not retransmit missing fragments.
+
+- **All users — byte-verifying conformance test.** The new
+  `tests/odl_rdma_stress.c` checks every byte with a position-based pattern, so
+  truncation, reordering, stale buffers, and dropped fragments fail loudly.
+  `--bidir` exercises both directions at once. `--latency` measures verified
+  round trips through the verbs path.
+
+Both ends must run the same build — the stream header grew a fragment index, so
+mismatched builds will not interoperate.
+
+### Measured results on Strix Halo
+
+These are measurements from this two-node setup, not general hardware claims.
+The systems used a USB4v1-class Thunderbolt cable; the driver reported an
+effective 10 Gb/s × 2 lanes.
+
+| Test | Measured result | Context |
+|---|---:|---|
+| Round-trip latency | **22.0 µs median** | TCP on the same cable measured **286 µs**, about **13×** higher. The median repeated within **±0.19 µs** across runs, but p95 and p99 moved by about **3×** from run to run, so the tail figures are not treated as stable. |
+| Byte-verified bulk | **21 GiB at 8.38 Gb/s** one way | All **86016/86016** messages passed byte verification. |
+| Byte-verified full duplex | **2 GiB each way at 9.84 Gb/s** | Both peers verified **8192/8192** messages while sending and receiving together. |
+| llama.cpp 27B Q6_K, 2 nodes, `-sm layer`, tg128 | **9.16 t/s** | The same workload measured **9.07 t/s** over thunderbolt_ibverbs and **8.83 t/s** over TCP. |
+| llama.cpp 27B Q6_K, 1 node, tg128 | **9.50 t/s** | A model that fits on one node is still faster there. Splitting this workload across two nodes is for capacity—fitting a larger model—not speed. |
+| Inline send fast path, 1 KiB | **minimum −1.93 µs; stddev −52%** | The median was essentially unchanged: **22.58 µs off** and **22.50 µs on**. The fast path improves the floor and variation, not the typical round trip. |
+
+The bulk figures above are byte-verified. The llama.cpp figures measure workload
+speed; they should not be read as a separate transport-integrity test.
+
+**Not measured: tensor parallelism.** RCCL loads and selects the OdinLink net
+plugin correctly, but the tensor-parallel benchmark on top of it does not start —
+the world-communicator rendezvous deadlocks, in the application, not in this
+transport. Every inference figure above is pipeline parallelism, which crosses
+the cable once per token and therefore gains little from lower latency. The case
+that all-reduces every layer, and would gain most, remains untested.
+
+<sub>This work is part of the [paix-navigator.paicon.com](https://paix-navigator.paicon.com) effort by paicon.</sub>
+
 ---
 
 ## Progress
