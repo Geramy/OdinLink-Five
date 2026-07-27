@@ -72,7 +72,9 @@ struct odl_tb5_stream_hdr {
 	__u8   src_id;
 	__u8   dst_id;
 	__u8   flags;
+	__u8   reserved;	/* pad: lands the payload 8-byte aligned */
 	__le16 payload_len;
+	__le16 frag_idx;	/* fragment index within the message, from 0 */
 } __packed;
 
 /* ── DMA frame pool (replaces old double-buffer scheme) ─────────────── */
@@ -183,6 +185,9 @@ struct odl_tb5_stream {
 	size_t			rx_asm_len;
 	size_t			rx_asm_cap;
 	u8			rx_asm_src_id;
+	u16			rx_asm_next_frag;
+	bool			rx_asm_bad;
+	atomic_t		rx_frag_drops;
 
 	struct kref		refcount;
 	struct hlist_node	node;

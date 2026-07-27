@@ -55,7 +55,12 @@ struct odl_tb5_ring_request {
 
 /* ── Stream ioctl structures ───────────────────────────────────────── */
 
-#define ODL_TB5_STREAM_HDR_SIZE      5
+/* 8 bytes: src_id, dst_id, flags, reserved, payload_len, frag_idx.
+ * frag_idx makes fragment loss DETECTABLE - reassembly used to be blind
+ * concatenation gated only by MSG_START/MSG_END, so a single dropped frame
+ * silently produced a short, corrupt message. The pad keeps the payload
+ * 8-byte aligned, which also makes the reassembly memcpy cheaper. */
+#define ODL_TB5_STREAM_HDR_SIZE      8
 #define ODL_TB5_FRAME_SIZE           4096
 /* A Thunderbolt ring frame carries framing/CRC overhead beyond the payload
  * the driver writes, so a frame of exactly ODL_TB5_FRAME_SIZE bytes does not

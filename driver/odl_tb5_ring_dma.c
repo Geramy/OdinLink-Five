@@ -270,6 +270,8 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 							data + ODL_TB5_STREAM_HDR_SIZE;
 						u8 flags = shdr->flags;
 
+						u16 fidx = le16_to_cpu(shdr->frag_idx);
+
 						/* Start of new message — reset assembly */
 						if (flags & ODL_TB5_SHDR_F_MSG_START) {
 							kfree(stream->rx_asm_buf);
@@ -277,7 +279,30 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 							stream->rx_asm_len = 0;
 							stream->rx_asm_cap = 0;
 							stream->rx_asm_src_id = shdr->src_id;
+							stream->rx_asm_next_frag = 0;
+							stream->rx_asm_bad = false;
 						}
+
+						/*
+						 * Fragment sequencing: one compare, no
+						 * round-trips, so the latency path is
+						 * untouched (a SINGLE frame is always
+						 * fidx 0 and trivially valid). Without
+						 * this a dropped frame was invisible and
+						 * silently produced a short, corrupt
+						 * message. On a gap, poison the message
+						 * and drop it at MSG_END rather than
+						 * handing up bad data.
+						 */
+						if (fidx != stream->rx_asm_next_frag) {
+							if (!stream->rx_asm_bad)
+								pr_warn_ratelimited("odl_tb5: stream %u fragment gap: got %u expected %u - dropping message\n",
+										    dst_id, fidx,
+										    stream->rx_asm_next_frag);
+							stream->rx_asm_bad = true;
+							atomic_inc(&stream->rx_frag_drops);
+						}
+						stream->rx_asm_next_frag = fidx + 1;
 
 						/* Append payload to assembly buffer */
 						if (stream->rx_asm_len + payload_len >
@@ -321,6 +346,17 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 						if (flags & ODL_TB5_SHDR_F_MSG_END) {
 							struct odl_tb5_rx_msg *rxm;
 							unsigned long rxflags;
+
+							if (stream->rx_asm_bad) {
+								/* Incomplete: never deliver it. */
+								kfree(stream->rx_asm_buf);
+								stream->rx_asm_buf = NULL;
+								stream->rx_asm_len = 0;
+								stream->rx_asm_cap = 0;
+								stream->rx_asm_bad = false;
+								stream->rx_asm_next_frag = 0;
+								goto rx_frame_done;
+							}
 
 							rxm = kzalloc(sizeof(*rxm),
 								      GFP_ATOMIC);
@@ -370,6 +406,7 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 							}
 						}
 
+rx_frame_done:
 						kref_put(&stream->refcount,
 							 odl_tb5_stream_free);
 					}
@@ -1353,7 +1390,10 @@ struct odl_tb5_stream *odl_tb5_stream_create(struct odl_tb5_device *dev,
 	INIT_LIST_HEAD(&stream->rx_queue);
 	spin_lock_init(&stream->rx_lock);
 	stream->rx_queue_len = 0;
-	stream->rx_queue_max = 65536;   /* was 256: a single ~1MB msg = ~264 frames;
+	stream->rx_queue_max = 65536;
+	stream->rx_asm_next_frag = 0;
+	stream->rx_asm_bad = false;
+	atomic_set(&stream->rx_frag_drops, 0);   /* was 256: a single ~1MB msg = ~264 frames;
 					 * under load the sender runs >256 frames ahead
 					 * and the old cap silently DROPPED frames ->
 					 * plugin framing desync -> vLLM hang. */
@@ -1524,6 +1564,7 @@ static int odl_tb5_stream_send_latency(struct odl_tb5_stream *stream,
 					const void __user *data,
 					size_t len)
 {
+	u16 frag_idx = 0;
 	struct odl_tb5_device *dev = stream->dev;
 	struct odl_tb5_frame_pool *pool = &dev->frame_pool;
 	struct odl_tb5_tx_msg *msg;
@@ -1569,6 +1610,8 @@ static int odl_tb5_stream_send_latency(struct odl_tb5_stream *stream,
 		hdr = slot->virt;
 		hdr->src_id = stream->id;
 		hdr->dst_id = dst_id;
+		hdr->reserved = 0;
+		hdr->frag_idx = cpu_to_le16(frag_idx++);
 		if (first && last)
 			hdr->flags = ODL_TB5_SHDR_F_SINGLE;
 		else if (first)
@@ -1633,6 +1676,7 @@ static int odl_tb5_stream_send_throughput(struct odl_tb5_stream *stream,
 					   const void __user *data,
 					   size_t len)
 {
+	u16 frag_idx = 0;
 	struct odl_tb5_device *dev = stream->dev;
 	struct odl_tb5_batch_pool *bpool = &dev->batch_pool;
 	struct odl_tb5_tx_msg *msg;
@@ -1700,6 +1744,8 @@ static int odl_tb5_stream_send_throughput(struct odl_tb5_stream *stream,
 			/* Stream header */
 			hdr->src_id = stream->id;
 			hdr->dst_id = dst_id;
+			hdr->reserved = 0;
+			hdr->frag_idx = cpu_to_le16(frag_idx++);
 			if (first && last)
 				hdr->flags = ODL_TB5_SHDR_F_SINGLE;
 			else if (first)
