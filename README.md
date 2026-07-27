@@ -58,7 +58,7 @@ These two-node measurements used a USB4v1 cable; the driver reported 10 Gb/s × 
 
 The median is reproducible, but p95/p99 are not; the bulk results are byte-verified. A single node at 9.50 t/s remains faster than two nodes, which are for capacity rather than speed.
 
-**Not measured: tensor parallelism.** Its benchmark deadlocks in the application's world-communicator setup, not in the transport, although RCCL loads the OdinLink plugin. All inference figures above are pipeline parallelism; tensor parallelism over this transport was never benchmarked.
+**Not measured: tensor parallelism.** RCCL loads and selects this plugin, but no tensor-parallel run over it has been made yet — nothing is known to block one. All inference figures above are pipeline parallelism, which crosses the cable once per token and so gains little from lower latency.
 
 ---
 
