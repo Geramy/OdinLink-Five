@@ -57,7 +57,14 @@ struct odl_tb5_ring_request {
 
 #define ODL_TB5_STREAM_HDR_SIZE      5
 #define ODL_TB5_FRAME_SIZE           4096
-#define ODL_TB5_STREAM_PAYLOAD_MAX   (ODL_TB5_FRAME_SIZE - ODL_TB5_STREAM_HDR_SIZE)
+/* A Thunderbolt ring frame carries framing/CRC overhead beyond the payload
+ * the driver writes, so a frame of exactly ODL_TB5_FRAME_SIZE bytes does not
+ * fit the equally-sized RX buffer and is silently dropped by the NHI. Only
+ * the short tail fragment of a multi-frame message would then arrive, so any
+ * message larger than one frame never completed reassembly. Reserve headroom
+ * so header + payload stays strictly below the buffer size. */
+#define ODL_TB5_FRAME_TAIL_RESERVE   64
+#define ODL_TB5_STREAM_PAYLOAD_MAX   (ODL_TB5_FRAME_SIZE - ODL_TB5_STREAM_HDR_SIZE - ODL_TB5_FRAME_TAIL_RESERVE)
 #define ODL_TB5_STREAM_ID_CTRL       0
 #define ODL_TB5_STREAM_ID_MAX        255
 

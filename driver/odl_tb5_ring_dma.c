@@ -289,6 +289,9 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 								    payload_len));
 							void *nb = kmalloc(new_cap,
 									   GFP_ATOMIC);
+							if (!nb)
+								pr_warn_ratelimited("odl_tb5: rx_asm kmalloc(%zu, GFP_ATOMIC) FAILED - payload will be dropped\n",
+										    new_cap);
 							if (nb) {
 								if (stream->rx_asm_buf)
 									memcpy(nb,
@@ -306,6 +309,12 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 							       stream->rx_asm_len,
 							       payload, payload_len);
 							stream->rx_asm_len += payload_len;
+						} else {
+							pr_warn_ratelimited("odl_tb5: rx_asm DROP payload_len=%u asm_len=%zu cap=%zu buf=%p\n",
+									    payload_len,
+									    stream->rx_asm_len,
+									    stream->rx_asm_cap,
+									    stream->rx_asm_buf);
 						}
 
 						/* End of message — enqueue complete msg */
@@ -1656,6 +1665,9 @@ static int odl_tb5_stream_send_throughput(struct odl_tb5_stream *stream,
 			bpool->free_count > 0,
 			msecs_to_jiffies(5000));
 		if (ret <= 0) {
+			pr_warn_ratelimited("odl_tb5: throughput TX stalled waiting for batch buf (free=%d ret=%ld sent=%zu/%zu)\n",
+					    bpool->free_count, ret,
+					    total_sent, len);
 			if (ret == 0)
 				ret = -ETIMEDOUT;
 			goto wait_pending;
