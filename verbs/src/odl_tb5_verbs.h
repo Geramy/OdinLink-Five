@@ -126,6 +126,12 @@ struct odl_verbs_cq {
     /* Eventfd for async notification */
     int                       eventfd_fd;
     bool                      armed;
+
+    /* QP whose receive queue feeds this CQ. ibv_poll_cq() must drive receive
+     * progress: the QP worker also performs sends and can sit in its TX
+     * readiness poll, during which nothing would drain RX and both peers
+     * stall waiting on each other. */
+    struct odl_verbs_qp      *rx_qp;
 };
 
 /* ── Queue Pair ─────────────────────────────────────────────────────── */
@@ -152,6 +158,12 @@ struct odl_verbs_qp {
     uint32_t                  sq_len[ODL_VERBS_SQ_DEPTH];
     uint32_t                  sq_lkey[ODL_VERBS_SQ_DEPTH];
     int                       sq_num_sge[ODL_VERBS_SQ_DEPTH];
+    /* ibv_post_send() is defined to consume the payload before returning, so
+     * callers reuse their send buffer immediately. odl_tb5_stream_send() only
+     * QUEUES the data, so by the time the worker DMAs it the caller has
+     * usually overwritten it -- silent corruption. Take a private copy at post
+     * time and transmit from that. */
+    void                     *sq_bounce[ODL_VERBS_SQ_DEPTH];
     int                       sq_head;
     int                       sq_tail;
     int                       sq_count;
@@ -166,6 +178,11 @@ struct odl_verbs_qp {
      * completions. Callers pass stack-allocated ibv_recv_wr/ibv_sge, so we
      * store COPIES, never the caller's pointers. */
     pthread_mutex_t           rq_lock;
+    /* Serialises odl_rq_drain(): it is now called from BOTH the QP worker and
+     * the application's ibv_poll_cq() thread, and it must release rq_lock
+     * around stream_recv(). Without exclusion two drainers interleave their
+     * receives and deliver messages out of order, corrupting the stream. */
+    pthread_mutex_t           drain_lock;
     uint64_t                  rq_wr_id[ODL_VERBS_RQ_DEPTH];
     uint64_t                  rq_addr[ODL_VERBS_RQ_DEPTH];
     uint32_t                  rq_len[ODL_VERBS_RQ_DEPTH];

@@ -45,6 +45,7 @@ static int odl_worker_poll_fd(struct odl_verbs_qp *qp, int timeout_ms)
 }
 
 /* Look up a dmabuf fd by lkey. Returns -1 if not a dmabuf MR. */
+int odl_lookup_dmabuf_pub(struct odl_verbs_context *ctx, uint32_t lkey);
 static int odl_lookup_dmabuf(struct odl_verbs_context *ctx, uint32_t lkey)
 {
     if (!lkey) return -1;
@@ -73,6 +74,7 @@ static void *odl_qp_worker(void *arg)
         odl_rq_drain(qp);
 
         bool     have_wr = false;
+        void    *w_bounce = NULL;
         uint64_t w_wr_id = 0, w_addr = 0;
         uint32_t w_len = 0, w_lkey = 0;
         int      w_num_sge = 0;
@@ -85,6 +87,7 @@ static void *odl_qp_worker(void *arg)
             w_len     = qp->sq_len[qp->sq_head];
             w_lkey    = qp->sq_lkey[qp->sq_head];
             w_num_sge = qp->sq_num_sge[qp->sq_head];
+            w_bounce  = qp->sq_bounce[qp->sq_head];
             qp->sq_head = (qp->sq_head + 1) % ODL_VERBS_SQ_DEPTH;
             qp->sq_count--;
             have_wr = true;
@@ -147,6 +150,7 @@ static void *odl_qp_worker(void *arg)
                     qp->sq_len[qp->sq_tail]     = w_len;
                     qp->sq_lkey[qp->sq_tail]    = w_lkey;
                     qp->sq_num_sge[qp->sq_tail] = w_num_sge;
+                    qp->sq_bounce[qp->sq_tail]  = w_bounce;
                     qp->sq_tail = (qp->sq_tail + 1) % ODL_VERBS_SQ_DEPTH;
                     qp->sq_count++;
                 }
@@ -170,6 +174,8 @@ static void *odl_qp_worker(void *arg)
             wc.opcode   = IBV_WC_SEND;
             wc.qp_num   = qp->base.qp_num;
         }
+
+        free(w_bounce);
 
         /* Post completion to send CQ */
         if (qp->send_cq)
@@ -221,11 +227,14 @@ struct ibv_qp *odl_create_qp(struct ibv_pd *pd,
     qp->pd               = odl_pd_from_ibv(pd);
     qp->send_cq          = attr->send_cq ? odl_cq_from_ibv(attr->send_cq) : NULL;
     qp->recv_cq          = attr->recv_cq ? odl_cq_from_ibv(attr->recv_cq) : NULL;
+    if (qp->recv_cq)
+        qp->recv_cq->rx_qp = qp;   /* let poll_cq drive RX progress */
     qp->stream_id        = stream_id;
 
     /* Initialize SQ */
     pthread_mutex_init(&qp->sq_lock, NULL);
     pthread_mutex_init(&qp->rq_lock, NULL);
+    pthread_mutex_init(&qp->drain_lock, NULL);
     qp->rq_head = qp->rq_tail = qp->rq_count = 0;
     qp->sq_head  = 0;
     qp->sq_tail  = 0;
@@ -352,10 +361,30 @@ int odl_post_send(struct ibv_qp *qp, struct ibv_send_wr *wr,
         oqp->sq_wr_id[oqp->sq_tail]   = wr->wr_id;
         oqp->sq_num_sge[oqp->sq_tail] = wr->num_sge;
         if (wr->num_sge > 0) {
-            oqp->sq_addr[oqp->sq_tail] = wr->sg_list[0].addr;
-            oqp->sq_len[oqp->sq_tail]  = wr->sg_list[0].length;
+            uint32_t blen = wr->sg_list[0].length;
+            void *bounce = NULL;
+
+            /* Copy now; the caller may reuse its buffer the moment we return.
+             * dmabuf MRs are zero-copy by definition and are left alone. */
+            if (odl_lookup_dmabuf_pub(oqp->ctx, wr->sg_list[0].lkey) < 0 &&
+                blen > 0) {
+                bounce = malloc(blen);
+                if (!bounce) {
+                    *bad_wr = wr;
+                    pthread_mutex_unlock(&oqp->sq_lock);
+                    odl_logerr("post_send: bounce alloc %u failed", blen);
+                    return -ENOMEM;
+                }
+                memcpy(bounce, (const void *)(uintptr_t)wr->sg_list[0].addr,
+                       blen);
+            }
+            oqp->sq_bounce[oqp->sq_tail] = bounce;
+            oqp->sq_addr[oqp->sq_tail] = bounce ? (uint64_t)(uintptr_t)bounce
+                                               : wr->sg_list[0].addr;
+            oqp->sq_len[oqp->sq_tail]  = blen;
             oqp->sq_lkey[oqp->sq_tail] = wr->sg_list[0].lkey;
         } else {
+            oqp->sq_bounce[oqp->sq_tail] = NULL;
             oqp->sq_addr[oqp->sq_tail] = 0;
             oqp->sq_len[oqp->sq_tail]  = 0;
             oqp->sq_lkey[oqp->sq_tail] = 0;
@@ -418,6 +447,11 @@ int odl_rq_drain(struct odl_verbs_qp *oqp)
 {
     int completions = 0;
 
+    /* Exclusive: only one drainer at a time, so receives stay ordered.
+     * trylock, never block -- ibv_poll_cq() must not stall behind the worker. */
+    if (pthread_mutex_trylock(&oqp->drain_lock) != 0)
+        return 0;
+
     for (;;) {
         uint64_t wr_id, addr;
         uint32_t len;
@@ -468,6 +502,7 @@ int odl_rq_drain(struct odl_verbs_qp *oqp)
         completions++;
     }
 
+    pthread_mutex_unlock(&oqp->drain_lock);
     return completions;
 }
 
@@ -513,4 +548,9 @@ int odl_query_qp(struct ibv_qp *qp, struct ibv_qp_attr *attr,
     }
 
     ODL_TRACE_EXIT_VAL(0);
+}
+
+int odl_lookup_dmabuf_pub(struct odl_verbs_context *ctx, uint32_t lkey)
+{
+    return odl_lookup_dmabuf(ctx, lkey);
 }
