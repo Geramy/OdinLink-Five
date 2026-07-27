@@ -38,6 +38,24 @@ MODULE_PARM_DESC(protocol,
 
 bool odl_e2e = true;
 module_param_named(e2e, odl_e2e, bool, 0444);
+
+/* upstream PR #21: bounded RX busy-poll before sleeping. The RX softirq
+ * increments rx_complete on another CPU, so a spinning reader sees it within
+ * cache-coherency latency and skips a ~10-15 us context-switch wake. */
+unsigned int odl_busy_poll_us = 0;
+module_param(odl_busy_poll_us, uint, 0644);
+MODULE_PARM_DESC(odl_busy_poll_us,
+	"Bounded RX busy-poll window in microseconds before sleeping (0 = off)");
+
+/* Bind at most N XDomain services (0 = unlimited).  With two Thunderbolt
+ * cables both peer services sit at route=2 (BUG 2) and the handshake cannot
+ * complete; unbinding one afterwards runs the full teardown path, so bind
+ * only one from the start instead. */
+int odl_max_devices = 0;
+module_param_named(max_devices, odl_max_devices, int, 0444);
+MODULE_PARM_DESC(max_devices,
+	"Bind at most N XDomain services (0 = unlimited; use 1 with two cables)");
+static atomic_t odl_bound_count = ATOMIC_INIT(0);
 MODULE_PARM_DESC(e2e,
 	"Enable end-to-end flow control (default=1). Set 0 for TB3 controllers "
 	"that do not support RING_FLAG_E2E.");
@@ -62,6 +80,13 @@ MODULE_DEVICE_TABLE(tbsvc, odl_tb5_ids);
 static int odl_tb5_probe(struct tb_service *svc,
 			 const struct tb_service_id *id)
 {
+	if (odl_max_devices > 0 &&
+	    atomic_inc_return(&odl_bound_count) > odl_max_devices) {
+		atomic_dec(&odl_bound_count);
+		pr_info("odl_tb5: max_devices=%d reached, skipping service\n",
+			odl_max_devices);
+		return -ENODEV;
+	}
 	struct odl_tb5_device *dev;
 	int ret;
 
@@ -107,8 +132,17 @@ static int odl_tb5_probe(struct tb_service *svc,
 	/* Adaptive TX mode defaults */
 	dev->tx_adaptive.mode = ODL_TB5_TX_LATENCY;
 	dev->tx_adaptive.consecutive_low = 0;
-	dev->tx_adaptive.high_watermark = odl_ring_size * 3 / 4;
-	dev->tx_adaptive.low_watermark  = odl_ring_size / 4;
+	/* Watermarks gate the shared frame pool (ODL_TB5_FRAME_POOL_SIZE
+	 * slots), NOT the NHI ring depth.  With large odl_ring_size the raw
+	 * ring*3/4 exceeds the pool, so the adaptive logic can never trip and
+	 * TX flow control is miscalibrated.  Clamp to the usable pool.
+	 * (upstream PR #20) */
+	dev->tx_adaptive.high_watermark =
+		min_t(unsigned int, odl_ring_size * 3 / 4,
+		      ODL_TB5_FRAME_POOL_SIZE - ODL_TB5_TX_POOL_RESERVE);
+	dev->tx_adaptive.low_watermark  =
+		min_t(unsigned int, odl_ring_size / 4,
+		      (ODL_TB5_FRAME_POOL_SIZE - ODL_TB5_TX_POOL_RESERVE) / 2);
 
 	ret = odl_tb5_chardev_create(dev);
 	if (ret) {
@@ -156,6 +190,8 @@ err_rings:
 err_chardev:
 	odl_tb5_chardev_destroy(dev);
 err_free_dev:
+	if (odl_max_devices > 0)
+		atomic_dec(&odl_bound_count);
 	ida_free(&odl_tb5_ida, dev->index);
 	kfree(dev);
 	return ret;
@@ -206,14 +242,19 @@ static void odl_tb5_remove(struct tb_service *svc)
 	odl_tb5_dma_bufs_free(dev);
 	odl_tb5_rings_free(dev);
 
-	if (saved_state == ODL_TB5_STATE_CONNECTED ||
-	    saved_state == ODL_TB5_STATE_READY) {
+	/* BUG1 fix: release regardless of connection state.  The original code
+	 * released only from CONNECTED/READY, so removal during HANDSHAKE
+	 * (login retrying, peer gone, admin unbind) leaked the hop-ID until
+	 * enable_paths returned -ENOMEM on every later load.  Ordering is kept
+	 * exactly as upstream: this runs AFTER rings_stop()/bufs_free() above. */
+	if (dev->in_hopid_valid) {
 		tb_xdomain_disable_paths(dev->xd,
 					 dev->local_tx_hopid,
 					 dev->tx.ring ? dev->tx.ring->hop : -1,
-					 dev->remote_tx_hopid,
+					 dev->in_hopid,
 					 dev->rx.ring ? dev->rx.ring->hop : -1);
-		tb_xdomain_release_in_hopid(dev->xd, dev->remote_tx_hopid);
+		tb_xdomain_release_in_hopid(dev->xd, dev->in_hopid);
+		dev->in_hopid_valid = false;
 	}
 
 	odl_tb5_chardev_destroy(dev);

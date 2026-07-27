@@ -64,6 +64,7 @@
 #define ODL_VERBS_MAX_MRS               512
 #define ODL_VERBS_MAX_QPS               256
 #define ODL_VERBS_MAX_CQS               128
+#define ODL_VERBS_RQ_DEPTH              256
 #define ODL_VERBS_COMP_CHANNEL_BACKLOG   64
 #define ODL_VERBS_SQ_DEPTH              64
 
@@ -136,10 +137,21 @@ struct odl_verbs_qp {
     struct odl_verbs_cq      *send_cq;
     struct odl_verbs_cq      *recv_cq;
     uint8_t                   stream_id;
+    /* BUG15: remote stream to address sends at, taken from
+     * ibv_modify_qp(IBV_QP_DEST_QPN) at the RTR transition. Without this the
+     * worker sent everything to dst_id 0 and nothing reached the peer. */
+    uint8_t                   dest_qp;
 
     /* Work submission queue (async via worker thread) */
     pthread_mutex_t           sq_lock;
-    struct ibv_send_wr       *sq[ODL_VERBS_SQ_DEPTH];
+    /* BUG14: callers pass stack-allocated ibv_send_wr/ibv_sge and expect
+     * post_send to return immediately, so the worker must never dereference
+     * the caller's pointers. Store copies of the fields we need. */
+    uint64_t                  sq_wr_id[ODL_VERBS_SQ_DEPTH];
+    uint64_t                  sq_addr[ODL_VERBS_SQ_DEPTH];
+    uint32_t                  sq_len[ODL_VERBS_SQ_DEPTH];
+    uint32_t                  sq_lkey[ODL_VERBS_SQ_DEPTH];
+    int                       sq_num_sge[ODL_VERBS_SQ_DEPTH];
     int                       sq_head;
     int                       sq_tail;
     int                       sq_count;
@@ -147,6 +159,19 @@ struct odl_verbs_qp {
     /* Worker thread */
     pthread_t                 worker;
     bool                      worker_running;
+
+    /* Receive queue: buffers posted by the app, awaiting inbound data.
+     * ibv_post_recv() must NOT block or touch the wire -- it only enqueues.
+     * The worker thread drains the stream into these buffers and posts the
+     * completions. Callers pass stack-allocated ibv_recv_wr/ibv_sge, so we
+     * store COPIES, never the caller's pointers. */
+    pthread_mutex_t           rq_lock;
+    uint64_t                  rq_wr_id[ODL_VERBS_RQ_DEPTH];
+    uint64_t                  rq_addr[ODL_VERBS_RQ_DEPTH];
+    uint32_t                  rq_len[ODL_VERBS_RQ_DEPTH];
+    int                       rq_head;
+    int                       rq_tail;
+    int                       rq_count;
 
     /* Async tracking */
     atomic_int                pending_sends;
@@ -251,6 +276,7 @@ int odl_modify_qp(struct ibv_qp *, struct ibv_qp_attr *, int);
 int odl_query_qp(struct ibv_qp *, struct ibv_qp_attr *, int, struct ibv_qp_init_attr *);
 int odl_post_send(struct ibv_qp *, struct ibv_send_wr *, struct ibv_send_wr **);
 int odl_post_recv(struct ibv_qp *, struct ibv_recv_wr *, struct ibv_recv_wr **);
+int odl_rq_drain(struct odl_verbs_qp *oqp);
 
 /* Ops table init */
 void odl_init_context_ops(struct ibv_context *ctx);

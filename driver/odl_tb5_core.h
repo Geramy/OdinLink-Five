@@ -245,6 +245,11 @@ struct odl_tb5_device {
 	bool			login_sent;
 	bool			login_received;
 	int			stale_remote_tx_hopid;
+	/* BUG1 fix: authoritative record of the hop-ID actually allocated by
+	 * tb_xdomain_alloc_in_hopid(), so every teardown path can release it
+	 * regardless of connection state. */
+	bool			in_hopid_valid;
+	int			in_hopid;
 
 	/* DMA verification (ping/pong) */
 	struct work_struct	verify_work;
@@ -252,6 +257,12 @@ struct odl_tb5_device {
 	struct hrtimer		rx_poll_timer;
 	wait_queue_head_t	verify_waitq;
 	bool			pong_received;
+	/* Set when we answer a peer PING. Unlike pong_received this is NOT
+	 * cleared by verify_work, because the peer's ping can arrive BEFORE
+	 * our own verify starts -- clearing it there loses the proof and the
+	 * verify then times out with the link perfectly healthy. Reset only
+	 * when a new connection begins. */
+	bool			peer_ping_answered;
 	int			verify_rx_type;
 
 	/* Connection state */

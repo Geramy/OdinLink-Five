@@ -106,9 +106,21 @@ struct ibv_context *odl_ibv_open_device(struct ibv_device *device)
         return NULL;
     }
 
-    /* Set non-blocking mode on the device fd so stream_send/recv
-     * ioctls return -EAGAIN instead of blocking. The verbs provider
-     * uses poll() + non-blocking ioctls for true async behavior. */
+    /* Initialize context fields */
+    ctx->base.device        = device;
+    ctx->base.cmd_fd        = -1;
+    ctx->base.async_fd      = -1;
+
+    /*
+     * BUG16: this fd setup used to run BEFORE the block above, which then
+     * overwrote cmd_fd with -1. odl_worker_poll_fd() therefore always
+     * returned -EBADF, so the worker never waited for TX readiness and spun
+     * on "send EAGAIN, re-queueing" forever -- no payload ever moved.
+     * Order matters: assign the fd AFTER the defaults.
+     *
+     * Non-blocking mode makes stream_send/recv return -EAGAIN instead of
+     * blocking; the worker polls POLLOUT before retrying.
+     */
     int dev_fd = odl_tb5_get_fd(handle);
     if (dev_fd >= 0) {
         int flags = fcntl(dev_fd, F_GETFL, 0);
@@ -116,11 +128,6 @@ struct ibv_context *odl_ibv_open_device(struct ibv_device *device)
             fcntl(dev_fd, F_SETFL, flags | O_NONBLOCK);
         ctx->base.cmd_fd = dev_fd;
     }
-
-    /* Initialize context fields */
-    ctx->base.device        = device;
-    ctx->base.cmd_fd        = -1;
-    ctx->base.async_fd      = -1;
     ctx->base.num_comp_vectors = 1;
     ctx->dev                = odl_dev;
     ctx->handle             = handle;

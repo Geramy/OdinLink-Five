@@ -1344,14 +1344,17 @@ struct odl_tb5_stream *odl_tb5_stream_create(struct odl_tb5_device *dev,
 	INIT_LIST_HEAD(&stream->rx_queue);
 	spin_lock_init(&stream->rx_lock);
 	stream->rx_queue_len = 0;
-	stream->rx_queue_max = 256;
+	stream->rx_queue_max = 65536;   /* was 256: a single ~1MB msg = ~264 frames;
+					 * under load the sender runs >256 frames ahead
+					 * and the old cap silently DROPPED frames ->
+					 * plugin framing desync -> vLLM hang. */
 	atomic_set(&stream->rx_complete, 0);
 	init_waitqueue_head(&stream->rx_waitq);
 
 	kref_init(&stream->refcount);
 
 	mutex_lock(&dev->stream_lock);
-	hash_add(dev->streams, &stream->node, stream->id);
+	hash_add_rcu(dev->streams, &stream->node, stream->id);
 	mutex_unlock(&dev->stream_lock);
 
 	if (owner) {
@@ -1427,9 +1430,12 @@ struct odl_tb5_stream *odl_tb5_stream_lookup(struct odl_tb5_device *dev,
 	struct odl_tb5_stream *stream;
 
 	rcu_read_lock();
-	hash_for_each_possible(dev->streams, stream, node, stream_id) {
+	hash_for_each_possible_rcu(dev->streams, stream, node, stream_id) {
 		if (stream->id == stream_id) {
-			kref_get(&stream->refcount);
+			/* Stream may be concurrently freed (hash_del_rcu in
+			 * stream_destroy); only take a ref if still alive. */
+			if (!kref_get_unless_zero(&stream->refcount))
+				break;
 			rcu_read_unlock();
 			return stream;
 		}
@@ -1762,14 +1768,44 @@ wait_pending:
  * Non-blocking availability checks (for poll/epoll + async ioctl).
  * Returns true if a send/recv would not block.
  */
+extern unsigned int odl_busy_poll_us;
+
+/* Optional bounded busy-poll for an RX completion before sleeping.  The RX
+ * softirq (odl_tb5_rx_callback) increments rx_complete on another CPU, so a
+ * spinning reader sees it within cache-coherency latency and skips the
+ * context-switch wake (~10-15 us on this box).  Bounded + falls back to
+ * wait_event, so it never hangs.  Off unless odl_busy_poll_us > 0.
+ * (upstream PR #21) */
+static inline void odl_tb5_rx_busy_poll(struct odl_tb5_stream *stream)
+{
+	ktime_t deadline;
+
+	if (!odl_busy_poll_us || atomic_read(&stream->rx_complete) > 0)
+		return;
+	deadline = ktime_add_ns(ktime_get(), (u64)odl_busy_poll_us * 1000);
+	while (atomic_read(&stream->rx_complete) == 0) {
+		if (ktime_after(ktime_get(), deadline))
+			break;
+		cpu_relax();
+	}
+}
+
 bool odl_tb5_stream_can_send(struct odl_tb5_stream *stream)
 {
 	struct odl_tb5_device *dev = stream->dev;
 	struct odl_tb5_frame_pool *pool = &dev->frame_pool;
+	bool ok;
 
 	/* Can send if we have frames available and state is ready */
-	return dev->state == ODL_TB5_STATE_READY &&
-	       pool && pool->free_count > ODL_TB5_TX_POOL_RESERVE;
+	ok = dev->state == ODL_TB5_STATE_READY &&
+	     pool && pool->free_count > ODL_TB5_TX_POOL_RESERVE;
+
+	if (!ok)
+		pr_info_ratelimited("odl_tb5: can_send=0 state=%d free=%d reserve=%d rx_target=%d rx_posted=%d\n",
+				    dev->state, pool ? pool->free_count : -1,
+				    ODL_TB5_TX_POOL_RESERVE, dev->rx_target,
+				    atomic_read(&dev->rx_posted));
+	return ok;
 }
 
 bool odl_tb5_stream_can_recv(struct odl_tb5_stream *stream)
@@ -1789,6 +1825,7 @@ int odl_tb5_stream_send(struct odl_tb5_stream *stream,
 {
 	struct odl_tb5_device *dev = stream->dev;
 	enum odl_tb5_tx_mode mode;
+
 
 	if (dev->state != ODL_TB5_STATE_READY)
 		return -ENOTCONN;
@@ -1920,6 +1957,7 @@ int odl_tb5_stream_recv(struct odl_tb5_stream *stream,
 	int ret = 0;
 
 	/* Wait for a complete assembled message */
+	odl_tb5_rx_busy_poll(stream);
 	ret = wait_event_interruptible(stream->rx_waitq,
 		atomic_read(&stream->rx_complete) > 0);
 	if (ret)
@@ -1953,6 +1991,8 @@ int odl_tb5_stream_recv(struct odl_tb5_stream *stream,
 int odl_tb5_stream_wait_rx(struct odl_tb5_stream *stream, u32 timeout_ms)
 {
 	long ret;
+
+	odl_tb5_rx_busy_poll(stream);
 
 	if (timeout_ms == 0) {
 		ret = wait_event_interruptible(stream->rx_waitq,

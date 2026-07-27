@@ -27,6 +27,13 @@
 #define ODL_TB5_MSG_LOGOUT     3
 
 #define ODL_TB5_LOGIN_TIMEOUT  500
+
+/* Stop retrying the XDomain login after this many failures (0 = forever).
+ * See HAZARD note in odl_tb5_login_work_fn(). */
+int odl_login_max_retries = 20;
+module_param_named(login_max_retries, odl_login_max_retries, int, 0644);
+MODULE_PARM_DESC(login_max_retries,
+	"Give up XDomain login after N failures (0 = retry forever; default 20)");
 #define ODL_TB5_ENABLE_RETRIES 5
 #define ODL_TB5_ENABLE_DELAY   200
 
@@ -290,15 +297,32 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 {
 	int ret, i;
 
+	/* BUG1 fix (re-entry): this function is called again on every handshake
+	 * restart.  Without releasing the hop-ID we already hold, each retry
+	 * orphans the previous allocation (dev->in_hopid is simply overwritten)
+	 * until tb_xdomain_enable_paths() fails with -ENOMEM.  Release first. */
+	if (dev->in_hopid_valid) {
+		if (dev->tx.started)
+			tb_xdomain_disable_paths(dev->xd, dev->local_tx_hopid,
+						 dev->tx.ring ? dev->tx.ring->hop : -1,
+						 dev->in_hopid,
+						 dev->rx.ring ? dev->rx.ring->hop : -1);
+		tb_xdomain_release_in_hopid(dev->xd, dev->in_hopid);
+		dev->in_hopid_valid = false;
+	}
+
 	ret = tb_xdomain_alloc_in_hopid(dev->xd, dev->remote_tx_hopid);
 	if (ret < 0) {
 		pr_err("OdinLink: failed to allocate input HopID: %d\n", ret);
 		return ret;
 	}
+	dev->in_hopid = dev->remote_tx_hopid;
+	dev->in_hopid_valid = true;
 	ret = odl_tb5_rings_start(dev);
 	if (ret) {
 		pr_err("OdinLink: failed to start rings: %d\n", ret);
-		tb_xdomain_release_in_hopid(dev->xd, dev->remote_tx_hopid);
+		tb_xdomain_release_in_hopid(dev->xd, dev->in_hopid);
+		dev->in_hopid_valid = false;
 		return ret;
 	}
 
@@ -309,8 +333,8 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 		if (ret) {
 			pr_err("OdinLink: failed to prime RX: %d\n", ret);
 			odl_tb5_rings_stop(dev);
-			tb_xdomain_release_in_hopid(dev->xd,
-						    dev->remote_tx_hopid);
+			tb_xdomain_release_in_hopid(dev->xd, dev->in_hopid);
+			dev->in_hopid_valid = false;
 			return ret;
 		}
 		pr_info("OdinLink: RX primed with 16 frames before "
@@ -340,7 +364,8 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 		       "after %d attempts: %d\n",
 		       ODL_TB5_ENABLE_RETRIES, ret);
 		odl_tb5_rings_stop(dev);
-		tb_xdomain_release_in_hopid(dev->xd, dev->remote_tx_hopid);
+		tb_xdomain_release_in_hopid(dev->xd, dev->in_hopid);
+		dev->in_hopid_valid = false;
 		return ret;
 	}
 
@@ -464,8 +489,26 @@ static void odl_tb5_ctrl_reply_work_fn(struct work_struct *work)
 	int type = dev->verify_rx_type;
 
 	if (type == ODL_TB5_DMA_PING) {
+		int ret;
+
 		pr_info("OdinLink: DMA ping received, sending pong\n");
-		odl_tb5_send_dma_msg(dev, ODL_TB5_DMA_PONG);
+		ret = odl_tb5_send_dma_msg(dev, ODL_TB5_DMA_PONG);
+
+		/* BUG 10 fix: answering a PING is itself proof the DMA path
+		 * works in both directions -- we received a frame (RX good)
+		 * and submitted one (TX good).  Without this the handshake is
+		 * an unwinnable race: the peer that verifies first calls
+		 * odl_tb5_rings_reset() and sets rx_target/rx_posted to 0
+		 * (no RX frames are posted until a STREAM_OPEN ioctl), so our
+		 * PINGs land nowhere and our own PONG never arrives.  The
+		 * second node then always fails "DMA verify failed after 300
+		 * attempts" even though the link is perfectly healthy. */
+		if (!ret) {
+			dev->peer_ping_answered = true;
+			if (!dev->pong_received)
+				dev->pong_received = true;
+			wake_up_all(&dev->verify_waitq);
+		}
 	} else {
 		pr_warn("OdinLink: unexpected DMA ctrl message type %d\n",
 			type);
@@ -487,7 +530,7 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 	long ret;
 	int attempt;
 
-	dev->pong_received = false;
+	dev->pong_received = false;   /* peer_ping_answered deliberately kept */
 
 	/* Use frame pool for RX during verify — each pool slot is
 	 * independent and auto-reposts after consumption, so we never
@@ -513,6 +556,10 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 		if (dev->state != ODL_TB5_STATE_CONNECTED)
 			goto out_reset;
 
+		/* Answering the peer's PING already proved both directions. */
+		if (dev->peer_ping_answered)
+			break;
+
 		flush_work(&dev->ctrl_reply_work);
 
 		ret = odl_tb5_send_dma_msg(dev, ODL_TB5_DMA_PING);
@@ -528,7 +575,7 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 
 		ret = wait_event_interruptible_timeout(
 				dev->verify_waitq,
-				dev->pong_received,
+				dev->pong_received || dev->peer_ping_answered,
 				msecs_to_jiffies(100));
 		if (ret > 0)
 			break;
@@ -544,7 +591,7 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 		 * frames and creates dead windows where PONGs are lost. */
 	}
 
-	if (!dev->pong_received) {
+	if (!dev->pong_received && !dev->peer_ping_answered) {
 		pr_err("OdinLink: DMA verify failed after %d attempts\n",
 		       attempt);
 		goto out_reset;
@@ -604,8 +651,10 @@ static void odl_tb5_restart_work_fn(struct work_struct *work)
 					 dev->stale_remote_tx_hopid,
 					 dev->rx.ring->hop);
 		odl_tb5_rings_stop(dev);
-		tb_xdomain_release_in_hopid(dev->xd,
-					    dev->stale_remote_tx_hopid);
+		if (dev->in_hopid_valid) {
+			tb_xdomain_release_in_hopid(dev->xd, dev->in_hopid);
+			dev->in_hopid_valid = false;
+		}
 	}
 
 	mutex_lock(&dev->state_lock);
@@ -641,6 +690,21 @@ static void odl_tb5_login_work_fn(struct work_struct *work)
 			pr_info("OdinLink: login attempt %d failed (%d), "
 				"retrying in %lu ms\n",
 				dev->login_retries, ret, delay_ms);
+
+		/* HAZARD FIX: bound the retry storm.  Retrying forever hammers
+		 * tb_cfg_read() against a router that may already be wedged;
+		 * observed to take down the USB4 controller and (shared power/
+		 * firmware domain on Strix Halo) the GPU with it, ending in
+		 * amdgpu_irq_put/drm_buddy_fini NULL-deref and a hard freeze.
+		 * Give up and stay quiescent instead. */
+		if (odl_login_max_retries > 0 &&
+		    dev->login_retries >= odl_login_max_retries) {
+			pr_warn("OdinLink: giving up after %d login attempts "
+				"(last err %d); staying idle.  Check the peer "
+				"is up and only ONE service is bound.\n",
+				dev->login_retries, ret);
+			return;
+		}
 
 		schedule_delayed_work(&dev->login_work,
 				      msecs_to_jiffies(delay_ms));
@@ -688,6 +752,7 @@ int odl_tb5_proto_init(struct odl_tb5_device *dev)
 	dev->login_sent     = false;
 	dev->login_received = false;
 	dev->pong_received  = false;
+	dev->peer_ping_answered = false;
 
 	mutex_lock(&dev->state_lock);
 	dev->state = ODL_TB5_STATE_HANDSHAKE;
