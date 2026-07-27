@@ -142,7 +142,19 @@ struct odl_verbs_qp {
     struct odl_verbs_pd      *pd;
     struct odl_verbs_cq      *send_cq;
     struct odl_verbs_cq      *recv_cq;
-    uint8_t                   stream_id;
+    /*
+     * TWO streams per QP, one per direction. A stream is a unidirectional
+     * pipe: the RCCL plugin (the only consumer known to work) opens a
+     * separate stream for send and for recv and never shares one. Using a
+     * single stream for both directions deadlocks bidirectional traffic
+     * immediately -- reproduced with odl_rdma_stress --bidir, both peers
+     * stall on message 1.
+     *
+     * rx_stream_id is what we advertise as qp_num, so the peer's
+     * IBV_QP_DEST_QPN names the stream it should deliver to.
+     */
+    uint8_t                   stream_id;      /* == rx_stream_id, receive on */
+    uint8_t                   tx_stream_id;   /* send from */
     /* BUG15: remote stream to address sends at, taken from
      * ibv_modify_qp(IBV_QP_DEST_QPN) at the RTR transition. Without this the
      * worker sent everything to dst_id 0 and nothing reached the peer. */
@@ -168,9 +180,14 @@ struct odl_verbs_qp {
     int                       sq_tail;
     int                       sq_count;
 
-    /* Worker thread */
+    /* Worker threads: TX and RX are independent, like a real HCA. A single
+     * thread serving both directions deadlocks bidirectional traffic - it
+     * blocks in the TX readiness poll and stops draining RX, so neither peer
+     * can drain the other and both stall. */
     pthread_t                 worker;
+    pthread_t                 rx_worker;
     bool                      worker_running;
+    bool                      rx_worker_running;
 
     /* Receive queue: buffers posted by the app, awaiting inbound data.
      * ibv_post_recv() must NOT block or touch the wire -- it only enqueues.

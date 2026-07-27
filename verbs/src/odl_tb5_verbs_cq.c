@@ -106,14 +106,13 @@ int odl_poll_cq(struct ibv_cq *cq, int num_entries, struct ibv_wc *wc)
     int polled = 0;
 
     /*
-     * Drive receive progress from the polling thread BEFORE taking the CQ
-     * lock (odl_rq_drain -> odl_cq_post takes it). Relying on the QP worker
-     * alone deadlocks under sustained load: the worker blocks in its TX
-     * readiness poll, RX is never drained, and both peers spin forever.
+     * Deliberately does NOT drain the receive queue. Draining from here
+     * deadlocks: two threads polling different CQs both enter odl_rq_drain,
+     * which posts completions into the *other* CQ, so they acquire the two
+     * locks in opposite orders (ABBA). Reproduced with odl_rdma_stress
+     * --bidir. Receive progress is owned by the QP's dedicated RX thread, so
+     * it is independent of who is polling what.
      */
-    if (ocq->rx_qp)
-        odl_rq_drain(ocq->rx_qp);
-
     pthread_mutex_lock(&ocq->lock);
 
     while (polled < num_entries && ocq->head != ocq->tail) {

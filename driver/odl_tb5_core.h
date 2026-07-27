@@ -79,8 +79,34 @@ struct odl_tb5_stream_hdr {
 
 /* ── DMA frame pool (replaces old double-buffer scheme) ─────────────── */
 
-#define ODL_TB5_FRAME_POOL_SIZE		1024
-#define ODL_TB5_TX_POOL_RESERVE		64  /* keep free for RX repost */
+/*
+ * The frame pool is SHARED between TX and RX repost, so it must comfortably
+ * back the peer's pre-posted receive ring or bidirectional traffic starves RX
+ * and the NHI drops inbound frames in bursts.
+ *
+ * Sizing, for the ggml-rpc transport (the most demanding consumer here):
+ *   256 KiB message / 4024 B payload  = 66 frames per message
+ *   24 pre-posted receives            = 1587 frames of RX ring
+ * The old 1024-frame pool was smaller than the RX ring alone, and the 64-frame
+ * "reserve for RX" was less than a SINGLE message - so a busy sender routinely
+ * left nothing for repost. Observed as 32-fragment burst losses under
+ * bidirectional load.
+ *
+ * 4096 frames = 16 MiB per device; the reserve now guarantees the full RX ring
+ * can always be reposted no matter how hard TX is pushing. Pure memory: no
+ * extra work per frame, so the latency path is unaffected (and it removes
+ * stalls waiting for free frames).
+ */
+#define ODL_TB5_FRAME_POOL_SIZE		4096
+/*
+ * The reserve is a floor TX may not dig below, NOT the size of the RX ring.
+ * rx_target already claims pool/2 (2048) for posted receives, so setting the
+ * reserve to 2048 as well left free_count == reserve exactly and
+ * odl_tb5_stream_can_send() (free > reserve) was false forever - TX deadlocked
+ * with a healthy link. Keep it a small guard so RX repost can always obtain a
+ * few frames, while leaving TX ~1700 frames (~26 x 256 KiB messages) of room.
+ */
+#define ODL_TB5_TX_POOL_RESERVE		256  /* floor kept free for RX repost */
 #define ODL_TB5_POLL_INTERVAL_NS	(10 * 1000)  /* 10 us */
 
 /* ── SG batch buffer pool (throughput mode) ──────────────────────────── */

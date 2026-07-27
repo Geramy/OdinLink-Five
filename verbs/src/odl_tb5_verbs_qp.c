@@ -62,6 +62,22 @@ static int odl_lookup_dmabuf(struct odl_verbs_context *ctx, uint32_t lkey)
     return -1;
 }
 
+static void *odl_qp_rx_worker(void *arg)
+{
+    struct odl_verbs_qp *qp = arg;
+
+    /* Receive progress, independent of TX. Short sleep when idle so an empty
+     * link does not burn a core; the driver's own busy-poll (odl_busy_poll_us)
+     * covers the low-latency case. */
+    while (qp->rx_worker_running) {
+        if (odl_rq_drain(qp) == 0) {
+            struct timespec ts = { .tv_sec = 0, .tv_nsec = 20000 }; /* 20 us */
+            nanosleep(&ts, NULL);
+        }
+    }
+    return NULL;
+}
+
 static void *odl_qp_worker(void *arg)
 {
     struct odl_verbs_qp *qp = arg;
@@ -69,10 +85,6 @@ static void *odl_qp_worker(void *arg)
     odl_tb5_t h = ctx->handle;
 
     while (qp->worker_running) {
-        /* Make receive progress on EVERY iteration, not only when idle:
-         * a QP with continuous send traffic would otherwise never drain RX. */
-        odl_rq_drain(qp);
-
         bool     have_wr = false;
         void    *w_bounce = NULL;
         uint64_t w_wr_id = 0, w_addr = 0;
@@ -131,12 +143,12 @@ static void *odl_qp_worker(void *arg)
 
             if (dmabuf_fd >= 0) {
                 ret = odl_tb5_stream_send_dmabuf(
-                    h, qp->stream_id, qp->dest_qp,
+                    h, qp->tx_stream_id, qp->dest_qp,
                     dmabuf_fd, 0, w_len);
             } else {
                 void *data = (void *)(uintptr_t)w_addr;
                 ret = odl_tb5_stream_send(
-                    h, qp->stream_id, qp->dest_qp,
+                    h, qp->tx_stream_id, qp->dest_qp,
                     data, w_len);
             }
 
@@ -207,7 +219,7 @@ struct ibv_qp *odl_create_qp(struct ibv_pd *pd,
     if (!qp) { errno = ENOMEM; return NULL; }
 
     /* Open an OdinLink-Five stream */
-    uint8_t stream_id = 0;
+    uint8_t stream_id = 0, tx_stream_id = 0;
     int ret = odl_tb5_stream_open(ctx->handle, 0, &stream_id);
     if (ret != 0) {
         odl_logerr("stream_open failed: %d", ret);
@@ -220,6 +232,17 @@ struct ibv_qp *odl_create_qp(struct ibv_pd *pd,
     qp->base.pd          = pd;
     qp->base.send_cq     = attr->send_cq;
     qp->base.recv_cq     = attr->recv_cq;
+    ret = odl_tb5_stream_open(ctx->handle, 0, &tx_stream_id);
+    if (ret < 0) {
+        odl_logerr("tx stream_open failed: %d", ret);
+        odl_tb5_stream_close(ctx->handle, stream_id);
+        free(qp);
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    /* Advertise the RX stream: the peer's dest_qp_num must name where WE
+     * receive, not where we send from. */
     qp->base.qp_num      = stream_id;
     qp->base.qp_type     = attr->qp_type;
     qp->base.state       = IBV_QPS_RESET;
@@ -227,9 +250,19 @@ struct ibv_qp *odl_create_qp(struct ibv_pd *pd,
     qp->pd               = odl_pd_from_ibv(pd);
     qp->send_cq          = attr->send_cq ? odl_cq_from_ibv(attr->send_cq) : NULL;
     qp->recv_cq          = attr->recv_cq ? odl_cq_from_ibv(attr->recv_cq) : NULL;
+    /*
+     * Polling EITHER CQ must drive receive progress. Wiring only the recv CQ
+     * deadlocks bidirectional traffic: both peers sit in ibv_poll_cq() on
+     * their SEND CQ waiting for completions, so neither drains RX, the rings
+     * fill, and TX never becomes ready again. Reproduced with
+     * odl_rdma_stress --bidir: both sides stall on message 1.
+     */
     if (qp->recv_cq)
-        qp->recv_cq->rx_qp = qp;   /* let poll_cq drive RX progress */
-    qp->stream_id        = stream_id;
+        qp->recv_cq->rx_qp = qp;
+    if (qp->send_cq)
+        qp->send_cq->rx_qp = qp;
+    qp->stream_id        = stream_id;      /* receive on */
+    qp->tx_stream_id     = tx_stream_id;   /* send from */
 
     /* Initialize SQ */
     pthread_mutex_init(&qp->sq_lock, NULL);
@@ -256,12 +289,13 @@ struct ibv_qp *odl_create_qp(struct ibv_pd *pd,
     ctx->qps[ctx->nqps++] = qp;
     pthread_mutex_unlock(&ctx->qp_lock);
 
-    /* Start async worker thread */
+    /* Start async worker threads: TX and RX independently. */
     qp->worker_running = true;
     ret = pthread_create(&qp->worker, NULL, odl_qp_worker, qp);
     if (ret != 0) {
         odl_logerr("pthread_create failed: %d", ret);
         qp->worker_running = false;
+        odl_tb5_stream_close(ctx->handle, tx_stream_id);
         odl_tb5_stream_close(ctx->handle, stream_id);
         pthread_mutex_destroy(&qp->sq_lock);
         free(qp);
@@ -269,7 +303,23 @@ struct ibv_qp *odl_create_qp(struct ibv_pd *pd,
         return NULL;
     }
 
-    odl_loginfo("create_qp: stream=%u qp_num=%u", stream_id, qp->base.qp_num);
+    qp->rx_worker_running = true;
+    ret = pthread_create(&qp->rx_worker, NULL, odl_qp_rx_worker, qp);
+    if (ret != 0) {
+        odl_logerr("rx pthread_create failed: %d", ret);
+        qp->rx_worker_running = false;
+        qp->worker_running = false;
+        pthread_join(qp->worker, NULL);
+        odl_tb5_stream_close(ctx->handle, tx_stream_id);
+        odl_tb5_stream_close(ctx->handle, stream_id);
+        pthread_mutex_destroy(&qp->sq_lock);
+        free(qp);
+        errno = EAGAIN;
+        return NULL;
+    }
+
+    odl_loginfo("create_qp: rx_stream=%u tx_stream=%u qp_num=%u",
+                stream_id, tx_stream_id, qp->base.qp_num);
     ODL_TRACE_EXIT();
     return &qp->base;
 }
@@ -284,13 +334,29 @@ int odl_destroy_qp(struct ibv_qp *qp)
     struct odl_verbs_qp *oqp = odl_qp_from_ibv(qp);
     struct odl_verbs_context *ctx = oqp->ctx;
 
-    /* Stop worker thread */
+    /* Stop BOTH worker threads before touching anything they reference.
+     * The RX thread must be joined too, or it keeps draining into a freed
+     * QP after destroy. */
     oqp->worker_running = false;
+    oqp->rx_worker_running = false;
     pthread_join(oqp->worker, NULL);
+    pthread_join(oqp->rx_worker, NULL);
 
-    /* Close the OdinLink-Five stream */
+    /* Close both streams (one per direction) */
+    if (oqp->tx_stream_id > 0)
+        odl_tb5_stream_close(oqp->ctx->handle, oqp->tx_stream_id);
     if (oqp->stream_id > 0)
         odl_tb5_stream_close(ctx->handle, oqp->stream_id);
+
+    /* Release bounce buffers for work requests never transmitted. */
+    pthread_mutex_lock(&oqp->sq_lock);
+    while (oqp->sq_count > 0) {
+        free(oqp->sq_bounce[oqp->sq_head]);
+        oqp->sq_bounce[oqp->sq_head] = NULL;
+        oqp->sq_head = (oqp->sq_head + 1) % ODL_VERBS_SQ_DEPTH;
+        oqp->sq_count--;
+    }
+    pthread_mutex_unlock(&oqp->sq_lock);
 
     /* Remove from context */
     pthread_mutex_lock(&ctx->qp_lock);
