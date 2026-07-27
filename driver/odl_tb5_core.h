@@ -223,8 +223,18 @@ struct odl_tb5_stream {
 	bool			rx_asm_bad;
 	atomic_t		rx_frag_drops;
 
+	/* Set once, before waking every waiter, when the stream is being torn
+	 * down. Waiters must test this or they sleep on a stream that no longer
+	 * exists — closing a stream is how consumers cancel a blocking receive
+	 * (the RCCL plugin closes then joins its worker). */
+	bool			dying;
+
 	struct kref		refcount;
 	struct hlist_node	node;
+
+	/* The stream is looked up under RCU, so the object must outlive any
+	 * reader still walking the hash chain. Freed via kfree_rcu(). */
+	struct rcu_head		rcu;
 };
 
 /* ── Per-fd context (crash-safe auto-cleanup) ────────────────────────── */

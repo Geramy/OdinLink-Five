@@ -1343,7 +1343,20 @@ static void odl_tb5_stream_free(struct kref *ref)
 	}
 
 	kfree(stream->rx_asm_buf);
-	kfree(stream);
+
+	/*
+	 * NOT kfree(). odl_tb5_stream_lookup() walks the stream hash inside
+	 * rcu_read_lock() and dereferences the object (stream->id, and the
+	 * refcount itself) *before* kref_get_unless_zero() can tell it the
+	 * stream is dead. kref_get_unless_zero() stops a dead refcount being
+	 * resurrected; it does nothing to stop the memory being freed under a
+	 * reader that is mid-walk. Removing with hash_del_rcu() and then
+	 * freeing immediately is a use-after-free.
+	 *
+	 * kfree_rcu() holds the allocation until every reader that could still
+	 * be walking the chain has left, which is what hash_del_rcu() promised.
+	 */
+	kfree_rcu(stream, rcu);
 }
 
 struct odl_tb5_stream *odl_tb5_stream_create(struct odl_tb5_device *dev,
@@ -1432,6 +1445,14 @@ void odl_tb5_stream_destroy(struct odl_tb5_stream *stream)
 
 	pr_info("odl_tb5: stream %u destroying\n", stream->id);
 
+	/*
+	 * Order matters. Publish the shutdown state first, then unpublish the
+	 * stream so no new waiter can find it, then release everyone already
+	 * waiting. A waiter that evaluates its condition after this store
+	 * returns immediately instead of sleeping on a dead stream.
+	 */
+	WRITE_ONCE(stream->dying, true);
+
 	mutex_lock(&dev->stream_lock);
 
 	hash_del_rcu(&stream->node);
@@ -1442,6 +1463,16 @@ void odl_tb5_stream_destroy(struct odl_tb5_stream *stream)
 		list_del(&stream->owner_list);
 		spin_unlock(&stream->owner->lock);
 	}
+
+	/*
+	 * Without this, a thread parked in a blocking receive is never released:
+	 * the only other wake site is data arrival, and no data is coming. The
+	 * caller then blocks forever joining it. Closing the fd does not help
+	 * either — release() cannot run while a thread is inside an ioctl on
+	 * that fd, so the stream is not even destroyed until the process exits.
+	 */
+	wake_up_interruptible_all(&stream->rx_waitq);
+	wake_up_interruptible_all(&stream->tx_waitq);
 
 	ida_free(&dev->stream_ida, stream->id);
 	kref_put(&stream->refcount, odl_tb5_stream_free);
@@ -1461,6 +1492,8 @@ void odl_tb5_streams_destroy_all(struct odl_tb5_device *dev)
 	mutex_lock(&dev->stream_lock);
 	hash_for_each_safe(dev->streams, bkt, tmp, stream, node) {
 
+		WRITE_ONCE(stream->dying, true);
+
 		hash_del_rcu(&stream->node);
 
 		if (stream->owner) {
@@ -1468,6 +1501,12 @@ void odl_tb5_streams_destroy_all(struct odl_tb5_device *dev)
 			list_del(&stream->owner_list);
 			spin_unlock(&stream->owner->lock);
 		}
+
+		/* Same reasoning as odl_tb5_stream_destroy(): device teardown
+		 * must not leave a caller blocked on a stream it just removed. */
+		wake_up_interruptible_all(&stream->rx_waitq);
+		wake_up_interruptible_all(&stream->tx_waitq);
+
 		ida_free(&dev->stream_ida, stream->id);
 		kref_put(&stream->refcount, odl_tb5_stream_free);
 	}
@@ -2015,12 +2054,18 @@ int odl_tb5_stream_recv(struct odl_tb5_stream *stream,
 	unsigned long flags;
 	int ret = 0;
 
-	/* Wait for a complete assembled message */
+	/* Wait for a complete assembled message, or for teardown. Testing
+	 * ->dying is what makes closing a stream able to cancel a blocked
+	 * receive; report it distinctly so the caller can tell "shutting down"
+	 * apart from "spurious wake, queue empty" (-EAGAIN below). */
 	odl_tb5_rx_busy_poll(stream);
 	ret = wait_event_interruptible(stream->rx_waitq,
-		atomic_read(&stream->rx_complete) > 0);
+		atomic_read(&stream->rx_complete) > 0 ||
+		READ_ONCE(stream->dying));
 	if (ret)
 		return -EINTR;
+	if (READ_ONCE(stream->dying) && atomic_read(&stream->rx_complete) <= 0)
+		return -ESHUTDOWN;
 
 	/* Dequeue one complete message */
 	spin_lock_irqsave(&stream->rx_lock, flags);
@@ -2055,16 +2100,25 @@ int odl_tb5_stream_wait_rx(struct odl_tb5_stream *stream, u32 timeout_ms)
 
 	if (timeout_ms == 0) {
 		ret = wait_event_interruptible(stream->rx_waitq,
-			atomic_read(&stream->rx_complete) > 0);
+			atomic_read(&stream->rx_complete) > 0 ||
+			READ_ONCE(stream->dying));
 	} else {
 		ret = wait_event_interruptible_timeout(stream->rx_waitq,
-			atomic_read(&stream->rx_complete) > 0,
+			atomic_read(&stream->rx_complete) > 0 ||
+			READ_ONCE(stream->dying),
 			msecs_to_jiffies(timeout_ms));
 		if (ret == 0)
 			return -ETIMEDOUT;
 	}
 
-	return ret < 0 ? -EINTR : 0;
+	if (ret < 0)
+		return -EINTR;
+
+	/* Woken by teardown rather than by data. */
+	if (READ_ONCE(stream->dying) && atomic_read(&stream->rx_complete) <= 0)
+		return -ESHUTDOWN;
+
+	return 0;
 }
 
 /* ══════════════════════════════════════════════════════════════════════

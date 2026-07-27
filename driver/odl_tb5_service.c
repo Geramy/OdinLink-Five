@@ -442,6 +442,15 @@ static void __exit odl_tb5_exit(void)
 		tb_property_free_dir(odl_tb5_apple_property_dir);
 	}
 out:
+	/*
+	 * Streams are freed with kfree_rcu(), so a grace period may still be
+	 * outstanding here. kfree_rcu() is serviced by the core kernel rather
+	 * than by module text, so unloading cannot jump into freed code — but
+	 * waiting is cheap at unload and leaves nothing in flight against a
+	 * module that is going away.
+	 */
+	rcu_barrier();
+
 	odl_tb5_chardev_exit();
 	ida_destroy(&odl_tb5_ida);
 	pr_info("odl_tb5: OdinLink TB5 driver unloaded\n");
