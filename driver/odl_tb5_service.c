@@ -259,6 +259,24 @@ static void odl_tb5_remove(struct tb_service *svc)
 
 	odl_tb5_chardev_destroy(dev);
 
+	/*
+	 * Give the slot back. odl_tb5_probe() takes one from odl_bound_count
+	 * and the probe error path returns it, but this — the normal removal
+	 * path — did not. With max_devices=1 that leaks the only slot the
+	 * moment the peer goes away, so every later probe is rejected with
+	 * "max_devices reached, skipping service" and the link can never come
+	 * back on its own.
+	 *
+	 * Observed exactly that: peer restarted, this node logged "removed
+	 * device index 0", then refused the replacement service two seconds
+	 * later and sat printing "incoming packet route 2 — no matching
+	 * device" indefinitely. The only escape was reloading the module,
+	 * which on this hardware is the risky operation this leak forces you
+	 * into.
+	 */
+	if (odl_max_devices > 0)
+		atomic_dec(&odl_bound_count);
+
 	pr_info("odl_tb5: removed device index %d\n", dev->index);
 
 	ida_free(&odl_tb5_ida, dev->index);
