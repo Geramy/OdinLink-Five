@@ -11,6 +11,9 @@ OdinLink turns a Thunderbolt cable into a high-speed RDMA interconnect between m
 
 ## About this fork
 
+> **Engineering by [paicon](https://paix-navigator.paicon.com)**
+> This work is part of the [paix-navigator.paicon.com](https://paix-navigator.paicon.com) effort.
+
 This is an additive fork of [Geramy/OdinLink-Five](https://github.com/Geramy/OdinLink-Five), crediting upstream rather than claiming superiority or a rewrite.
 It keeps the upstream design and adds focused driver and RDMA verbs fixes found while bringing up real cross-node workloads.
 The `strix-halo-verbs-fixes` branch is based on upstream `ed60505` ([full diff](https://github.com/Geramy/OdinLink-Five/compare/ed60505...wkljohn:strix-halo-verbs-fixes)) and was measured on two AMD Ryzen AI MAX+ 395 systems (Strix Halo, `gfx1151`) running Ubuntu 26.04 and kernel 7.0.0-28.
@@ -56,8 +59,6 @@ These two-node measurements used a USB4v1 cable; the driver reported 10 Gb/s × 
 The median is reproducible, but p95/p99 are not; the bulk results are byte-verified. A single node at 9.50 t/s remains faster than two nodes, which are for capacity rather than speed.
 
 **Not measured: tensor parallelism.** Its benchmark deadlocks in the application's world-communicator setup, not in the transport, although RCCL loads the OdinLink plugin. All inference figures above are pipeline parallelism; tensor parallelism over this transport was never benchmarked.
-
-<sub>This work is part of the [paix-navigator.paicon.com](https://paix-navigator.paicon.com) effort by paicon.</sub>
 
 ---
 
