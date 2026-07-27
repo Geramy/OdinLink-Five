@@ -107,7 +107,15 @@ struct odl_tb5_stream_hdr {
  * few frames, while leaving TX ~1700 frames (~26 x 256 KiB messages) of room.
  */
 #define ODL_TB5_TX_POOL_RESERVE		256  /* floor kept free for RX repost */
-#define ODL_TB5_POLL_INTERVAL_NS	(10 * 1000)  /* 10 us */
+/*
+ * Fallback poll interval for ring completions. NHI MSI-X fires, but the
+ * ring_work it schedules can run before the descriptor write-back lands, so
+ * this timer bounds how long a completion can sit unprocessed. It is the
+ * dominant term in end-to-end latency: the median-minus-min spread of the
+ * 22.4 us RTT is essentially this wait. 3 us keeps the tail close to the
+ * 13.6 us best case at a modest timer cost.
+ */
+#define ODL_TB5_POLL_INTERVAL_NS	(3 * 1000)   /* 3 us */
 
 /* ── SG batch buffer pool (throughput mode) ──────────────────────────── */
 

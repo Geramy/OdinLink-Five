@@ -31,12 +31,13 @@ static void odl_tb5_stream_free(struct kref *ref);
 
 /*
  * High-resolution fallback poll timer — kicks both TX and RX ring_work
- * every 50 us.
+ * every ODL_TB5_POLL_INTERVAL_NS (the comment previously said 50 us; the
+ * constant has always been much smaller).
  *
  * NHI MSI-X interrupts DO fire, but ring_work triggered by the ISR
  * sometimes doesn't see completions yet (descriptor write-back delay).
- * This timer ensures completions are processed within ~50 us instead of
- * waiting for the next jiffy tick.
+ * This timer ensures completions are processed within one poll interval
+ * instead of waiting for the next jiffy tick.
  *
  * schedule_work is idempotent, so ISR-driven and timer-driven kicks
  * are safely additive.

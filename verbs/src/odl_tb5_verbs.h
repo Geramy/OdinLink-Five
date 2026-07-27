@@ -65,6 +65,16 @@
 #define ODL_VERBS_MAX_QPS               256
 #define ODL_VERBS_MAX_CQS               128
 #define ODL_VERBS_RQ_DEPTH              256
+/* Yield-spin iterations before the RX worker sleeps. ~2000 sched_yield()s is
+ * a few hundred microseconds of grace after the last completion, which covers
+ * the inter-message gaps of a busy transfer without burning a core on an idle
+ * link. */
+#define ODL_VERBS_RX_SPIN_ITERS         2000
+/* Max payload sent inline from the caller's thread. One frame's worth: big
+ * enough for RPC control traffic and RCCL's small collectives (the latency
+ * cases), small enough that the copy_from_user cost stays under a microsecond
+ * and bulk transfers still go through the worker's pipelined path. */
+#define ODL_VERBS_INLINE_MAX            4096
 #define ODL_VERBS_COMP_CHANNEL_BACKLOG   64
 #define ODL_VERBS_SQ_DEPTH              64
 
@@ -176,6 +186,12 @@ struct odl_verbs_qp {
      * usually overwritten it -- silent corruption. Take a private copy at post
      * time and transmit from that. */
     void                     *sq_bounce[ODL_VERBS_SQ_DEPTH];
+    /* True from the moment the worker DEQUEUES a request until it has been
+     * handed to the device. sq_count alone is not proof of an empty pipeline:
+     * the worker decrements it at dequeue and then may wait on POLLOUT before
+     * submitting, so an inline send could otherwise overtake it and violate
+     * per-QP ordering. Guarded by sq_lock. */
+    bool                      tx_inflight;
     int                       sq_head;
     int                       sq_tail;
     int                       sq_count;

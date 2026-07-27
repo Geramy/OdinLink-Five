@@ -18,6 +18,9 @@
  * though the kernel path is synchronous under the hood.
  */
 
+#include <sys/prctl.h>
+#include <sched.h>
+
 #include "odl_tb5_verbs.h"
 #include <stdlib.h>
 #include <string.h>
@@ -65,13 +68,40 @@ static int odl_lookup_dmabuf(struct odl_verbs_context *ctx, uint32_t lkey)
 static void *odl_qp_rx_worker(void *arg)
 {
     struct odl_verbs_qp *qp = arg;
+    int idle = 0;
 
-    /* Receive progress, independent of TX. Short sleep when idle so an empty
-     * link does not burn a core; the driver's own busy-poll (odl_busy_poll_us)
-     * covers the low-latency case. */
+    /*
+     * Receive progress, independent of TX.
+     *
+     * The naive version slept 20 us whenever idle. That is a latency trap:
+     * the default timer slack is 50 us, so a 20 us nanosleep routinely sleeps
+     * ~70 us and every first message after an idle gap paid it. Two fixes:
+     *
+     *   - request 1 ns timer slack for this thread, so a short sleep is
+     *     actually short;
+     *   - spin briefly after the last completion before sleeping at all.
+     *     Traffic arrives in bursts, so the spin nearly always wins and the
+     *     sleep is reached only on a genuinely idle link.
+     *
+     * Adaptive on purpose: an unconditional spin would burn a core per QP,
+     * which is real on a 16-core part also running inference.
+     */
+#ifdef PR_SET_TIMERSLACK
+    prctl(PR_SET_TIMERSLACK, 1UL, 0, 0, 0);
+#endif
+
     while (qp->rx_worker_running) {
-        if (odl_rq_drain(qp) == 0) {
-            struct timespec ts = { .tv_sec = 0, .tv_nsec = 20000 }; /* 20 us */
+        if (odl_rq_drain(qp) > 0) {
+            idle = 0;
+            continue;
+        }
+        if (idle < ODL_VERBS_RX_SPIN_ITERS) {
+            idle++;
+            sched_yield();          /* hot: stay on-CPU, no timer involved */
+            continue;
+        }
+        {                            /* cold: link genuinely idle */
+            struct timespec ts = { .tv_sec = 0, .tv_nsec = 20000 };
             nanosleep(&ts, NULL);
         }
     }
@@ -102,6 +132,7 @@ static void *odl_qp_worker(void *arg)
             w_bounce  = qp->sq_bounce[qp->sq_head];
             qp->sq_head = (qp->sq_head + 1) % ODL_VERBS_SQ_DEPTH;
             qp->sq_count--;
+            qp->tx_inflight = true;   /* dequeued but not yet on the wire */
             have_wr = true;
         }
         pthread_mutex_unlock(&qp->sq_lock);
@@ -166,6 +197,9 @@ static void *odl_qp_worker(void *arg)
                     qp->sq_tail = (qp->sq_tail + 1) % ODL_VERBS_SQ_DEPTH;
                     qp->sq_count++;
                 }
+                /* Back on the queue (or dropped): no longer mid-flight, so
+                 * an inline send may proceed once the queue drains. */
+                qp->tx_inflight = false;
                 pthread_mutex_unlock(&qp->sq_lock);
                 continue;
             }
@@ -188,6 +222,10 @@ static void *odl_qp_worker(void *arg)
         }
 
         free(w_bounce);
+
+        pthread_mutex_lock(&qp->sq_lock);
+        qp->tx_inflight = false;      /* on the wire; ordering barrier lifted */
+        pthread_mutex_unlock(&qp->sq_lock);
 
         /* Post completion to send CQ */
         if (qp->send_cq)
@@ -414,6 +452,44 @@ int odl_post_send(struct ibv_qp *qp, struct ibv_send_wr *wr,
     *bad_wr = NULL;
 
     pthread_mutex_lock(&oqp->sq_lock);
+
+    /*
+     * Inline fast path. For a small single-SGE request with nothing already
+     * queued, transmit straight from the caller's thread instead of handing
+     * off to the TX worker. That removes a thread handoff, a malloc+memcpy
+     * bounce and two poll() syscalls from the critical path.
+     *
+     * Buffer-reuse semantics (IBV_SEND_INLINE) come free: the kernel's
+     * copy_from_user inside the ioctl IS the copy, so the caller may reuse
+     * its buffer the moment we return - which is exactly what ibv_post_send
+     * promises. Only taken when the SQ is empty, so ordering cannot be
+     * violated; on -EAGAIN we fall through to the queued path.
+     */
+    if (wr && !wr->next && wr->num_sge == 1 &&
+        oqp->sq_count == 0 && !oqp->tx_inflight &&
+        wr->sg_list[0].length <= ODL_VERBS_INLINE_MAX &&
+        odl_lookup_dmabuf_pub(oqp->ctx, wr->sg_list[0].lkey) < 0) {
+
+        int ret = odl_tb5_stream_send(oqp->ctx->handle, oqp->tx_stream_id,
+                                      oqp->dest_qp,
+                                      (const void *)(uintptr_t)wr->sg_list[0].addr,
+                                      wr->sg_list[0].length);
+        if (ret == 0) {
+            struct ibv_wc wc;
+            pthread_mutex_unlock(&oqp->sq_lock);
+
+            memset(&wc, 0, sizeof(wc));
+            wc.wr_id    = wr->wr_id;
+            wc.status   = IBV_WC_SUCCESS;
+            wc.opcode   = IBV_WC_SEND;
+            wc.byte_len = wr->sg_list[0].length;
+            wc.qp_num   = oqp->base.qp_num;
+            if (oqp->send_cq)
+                odl_cq_post(oqp->send_cq, &wc);
+            return 0;
+        }
+        /* -EAGAIN or error: fall through and queue it for the worker. */
+    }
 
     while (wr) {
         if (oqp->sq_count >= ODL_VERBS_SQ_DEPTH) {
