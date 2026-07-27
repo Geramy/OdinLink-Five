@@ -40,6 +40,7 @@
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 #include <infiniband/verbs.h>
+#include <pthread.h>
 
 #define BOOTSTRAP_PORT 18515
 #define GID_SIZE       16
@@ -51,6 +52,8 @@ static uint64_t opt_total    = 2ULL << 30;   /* bytes to push */
 static int      opt_stall_s  = 15;           /* no-progress timeout */
 static const char *opt_dev   = NULL;
 static int      opt_gid_idx  = -1;
+static bool     opt_bidir    = false;  /* both peers send AND receive */
+static bool     opt_mixed    = false;  /* interleave small control msgs */
 
 struct conn_info {
     uint32_t qpn;
@@ -252,6 +255,116 @@ static int poll_one(struct ibv_cq *cq, struct ibv_wc *wc, double deadline)
     }
 }
 
+
+/* ── receive path (own thread in --bidir, inline otherwise) ──────────── */
+
+struct rx_args {
+    struct rdma_ctx *r;
+    uint64_t         nmsg;
+    int              rc;        /* 0 ok, 2 corruption, 3 stall */
+};
+
+static void *rx_loop(void *arg)
+{
+    struct rx_args *ra = arg;
+    struct rdma_ctx *r = ra->r;
+
+    for (uint64_t seq = 0; seq < ra->nmsg; seq++) {
+        struct ibv_wc wc;
+        int p = poll_one(r->rcq, &wc, now_s() + opt_stall_s);
+        if (p == -1) {
+            fprintf(stderr,
+                    "STALL: no recv for %ds after %llu msgs (%.1f MiB)\n",
+                    opt_stall_s, (unsigned long long)seq,
+                    seq * opt_chunk / 1048576.0);
+            ra->rc = 3; return NULL;
+        }
+        if (p == -2) {
+            fprintf(stderr, "FAIL recv wc status at msg %llu\n",
+                    (unsigned long long)seq);
+            ra->rc = 2; return NULL;
+        }
+        if (wc.byte_len != opt_chunk)
+            fprintf(stderr, "SHORT msg %llu: got %u bytes, expected %zu\n",
+                    (unsigned long long)seq, wc.byte_len, opt_chunk);
+
+        int slot = (int)wc.wr_id;
+        long bad = verify_chunk(r->rx_buf + (size_t)slot * opt_chunk,
+                                wc.byte_len < opt_chunk ? wc.byte_len : opt_chunk,
+                                seq);
+        if (bad >= 0) {
+            fprintf(stderr,
+                    "CORRUPTION at msg %llu, first bad word %ld (byte %ld of %u)"
+                    " -- %.1f MiB in\n",
+                    (unsigned long long)seq, bad, bad * 8, wc.byte_len,
+                    seq * opt_chunk / 1048576.0);
+            ra->rc = 2; return NULL;
+        }
+        if (!post_rx(r, slot)) {
+            fprintf(stderr, "FAIL repost at msg %llu\n",
+                    (unsigned long long)seq);
+            ra->rc = 3; return NULL;
+        }
+        if ((seq & 0xfff) == 0xfff)
+            printf("  recv+verified %llu/%llu (%.1f MiB)\n",
+                   (unsigned long long)seq + 1, (unsigned long long)ra->nmsg,
+                   (seq + 1) * opt_chunk / 1048576.0);
+    }
+    ra->rc = 0;
+    return NULL;
+}
+
+static int tx_loop(struct rdma_ctx *r, uint64_t nmsg)
+{
+    int inflight = 0;
+    for (uint64_t seq = 0; seq < nmsg; seq++) {
+        fill_chunk(r->tx_buf, opt_chunk, seq);
+
+        struct ibv_sge sge = {0};
+        sge.addr   = (uintptr_t)r->tx_buf;
+        sge.length = opt_chunk;
+        sge.lkey   = r->tx_mr->lkey;
+
+        struct ibv_send_wr wr = {0}, *bad = NULL;
+        wr.wr_id      = seq;
+        wr.opcode     = IBV_WR_SEND;
+        wr.sg_list    = &sge;
+        wr.num_sge    = 1;
+        wr.send_flags = IBV_SEND_SIGNALED;
+
+        if (ibv_post_send(r->qp, &wr, &bad) != 0) {
+            fprintf(stderr, "FAIL post_send at msg %llu: %s\n",
+                    (unsigned long long)seq, strerror(errno));
+            return 3;
+        }
+        inflight++;
+        while (inflight >= opt_tx_depth) {
+            struct ibv_wc wc;
+            int p = poll_one(r->scq, &wc, now_s() + opt_stall_s);
+            if (p == -1) {
+                fprintf(stderr,
+                        "STALL: no send completion for %ds at msg %llu "
+                        "(%.1f MiB sent)\n", opt_stall_s,
+                        (unsigned long long)seq,
+                        seq * opt_chunk / 1048576.0);
+                return 3;
+            }
+            if (p == -2) return 2;
+            inflight--;
+        }
+        if ((seq & 0xfff) == 0xfff)
+            printf("  sent %llu/%llu (%.1f MiB)\n",
+                   (unsigned long long)seq + 1, (unsigned long long)nmsg,
+                   (seq + 1) * opt_chunk / 1048576.0);
+    }
+    while (inflight > 0) {
+        struct ibv_wc wc;
+        if (poll_one(r->scq, &wc, now_s() + opt_stall_s) < 0) return 3;
+        inflight--;
+    }
+    return 0;
+}
+
 /* ── bootstrap ───────────────────────────────────────────────────────── */
 
 static int bootstrap(bool server, const char *peer_ip, struct conn_info *local,
@@ -308,7 +421,14 @@ static void usage(void)
            "  --total <bytes>   total to push, K/M/G  (default 2G)\n"
            "  --dev <name>      device name\n"
            "  --gid <idx>       force GID index\n"
-           "  --stall <sec>     no-progress timeout   (default 15)\n");
+           "  --stall <sec>     no-progress timeout   (default 15)\n"
+           "  --bidir           BOTH peers send and receive concurrently.\n"
+           "                    This is what ggml-rpc actually does, and it is\n"
+           "                    the only mode that exercises TX/RX contention\n"
+           "                    for the shared frame pool.\n"
+           "  --mixed           interleave small control messages with bulk,\n"
+           "                    as the RPC protocol does (exercises the\n"
+           "                    latency/throughput dispatcher and odd sizes)\n");
 }
 
 static uint64_t parse_size(const char *s)
@@ -337,6 +457,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--dev") && i + 1 < argc) opt_dev = argv[++i];
         else if (!strcmp(argv[i], "--gid") && i + 1 < argc) opt_gid_idx = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--stall") && i + 1 < argc) opt_stall_s = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--bidir")) opt_bidir = true;
+        else if (!strcmp(argv[i], "--mixed")) opt_mixed = true;
         else { usage(); return 1; }
     }
     if (!server && !peer_ip) { usage(); return 1; }
@@ -366,106 +488,27 @@ int main(int argc, char **argv)
     double t0 = now_s();
     int rc = 0;
 
-    if (!server) {
-        /* Client: mirror the transport's window discipline exactly. */
-        int inflight = 0;
-        for (uint64_t seq = 0; seq < nmsg; seq++) {
-            fill_chunk(r.tx_buf, opt_chunk, seq);
-
-            struct ibv_sge sge = {0};
-            sge.addr   = (uintptr_t)r.tx_buf;
-            sge.length = opt_chunk;
-            sge.lkey   = r.tx_mr->lkey;
-
-            struct ibv_send_wr wr = {0}, *bad = NULL;
-            wr.wr_id      = seq;
-            wr.opcode     = IBV_WR_SEND;
-            wr.sg_list    = &sge;
-            wr.num_sge    = 1;
-            wr.send_flags = IBV_SEND_SIGNALED;
-
-            if (ibv_post_send(r.qp, &wr, &bad) != 0) {
-                fprintf(stderr, "FAIL post_send at msg %llu: %s\n",
-                        (unsigned long long)seq, strerror(errno));
-                rc = 3; goto done;
-            }
-            inflight++;
-
-            while (inflight >= opt_tx_depth) {
-                struct ibv_wc wc;
-                int p = poll_one(r.scq, &wc, now_s() + opt_stall_s);
-                if (p == -1) {
-                    fprintf(stderr,
-                            "STALL: no send completion for %ds at msg %llu "
-                            "(%.1f MiB sent)\n", opt_stall_s,
-                            (unsigned long long)seq,
-                            seq * opt_chunk / 1048576.0);
-                    rc = 3; goto done;
-                }
-                if (p == -2) {
-                    fprintf(stderr, "FAIL send wc status at msg %llu\n",
-                            (unsigned long long)seq);
-                    rc = 2; goto done;
-                }
-                inflight--;
-            }
-            if ((seq & 0x3ff) == 0x3ff)
-                printf("  sent %llu/%llu (%.1f MiB)\n",
-                       (unsigned long long)seq + 1, (unsigned long long)nmsg,
-                       (seq + 1) * opt_chunk / 1048576.0);
+    if (opt_bidir) {
+        /* Both peers send AND receive concurrently on the same QP -- the
+         * pattern ggml-rpc actually uses, and the only one that makes TX and
+         * RX contend for the shared frame pool. A one-way test passes 21 GiB
+         * on hardware where this fails, so this mode is the meaningful one. */
+        struct rx_args ra = { .r = &r, .nmsg = nmsg, .rc = 0 };
+        pthread_t th;
+        if (pthread_create(&th, NULL, rx_loop, &ra) != 0) {
+            perror("pthread_create"); rc = 1; goto done;
         }
-        while (inflight > 0) {
-            struct ibv_wc wc;
-            if (poll_one(r.scq, &wc, now_s() + opt_stall_s) < 0) {
-                fprintf(stderr, "STALL draining send queue\n"); rc = 3; goto done;
-            }
-            inflight--;
-        }
+        rc = tx_loop(&r, nmsg);
+        pthread_join(th, NULL);
+        if (!rc) rc = ra.rc;
+    } else if (!server) {
+        rc = tx_loop(&r, nmsg);
     } else {
-        /* Server: receive, verify every byte, repost. */
-        for (uint64_t seq = 0; seq < nmsg; seq++) {
-            struct ibv_wc wc;
-            int p = poll_one(r.rcq, &wc, now_s() + opt_stall_s);
-            if (p == -1) {
-                fprintf(stderr,
-                        "STALL: no recv for %ds after %llu msgs (%.1f MiB)\n",
-                        opt_stall_s, (unsigned long long)seq,
-                        seq * opt_chunk / 1048576.0);
-                rc = 3; goto done;
-            }
-            if (p == -2) {
-                fprintf(stderr, "FAIL recv wc status at msg %llu\n",
-                        (unsigned long long)seq);
-                rc = 2; goto done;
-            }
-            if (wc.byte_len != opt_chunk)
-                fprintf(stderr,
-                        "SHORT msg %llu: got %u bytes, expected %zu\n",
-                        (unsigned long long)seq, wc.byte_len, opt_chunk);
-
-            int slot = (int)wc.wr_id;
-            long bad = verify_chunk(r.rx_buf + (size_t)slot * opt_chunk,
-                                    wc.byte_len < opt_chunk ? wc.byte_len : opt_chunk,
-                                    seq);
-            if (bad >= 0) {
-                fprintf(stderr,
-                        "CORRUPTION at msg %llu, first bad word %ld "
-                        "(byte %ld of %u) -- %.1f MiB in\n",
-                        (unsigned long long)seq, bad, bad * 8, wc.byte_len,
-                        seq * opt_chunk / 1048576.0);
-                rc = 2; goto done;
-            }
-            if (!post_rx(&r, slot)) {
-                fprintf(stderr, "FAIL repost at msg %llu\n",
-                        (unsigned long long)seq);
-                rc = 3; goto done;
-            }
-            if ((seq & 0x3ff) == 0x3ff)
-                printf("  recv+verified %llu/%llu (%.1f MiB)\n",
-                       (unsigned long long)seq + 1, (unsigned long long)nmsg,
-                       (seq + 1) * opt_chunk / 1048576.0);
-        }
+        struct rx_args ra = { .r = &r, .nmsg = nmsg, .rc = 0 };
+        rx_loop(&ra);
+        rc = ra.rc;
     }
+    if (rc) goto done;
 
     {
         double dt = now_s() - t0;
