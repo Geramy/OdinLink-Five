@@ -324,20 +324,37 @@ static rcclResult_t odl_tb5_connect(int dev, void *handle, void **sendComm,
 	if (sendDevComm)
 		*sendDevComm = NULL;
 
+	/*
+	 * The v7 contract: when the connection cannot be made *yet*, return
+	 * rcclSuccess with *sendComm left NULL and RCCL will call again. Only a
+	 * genuinely fatal condition returns an error.
+	 *
+	 * Returning rcclSystemError for a transient case aborts ncclCommInitRank
+	 * outright. That is not theoretical - it is exactly what happened here:
+	 * the peer rpc-server started before the link reached READY, this
+	 * returned an error, and the whole world init failed with "world
+	 * communicator init failed; collectives will fall back to lazy init".
+	 */
+	*sendComm = NULL;
+
 	comm = calloc(1, sizeof(*comm));
 	if (!comm)
-		return rcclSystemError;
+		return rcclSystemError;   /* out of memory: genuinely fatal */
 
 	if (get_shared_handle(dev, &comm->handle) != rcclSuccess) {
+		/* Device not open or link not READY yet - transient. */
 		free(comm);
-		return rcclSystemError;
+		DBG(1, "connect dev=%d: device not ready, asking RCCL to retry", dev);
+		return rcclSuccess;
 	}
 
 	/* Local send stream (auto-assigned); target the peer's advertised id. */
 	if (odl_tb5_stream_open(comm->handle, 0, &sid) < 0) {
+		/* No stream available yet - transient. */
 		put_shared_handle();
 		free(comm);
-		return rcclSystemError;
+		DBG(1, "connect dev=%d: no stream available, asking RCCL to retry", dev);
+		return rcclSuccess;
 	}
 	comm->stream_id = sid;
 	comm->dst_id = peer_cid;
@@ -365,9 +382,13 @@ static rcclResult_t odl_tb5_accept(void *listenComm, void **recvComm,
 	if (recvDevComm)
 		*recvDevComm = NULL;
 
+	/* Same retry contract as connect(): NULL comm + rcclSuccess means
+	 * "not yet, call me again", not "failed". */
+	*recvComm = NULL;
+
 	comm = calloc(1, sizeof(*comm));
 	if (!comm)
-		return rcclSystemError;
+		return rcclSystemError;   /* out of memory: genuinely fatal */
 
 	/* Reuse the recv stream + handle ref already opened in listen(). */
 	comm->handle = lh->handle;
@@ -657,9 +678,18 @@ static rcclResult_t odl_tb5_irecv(void *recvComm, int n, void **data,
 {
 	struct odl_tb5_comm *c = recvComm;
 	(void)tags; (void)mhandles;
-	/* maxRecvs=1: RCCL posts one buffer per recv. */
-	if (n < 1)
+	/*
+	 * getProperties advertises maxRecvs = 1, so RCCL should only ever pass
+	 * n == 1. Reject anything else rather than silently servicing element
+	 * zero and dropping the rest - that would look like a successful
+	 * transfer while losing the caller's data, which is the hardest class
+	 * of bug to find. Observed n has always been 1 in practice; this makes
+	 * the assumption enforced instead of implicit.
+	 */
+	if (n != 1) {
+		WARN("irecv called with n=%d but maxRecvs=1 - refusing", n);
 		return rcclInvalidArgument;
+	}
 	DBG(1, "irecv   POST comm=%p sid=%u n=%d size=%d", recvComm, c->stream_id, n, sizes[0]);
 	return start_request(recvComm, data[0], sizes[0], 0, request);
 }
