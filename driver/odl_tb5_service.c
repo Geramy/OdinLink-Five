@@ -42,6 +42,15 @@ MODULE_PARM_DESC(e2e,
 	"Enable end-to-end flow control (default=1). Set 0 for TB3 controllers "
 	"that do not support RING_FLAG_E2E.");
 
+unsigned int odl_busy_poll_us = 0;
+module_param(odl_busy_poll_us, uint, 0644);
+MODULE_PARM_DESC(odl_busy_poll_us,
+	"Busy-poll up to N us for an RX completion before sleeping (default 0=off). "
+	"Trades a CPU core during the wait for lower context-switch/wake latency on "
+	"small (<= ~512B) latency-bound request/response traffic. Does NOT help "
+	">= 1KB messages (they hit the NHI hardware completion-visibility floor) or "
+	"pipelined RCCL/NCCL collectives (their receives rarely sleep).");
+
 /* Apple protocol uses its own property key and registers as an alternate
  * service so macOS ThunderboltRDMA can discover us via XDomain matching. */
 static struct tb_property_dir *odl_tb5_apple_property_dir;
