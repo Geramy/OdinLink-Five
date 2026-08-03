@@ -18,48 +18,63 @@ typedef enum {
 
 typedef void (*rcclDebugLogger_t)(int level, const char* fmt, ...);
 
-typedef struct rcclNetProperties_v7 rcclNetProperties_v7_t;
-
-typedef struct rcclNet_v7 {
-  // Name of the network (mainly for logs)
-  const char* name;
-  // Initialize the network.
-  rcclResult_t (*init)(rcclDebugLogger_t logFunction);
-  // Return the number of adapters.
-  rcclResult_t (*devices)(int* ndev);
-  // Get various device properties.
-  rcclResult_t (*getProperties)(int dev, rcclNetProperties_v7_t* props);
-  // Create a listening socket.
-  rcclResult_t (*listen)(int dev, void* handle, void** listenComm);
-  // Connect to a handle.
-  rcclResult_t (*connect)(int dev, void* handle, void** sendComm, void** recvComm);
-  // Accept an incoming connection.
-  rcclResult_t (*accept)(void* listenComm, void** recvComm, void** sendComm);
-  // Close a listening socket.
-  rcclResult_t (*closeListen)(void* listenComm);
-  // Send data to the peer.
-  rcclResult_t (*isend)(void* sendComm, void* data, int size, int tag, void** request);
-  // Receive data from the peer.
-  rcclResult_t (*irecv)(void* recvComm, void* data, int size, int tag, void** request);
-  // Flush outstanding sends.
-  rcclResult_t (*iflush)(void* sendComm, int dev, void** request);
-  // Test whether a request is complete.
-  rcclResult_t (*test)(void* request, int* done, int* size);
-  // Close a send communicator.
-  rcclResult_t (*closeSend)(void* sendComm);
-  // Close a recv communicator.
-  rcclResult_t (*closeRecv)(void* recvComm);
-} rcclNet_v7_t;
+/* Memory pointer types (bitmask in properties.ptrSupport). */
+#define NCCL_PTR_HOST 0x1
+#define NCCL_PTR_CUDA 0x2
+#define NCCL_PTR_DMABUF 0x4
 
 typedef struct rcclNetProperties_v7 {
-  char name[MAX_STR_LEN];
-  char pciPath[MAX_STR_LEN];
+  char* name;        /* NCCL v7: pointer, NOT an inline buffer */
+  char* pciPath;
   uint64_t guid;
   int ptrSupport;
   int speed;
   int port;
+  float latency;
   int maxComm;
   int maxRecvs;
+  int netDeviceType;
+  int netDeviceVersion;
 } rcclNetProperties_v7_t;
+
+/* Opaque device-side comm handle (unused by this CPU-staged plugin). */
+typedef struct rcclNetDeviceHandle_v7 rcclNetDeviceHandle_v7_t;
+
+/*
+ * NCCL/RCCL net plugin API, version 7.  The field order and function
+ * signatures MUST match RCCL's ncclNet_v7_t exactly — RCCL calls each
+ * slot by offset with these argument lists.  In particular regMr /
+ * regMrDmaBuf / deregMr sit between accept and isend, isend/irecv carry
+ * an mhandle, irecv/iflush are multi-buffer (n, arrays), and the table
+ * ends with getDeviceMr / irecvConsumed.
+ */
+typedef struct rcclNet_v7 {
+  const char* name;
+  rcclResult_t (*init)(rcclDebugLogger_t logFunction);
+  rcclResult_t (*devices)(int* ndev);
+  rcclResult_t (*getProperties)(int dev, rcclNetProperties_v7_t* props);
+  rcclResult_t (*listen)(int dev, void* handle, void** listenComm);
+  rcclResult_t (*connect)(int dev, void* handle, void** sendComm,
+                          rcclNetDeviceHandle_v7_t** sendDevComm);
+  rcclResult_t (*accept)(void* listenComm, void** recvComm,
+                         rcclNetDeviceHandle_v7_t** recvDevComm);
+  rcclResult_t (*regMr)(void* comm, void* data, int size, int type,
+                        void** mhandle);
+  rcclResult_t (*regMrDmaBuf)(void* comm, void* data, size_t size, int type,
+                              uint64_t offset, int fd, void** mhandle);
+  rcclResult_t (*deregMr)(void* comm, void* mhandle);
+  rcclResult_t (*isend)(void* sendComm, void* data, int size, int tag,
+                        void* mhandle, void** request);
+  rcclResult_t (*irecv)(void* recvComm, int n, void** data, int* sizes,
+                        int* tags, void** mhandles, void** request);
+  rcclResult_t (*iflush)(void* recvComm, int n, void** data, int* sizes,
+                         void** mhandles, void** request);
+  rcclResult_t (*test)(void* request, int* done, int* sizes);
+  rcclResult_t (*closeSend)(void* sendComm);
+  rcclResult_t (*closeRecv)(void* recvComm);
+  rcclResult_t (*closeListen)(void* listenComm);
+  rcclResult_t (*getDeviceMr)(void* comm, void* mhandle, void** dptr_mhandle);
+  rcclResult_t (*irecvConsumed)(void* recvComm, int n, void* request);
+} rcclNet_v7_t;
 
 #endif // RCCL_NET_V7_H_

@@ -116,8 +116,16 @@ static int odl_tb5_probe(struct tb_service *svc,
 	/* Adaptive TX mode defaults */
 	dev->tx_adaptive.mode = ODL_TB5_TX_LATENCY;
 	dev->tx_adaptive.consecutive_low = 0;
-	dev->tx_adaptive.high_watermark = odl_ring_size * 3 / 4;
-	dev->tx_adaptive.low_watermark  = odl_ring_size / 4;
+	/* Watermarks gate the shared frame pool (ODL_TB5_FRAME_POOL_SIZE
+	 * slots), NOT the NHI ring depth.  With large odl_ring_size the raw
+	 * ring*3/4 exceeds the pool, so the adaptive logic can never trip and
+	 * TX flow control is miscalibrated.  Clamp to the usable pool. */
+	dev->tx_adaptive.high_watermark =
+		min_t(unsigned int, odl_ring_size * 3 / 4,
+		      ODL_TB5_FRAME_POOL_SIZE - ODL_TB5_TX_POOL_RESERVE);
+	dev->tx_adaptive.low_watermark  =
+		min_t(unsigned int, odl_ring_size / 4,
+		      (ODL_TB5_FRAME_POOL_SIZE - ODL_TB5_TX_POOL_RESERVE) / 2);
 
 	ret = odl_tb5_chardev_create(dev);
 	if (ret) {
