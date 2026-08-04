@@ -75,7 +75,8 @@
  * cases), small enough that the copy_from_user cost stays under a microsecond
  * and bulk transfers still go through the worker's pipelined path. */
 #define ODL_VERBS_INLINE_MAX            4096
-#define ODL_VERBS_COMP_CHANNEL_BACKLOG   64
+#define ODL_VERBS_COMP_CHANNEL_BACKLOG   64      /* floor, not the cap */
+#define ODL_VERBS_COMP_CHANNEL_MAX       65536   /* sanity ceiling */
 #define ODL_VERBS_SQ_DEPTH              64
 
 /* ── Forward declarations ───────────────────────────────────────────── */
@@ -128,8 +129,17 @@ struct odl_verbs_cq {
     pthread_mutex_t           lock;
     uint32_t                  cq_handle;
 
-    /* Completion ring buffer */
-    struct ibv_wc             ring[ODL_VERBS_COMP_CHANNEL_BACKLOG];
+    /* Completion ring buffer.
+     *
+     * Sized from the cqe the caller asked ibv_create_cq for, NOT a fixed
+     * constant. It used to be ring[ODL_VERBS_COMP_CHANNEL_BACKLOG] (=64, so 63
+     * usable) while base.cqe reported back whatever was requested - the
+     * provider advertised a depth it did not have. ds4 asks for 512 and a bulk
+     * round can post 65 completions (64 recv + 1 signalled send); odl_cq_post
+     * drops on overflow, so the consumer waits forever for a completion that
+     * was discarded. */
+    struct ibv_wc            *ring;
+    int                       ring_cap;
     int                       head;
     int                       tail;
 

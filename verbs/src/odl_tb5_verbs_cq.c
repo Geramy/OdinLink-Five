@@ -37,6 +37,24 @@ struct ibv_cq *odl_create_cq(struct ibv_context *context, int cqe,
     cq->ctx = ctx;
     pthread_mutex_init(&cq->lock, NULL);
 
+    /* One slot is always sacrificed to distinguish full from empty, so
+     * allocate cqe+1 to make the ADVERTISED depth actually usable. */
+    cq->ring_cap = cq->base.cqe + 1;
+    if (cq->ring_cap < ODL_VERBS_COMP_CHANNEL_BACKLOG)
+        cq->ring_cap = ODL_VERBS_COMP_CHANNEL_BACKLOG;
+    if (cq->ring_cap > ODL_VERBS_COMP_CHANNEL_MAX)
+        cq->ring_cap = ODL_VERBS_COMP_CHANNEL_MAX;
+    cq->ring = calloc((size_t)cq->ring_cap, sizeof(*cq->ring));
+    if (!cq->ring) {
+        pthread_mutex_destroy(&cq->lock);
+        free(cq);
+        errno = ENOMEM;
+        return NULL;
+    }
+    /* Report what we can actually hold, so a consumer that reads back cqe is
+     * not lied to. */
+    cq->base.cqe = cq->ring_cap - 1;
+
     /* Create eventfd for async notification */
     cq->eventfd_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (cq->eventfd_fd >= 0) {
@@ -95,6 +113,7 @@ int odl_destroy_cq(struct ibv_cq *cq)
 
     if (ocq->eventfd_fd >= 0) close(ocq->eventfd_fd);
     pthread_mutex_destroy(&ocq->lock);
+    free(ocq->ring);
     free(ocq);
 
     ODL_TRACE_EXIT_VAL(0);
@@ -117,7 +136,7 @@ int odl_poll_cq(struct ibv_cq *cq, int num_entries, struct ibv_wc *wc)
 
     while (polled < num_entries && ocq->head != ocq->tail) {
         wc[polled] = ocq->ring[ocq->head];
-        ocq->head = (ocq->head + 1) % ODL_VERBS_COMP_CHANNEL_BACKLOG;
+        ocq->head = (ocq->head + 1) % ocq->ring_cap;
         polled++;
     }
 
@@ -174,7 +193,7 @@ int odl_cq_post(struct odl_verbs_cq *cq, struct ibv_wc *wc)
 {
     pthread_mutex_lock(&cq->lock);
 
-    int next = (cq->tail + 1) % ODL_VERBS_COMP_CHANNEL_BACKLOG;
+    int next = (cq->tail + 1) % cq->ring_cap;
     if (next == cq->head) {
         /* CQ full — drop completion */
         odl_logerr("CQ %p ring full! dropping completion", (void*)cq);
