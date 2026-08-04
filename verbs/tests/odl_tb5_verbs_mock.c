@@ -491,8 +491,24 @@ int odl_tb5_stream_send(void *handle, uint8_t stream_id,
                          uint8_t dst_id, const void *data,
                          uint32_t len)
 {
+    static pthread_mutex_t inject_lock = PTHREAD_MUTEX_INITIALIZER;
+    static unsigned long send_calls;
     struct mock_handle *h = handle;
     (void)dst_id;
+
+    /* Deterministic fault injection for queue-ordering tests. The selected
+     * call fails once, exactly as a non-blocking kernel send does when its
+     * packet slots are temporarily busy. */
+    const char *eagain_at_env = getenv("ODL_MOCK_SEND_EAGAIN_AT");
+    if (eagain_at_env) {
+        unsigned long eagain_at = strtoul(eagain_at_env, NULL, 10);
+        pthread_mutex_lock(&inject_lock);
+        send_calls++;
+        bool inject = eagain_at > 0 && send_calls == eagain_at;
+        pthread_mutex_unlock(&inject_lock);
+        if (inject)
+            return -EAGAIN;
+    }
 
     /* Route to the other side's RX ring */
     struct mock_stream *streams = h->side == 0 ?

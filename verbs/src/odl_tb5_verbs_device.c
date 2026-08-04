@@ -115,7 +115,7 @@ struct ibv_context *odl_ibv_open_device(struct ibv_device *device)
      * BUG16: this fd setup used to run BEFORE the block above, which then
      * overwrote cmd_fd with -1. odl_worker_poll_fd() therefore always
      * returned -EBADF, so the worker never waited for TX readiness and spun
-     * on "send EAGAIN, re-queueing" forever -- no payload ever moved.
+     * retrying EAGAIN forever -- no payload ever moved.
      * Order matters: assign the fd AFTER the defaults.
      *
      * Non-blocking mode makes stream_send/recv return -EAGAIN instead of
@@ -171,7 +171,7 @@ int odl_query_device_ex(struct ibv_context *context,
 
     attr->orig_attr.phys_port_cnt    = 1;
     attr->orig_attr.max_qp           = ODL_VERBS_MAX_QPS;
-    attr->orig_attr.max_qp_wr        = ODL_VERBS_SQ_DEPTH;
+    attr->orig_attr.max_qp_wr        = ODL_VERBS_SQ_DEPTH_MAX;
     attr->orig_attr.max_sge          = 1;
     attr->orig_attr.max_sge_rd       = 1;
     attr->orig_attr.max_cq           = ODL_VERBS_MAX_CQS;

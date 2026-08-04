@@ -77,7 +77,8 @@
 #define ODL_VERBS_INLINE_MAX            4096
 #define ODL_VERBS_COMP_CHANNEL_BACKLOG   64      /* floor, not the cap */
 #define ODL_VERBS_COMP_CHANNEL_MAX       65536   /* sanity ceiling */
-#define ODL_VERBS_SQ_DEPTH              64
+#define ODL_VERBS_SQ_DEPTH_MIN          64      /* floor, not the cap */
+#define ODL_VERBS_SQ_DEPTH_MAX          65535   /* sane allocation ceiling */
 
 /* ── Forward declarations ───────────────────────────────────────────── */
 
@@ -156,6 +157,15 @@ struct odl_verbs_cq {
 
 /* ── Queue Pair ─────────────────────────────────────────────────────── */
 
+struct odl_verbs_send_entry {
+    uint64_t wr_id;
+    uint64_t addr;
+    uint32_t len;
+    uint32_t lkey;
+    int      num_sge;
+    void    *bounce;
+};
+
 struct odl_verbs_qp {
     struct ibv_qp             base;
     struct odl_verbs_context *ctx;
@@ -185,22 +195,15 @@ struct odl_verbs_qp {
     /* BUG14: callers pass stack-allocated ibv_send_wr/ibv_sge and expect
      * post_send to return immediately, so the worker must never dereference
      * the caller's pointers. Store copies of the fields we need. */
-    uint64_t                  sq_wr_id[ODL_VERBS_SQ_DEPTH];
-    uint64_t                  sq_addr[ODL_VERBS_SQ_DEPTH];
-    uint32_t                  sq_len[ODL_VERBS_SQ_DEPTH];
-    uint32_t                  sq_lkey[ODL_VERBS_SQ_DEPTH];
-    int                       sq_num_sge[ODL_VERBS_SQ_DEPTH];
+    struct odl_verbs_send_entry *sq;
+    int                       sq_depth;
     /* ibv_post_send() is defined to consume the payload before returning, so
      * callers reuse their send buffer immediately. odl_tb5_stream_send() only
      * QUEUES the data, so by the time the worker DMAs it the caller has
      * usually overwritten it -- silent corruption. Take a private copy at post
      * time and transmit from that. */
-    void                     *sq_bounce[ODL_VERBS_SQ_DEPTH];
-    /* True from the moment the worker DEQUEUES a request until it has been
-     * handed to the device. sq_count alone is not proof of an empty pipeline:
-     * the worker decrements it at dequeue and then may wait on POLLOUT before
-     * submitting, so an inline send could otherwise overtake it and violate
-     * per-QP ordering. Guarded by sq_lock. */
+    /* True while the worker is trying the request at the queue head. Guarded
+     * by sq_lock; it also prevents the inline path from overtaking that send. */
     bool                      tx_inflight;
     int                       sq_head;
     int                       sq_tail;

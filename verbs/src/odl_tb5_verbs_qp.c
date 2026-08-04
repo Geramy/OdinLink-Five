@@ -8,9 +8,10 @@
  * How async I/O works here:
  * 1. ibv_post_send → enqueue the work request → return immediately
  * 2. A background worker thread polls the device fd (EPOLLOUT)
- * 3. When the hardware is ready, it dequeues a WR and calls the
+ * 3. When the hardware is ready, it tries the WR at the queue head via the
  *    kernel's stream_send ioctl (which is O_NONBLOCK)
- * 4. If the kernel says EAGAIN (busy), re-enqueue and poll again
+ * 4. If the kernel says EAGAIN (busy), retain that WR at the head and poll
+ *    again; remove it only after the send finishes
  * 5. On success, post a Work Completion to the CQ and wake the app
  *    via eventfd
  *
@@ -121,18 +122,19 @@ static void *odl_qp_worker(void *arg)
         uint32_t w_len = 0, w_lkey = 0;
         int      w_num_sge = 0;
 
-        /* Dequeue one work request (copies, not caller pointers) */
+        /* Peek at one work request (copies, not caller pointers). Keep its
+         * ring slot occupied until the send finishes, so EAGAIN needs no
+         * requeue and producers cannot overwrite the request being retried. */
         pthread_mutex_lock(&qp->sq_lock);
         if (qp->sq_count > 0) {
-            w_wr_id   = qp->sq_wr_id[qp->sq_head];
-            w_addr    = qp->sq_addr[qp->sq_head];
-            w_len     = qp->sq_len[qp->sq_head];
-            w_lkey    = qp->sq_lkey[qp->sq_head];
-            w_num_sge = qp->sq_num_sge[qp->sq_head];
-            w_bounce  = qp->sq_bounce[qp->sq_head];
-            qp->sq_head = (qp->sq_head + 1) % ODL_VERBS_SQ_DEPTH;
-            qp->sq_count--;
-            qp->tx_inflight = true;   /* dequeued but not yet on the wire */
+            struct odl_verbs_send_entry *entry = &qp->sq[qp->sq_head];
+            w_wr_id   = entry->wr_id;
+            w_addr    = entry->addr;
+            w_len     = entry->len;
+            w_lkey    = entry->lkey;
+            w_num_sge = entry->num_sge;
+            w_bounce  = entry->bounce;
+            qp->tx_inflight = true;
             have_wr = true;
         }
         pthread_mutex_unlock(&qp->sq_lock);
@@ -184,23 +186,18 @@ static void *odl_qp_worker(void *arg)
             }
 
             if (ret == -EAGAIN) {
-                /* Non-blocking send couldn't proceed — re-queue and retry */
-                odl_logverbose("send EAGAIN stream=%u, re-queueing", qp->stream_id);
+                /* The request never left the head slot, so it cannot be
+                 * reordered, overwritten, or dropped. A later worker pass
+                 * retries it after polling readiness again. */
                 pthread_mutex_lock(&qp->sq_lock);
-                if (qp->sq_count < ODL_VERBS_SQ_DEPTH) {
-                    qp->sq_wr_id[qp->sq_tail]   = w_wr_id;
-                    qp->sq_addr[qp->sq_tail]    = w_addr;
-                    qp->sq_len[qp->sq_tail]     = w_len;
-                    qp->sq_lkey[qp->sq_tail]    = w_lkey;
-                    qp->sq_num_sge[qp->sq_tail] = w_num_sge;
-                    qp->sq_bounce[qp->sq_tail]  = w_bounce;
-                    qp->sq_tail = (qp->sq_tail + 1) % ODL_VERBS_SQ_DEPTH;
-                    qp->sq_count++;
-                }
-                /* Back on the queue (or dropped): no longer mid-flight, so
-                 * an inline send may proceed once the queue drains. */
                 qp->tx_inflight = false;
                 pthread_mutex_unlock(&qp->sq_lock);
+                odl_logverbose("send EAGAIN stream=%u, retaining SQ head",
+                               qp->stream_id);
+                /* Readiness can go stale before the ioctl. Back off so a
+                 * permanently busy device cannot turn this into a hot loop. */
+                struct timespec ts = { .tv_sec = 0, .tv_nsec = 20000 };
+                nanosleep(&ts, NULL);
                 continue;
             }
 
@@ -224,6 +221,9 @@ static void *odl_qp_worker(void *arg)
         free(w_bounce);
 
         pthread_mutex_lock(&qp->sq_lock);
+        qp->sq[qp->sq_head].bounce = NULL;
+        qp->sq_head = (qp->sq_head + 1) % qp->sq_depth;
+        qp->sq_count--;
         qp->tx_inflight = false;      /* on the wire; ordering barrier lifted */
         pthread_mutex_unlock(&qp->sq_lock);
 
@@ -256,11 +256,23 @@ struct ibv_qp *odl_create_qp(struct ibv_pd *pd,
     struct odl_verbs_qp *qp = calloc(1, sizeof(*qp));
     if (!qp) { errno = ENOMEM; return NULL; }
 
+    uint32_t requested_sq_depth = attr->cap.max_send_wr;
+    qp->sq_depth = requested_sq_depth > ODL_VERBS_SQ_DEPTH_MAX
+                 ? ODL_VERBS_SQ_DEPTH_MAX : (int)requested_sq_depth;
+    if (qp->sq_depth < ODL_VERBS_SQ_DEPTH_MIN)
+        qp->sq_depth = ODL_VERBS_SQ_DEPTH_MIN;
+    qp->sq = calloc((size_t)qp->sq_depth, sizeof(*qp->sq));
+    if (!qp->sq) {
+        free(qp);
+        errno = ENOMEM;
+        return NULL;
+    }
     /* Open an OdinLink-Five stream */
     uint8_t stream_id = 0, tx_stream_id = 0;
     int ret = odl_tb5_stream_open(ctx->handle, 0, &stream_id);
     if (ret != 0) {
         odl_logerr("stream_open failed: %d", ret);
+        free(qp->sq);
         free(qp);
         errno = ENODEV;
         return NULL;
@@ -274,6 +286,7 @@ struct ibv_qp *odl_create_qp(struct ibv_pd *pd,
     if (ret < 0) {
         odl_logerr("tx stream_open failed: %d", ret);
         odl_tb5_stream_close(ctx->handle, stream_id);
+        free(qp->sq);
         free(qp);
         errno = ENOMEM;
         return NULL;
@@ -320,6 +333,7 @@ struct ibv_qp *odl_create_qp(struct ibv_pd *pd,
         pthread_mutex_unlock(&ctx->qp_lock);
         odl_tb5_stream_close(ctx->handle, stream_id);
         pthread_mutex_destroy(&qp->sq_lock);
+        free(qp->sq);
         free(qp);
         errno = ENOMEM;
         return NULL;
@@ -336,6 +350,7 @@ struct ibv_qp *odl_create_qp(struct ibv_pd *pd,
         odl_tb5_stream_close(ctx->handle, tx_stream_id);
         odl_tb5_stream_close(ctx->handle, stream_id);
         pthread_mutex_destroy(&qp->sq_lock);
+        free(qp->sq);
         free(qp);
         errno = EAGAIN;
         return NULL;
@@ -351,6 +366,7 @@ struct ibv_qp *odl_create_qp(struct ibv_pd *pd,
         odl_tb5_stream_close(ctx->handle, tx_stream_id);
         odl_tb5_stream_close(ctx->handle, stream_id);
         pthread_mutex_destroy(&qp->sq_lock);
+        free(qp->sq);
         free(qp);
         errno = EAGAIN;
         return NULL;
@@ -358,6 +374,8 @@ struct ibv_qp *odl_create_qp(struct ibv_pd *pd,
 
     odl_loginfo("create_qp: rx_stream=%u tx_stream=%u qp_num=%u",
                 stream_id, tx_stream_id, qp->base.qp_num);
+    /* ibv_create_qp permits a provider to adjust requested capabilities. */
+    attr->cap.max_send_wr = qp->sq_depth;
     ODL_TRACE_EXIT();
     return &qp->base;
 }
@@ -389,9 +407,9 @@ int odl_destroy_qp(struct ibv_qp *qp)
     /* Release bounce buffers for work requests never transmitted. */
     pthread_mutex_lock(&oqp->sq_lock);
     while (oqp->sq_count > 0) {
-        free(oqp->sq_bounce[oqp->sq_head]);
-        oqp->sq_bounce[oqp->sq_head] = NULL;
-        oqp->sq_head = (oqp->sq_head + 1) % ODL_VERBS_SQ_DEPTH;
+        free(oqp->sq[oqp->sq_head].bounce);
+        oqp->sq[oqp->sq_head].bounce = NULL;
+        oqp->sq_head = (oqp->sq_head + 1) % oqp->sq_depth;
         oqp->sq_count--;
     }
     pthread_mutex_unlock(&oqp->sq_lock);
@@ -406,10 +424,12 @@ int odl_destroy_qp(struct ibv_qp *qp)
     }
     pthread_mutex_unlock(&ctx->qp_lock);
 
+    uint8_t stream_id = oqp->stream_id;
     pthread_mutex_destroy(&oqp->sq_lock);
+    free(oqp->sq);
     free(oqp);
 
-    odl_loginfo("destroy_qp: stream=%u", oqp->stream_id);
+    odl_loginfo("destroy_qp: stream=%u", stream_id);
     ODL_TRACE_EXIT_VAL(0);
 }
 
@@ -506,7 +526,7 @@ int odl_post_send(struct ibv_qp *qp, struct ibv_send_wr *wr,
     }
 
     while (wr) {
-        if (oqp->sq_count >= ODL_VERBS_SQ_DEPTH) {
+        if (oqp->sq_count >= oqp->sq_depth) {
             *bad_wr = wr;
             pthread_mutex_unlock(&oqp->sq_lock);
             odl_logerr("post_send: SQ full on QP %u", qp->qp_num);
@@ -514,8 +534,9 @@ int odl_post_send(struct ibv_qp *qp, struct ibv_send_wr *wr,
         }
 
         /* BUG14 fix: copy, never store the caller's stack pointer. */
-        oqp->sq_wr_id[oqp->sq_tail]   = wr->wr_id;
-        oqp->sq_num_sge[oqp->sq_tail] = wr->num_sge;
+        struct odl_verbs_send_entry *entry = &oqp->sq[oqp->sq_tail];
+        entry->wr_id = wr->wr_id;
+        entry->num_sge = wr->num_sge;
         if (wr->num_sge > 0) {
             uint32_t blen = wr->sg_list[0].length;
             void *bounce = NULL;
@@ -534,18 +555,18 @@ int odl_post_send(struct ibv_qp *qp, struct ibv_send_wr *wr,
                 memcpy(bounce, (const void *)(uintptr_t)wr->sg_list[0].addr,
                        blen);
             }
-            oqp->sq_bounce[oqp->sq_tail] = bounce;
-            oqp->sq_addr[oqp->sq_tail] = bounce ? (uint64_t)(uintptr_t)bounce
-                                               : wr->sg_list[0].addr;
-            oqp->sq_len[oqp->sq_tail]  = blen;
-            oqp->sq_lkey[oqp->sq_tail] = wr->sg_list[0].lkey;
+            entry->bounce = bounce;
+            entry->addr = bounce ? (uint64_t)(uintptr_t)bounce
+                                 : wr->sg_list[0].addr;
+            entry->len = blen;
+            entry->lkey = wr->sg_list[0].lkey;
         } else {
-            oqp->sq_bounce[oqp->sq_tail] = NULL;
-            oqp->sq_addr[oqp->sq_tail] = 0;
-            oqp->sq_len[oqp->sq_tail]  = 0;
-            oqp->sq_lkey[oqp->sq_tail] = 0;
+            entry->bounce = NULL;
+            entry->addr = 0;
+            entry->len = 0;
+            entry->lkey = 0;
         }
-        oqp->sq_tail = (oqp->sq_tail + 1) % ODL_VERBS_SQ_DEPTH;
+        oqp->sq_tail = (oqp->sq_tail + 1) % oqp->sq_depth;
         oqp->sq_count++;
         atomic_fetch_add(&oqp->pending_sends, 1);
 
@@ -683,8 +704,8 @@ int odl_query_qp(struct ibv_qp *qp, struct ibv_qp_attr *attr,
     attr->qp_access_flags  = IBV_ACCESS_LOCAL_WRITE |
                               IBV_ACCESS_REMOTE_WRITE |
                               IBV_ACCESS_REMOTE_READ;
-    attr->cap.max_send_wr  = ODL_VERBS_SQ_DEPTH;
-    attr->cap.max_recv_wr  = ODL_VERBS_SQ_DEPTH;
+    attr->cap.max_send_wr  = odl_qp_from_ibv(qp)->sq_depth;
+    attr->cap.max_recv_wr  = ODL_VERBS_SQ_DEPTH_MIN;
     attr->cap.max_send_sge = 1;
     attr->cap.max_recv_sge = 1;
     attr->cap.max_inline_data = 0;

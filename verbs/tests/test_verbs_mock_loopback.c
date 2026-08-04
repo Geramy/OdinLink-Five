@@ -99,8 +99,8 @@ int main(void)
 
     /* ── CQ ────────────────────────────────────────────────────── */
 
-    TEST("ibv_create_cq(ctx, 16, NULL, NULL, 0)");
-    struct ibv_cq *cq = ibv_create_cq(ctx, 16, NULL, NULL, 0);
+    TEST("ibv_create_cq(ctx, 256, NULL, NULL, 0)");
+    struct ibv_cq *cq = ibv_create_cq(ctx, 256, NULL, NULL, 0);
     if (cq) PASS(); else FAIL("create_cq failed");
 
     printf("    cqe=%d\n", cq->cqe);
@@ -112,7 +112,7 @@ int main(void)
     qp_attr.send_cq = cq;
     qp_attr.recv_cq = cq;
     qp_attr.qp_type = IBV_QPT_RC;
-    qp_attr.cap.max_send_wr = 8;
+    qp_attr.cap.max_send_wr = 128;
     qp_attr.cap.max_recv_wr = 8;
     qp_attr.cap.max_send_sge = 1;
     qp_attr.cap.max_recv_sge = 1;
@@ -120,6 +120,10 @@ int main(void)
     TEST("ibv_create_qp(pd, RC)");
     struct ibv_qp *qp = ibv_create_qp(pd, &qp_attr);
     if (qp) PASS(); else FAIL("create_qp failed");
+
+    TEST("QP reports requested 128-entry send queue");
+    if (qp_attr.cap.max_send_wr == 128) PASS();
+    else FAIL("provider did not report the real send queue depth");
 
     printf("    qp_num=%u\n", qp->qp_num);
 
@@ -208,6 +212,52 @@ int main(void)
     } else {
         FAIL("no completion received");
     }
+
+    /* Post a full, ordered batch. With ODL_MOCK_SEND_EAGAIN_AT=2 the first
+     * request in this batch fails once in the worker. The historical
+     * tail requeue completed it last; a concurrent refill could also drop it.
+     * Requiring every completion in order catches both failures. */
+    enum { EAGAIN_BATCH = 128 };
+    struct ibv_sge batch_sge[EAGAIN_BATCH];
+    struct ibv_send_wr batch_wr[EAGAIN_BATCH];
+    memset(batch_sge, 0, sizeof(batch_sge));
+    memset(batch_wr, 0, sizeof(batch_wr));
+    for (int i = 0; i < EAGAIN_BATCH; i++) {
+        batch_sge[i] = sge;
+        batch_wr[i].wr_id = 1000 + (uint64_t)i;
+        batch_wr[i].sg_list = &batch_sge[i];
+        batch_wr[i].num_sge = 1;
+        batch_wr[i].opcode = IBV_WR_SEND;
+        batch_wr[i].send_flags = IBV_SEND_SIGNALED;
+        batch_wr[i].next = i + 1 < EAGAIN_BATCH ? &batch_wr[i + 1] : NULL;
+    }
+
+    TEST("EAGAIN preserves a full SQ batch without reorder or drop");
+    bad_wr = NULL;
+    ret = ibv_post_send(qp, &batch_wr[0], &bad_wr);
+    int completed = 0;
+    bool ordered = ret == 0;
+    for (int waits = 0; ordered && completed < EAGAIN_BATCH && waits < 5000; waits++) {
+        struct ibv_wc batch_wc[16];
+        int n = ibv_poll_cq(cq, 16, batch_wc);
+        if (n < 0) {
+            ordered = false;
+            break;
+        }
+        if (n == 0) {
+            usleep(1000);
+            continue;
+        }
+        for (int j = 0; j < n; j++, completed++) {
+            if (batch_wc[j].status != IBV_WC_SUCCESS ||
+                batch_wc[j].wr_id != 1000 + (uint64_t)completed) {
+                ordered = false;
+                break;
+            }
+        }
+    }
+    if (ordered && completed == EAGAIN_BATCH) PASS();
+    else FAIL("send completions were reordered, dropped, or timed out");
 
     /* ── Cleanup ────────────────────────────────────────────────── */
 
