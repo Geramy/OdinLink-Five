@@ -9,54 +9,13 @@ OdinLink turns a Thunderbolt cable into a high-speed RDMA interconnect between m
 ```
 
 
-## About this fork
+#Thunderbolt 4 Test / USB4v1
 
-This is an additive fork of [Geramy/OdinLink-Five](https://github.com/Geramy/OdinLink-Five), crediting upstream rather than claiming superiority or a rewrite.
-It keeps the upstream design and adds focused driver and RDMA verbs fixes found while bringing up real cross-node workloads.
-The `strix-halo-verbs-fixes` branch is based on upstream `ed60505` ([full diff](https://github.com/Geramy/OdinLink-Five/compare/ed60505...wkljohn:strix-halo-verbs-fixes)) and was measured on two AMD Ryzen AI MAX+ 395 systems (Strix Halo, `gfx1151`) running Ubuntu 26.04 and kernel 7.0.0-28.
+![USB4v1 / Thunderbolt 4 Test](https://github.com/Geramy/OdinLink-Five/blob/main/assets/Screenshot_2026-02-20_13-50-36.png)
 
-```bash
-git clone -b strix-halo-verbs-fixes https://github.com/wkljohn/OdinLink-Five.git
-cd OdinLink-Five
-cmake -B build -DBUILD_VERBS=ON -DBUILD_TRAY=OFF && cmake --build build -j$(nproc)
-make -C driver
-```
 
-Recipes, the bug ledger, and raw measurements are in [wkljohn/llama.cpp-strix-halo-RCCL-RDMA](https://github.com/wkljohn/llama.cpp-strix-halo-RCCL-RDMA/tree/master/odinlink).
-
-### What this branch fixes
-
-These are transport-wide correctness fixes, not AMD-specific fixes; only the discovery bridge was tested on Strix Halo. Both ends must run the same build because the stream header grew a fragment index.
-
-| Fix | Consequence |
-|---|---|
-| **Standard RDMA discovery** | An `LD_PRELOAD` shim makes OdinLink visible to verbs applications; it is a practical bridge, not complete kernel-provider integration, because OdinLink registers no kernel `ib_device`. |
-| **Full-size frame headroom** | Full fragments no longer exceed their receive buffers and disappear. |
-| **Posted receive queue** | `ibv_post_recv` now queues buffers for later arrivals instead of waiting immediately. |
-| **Safe sends and completion IDs** | Host sends keep a private copy, and completions return `wr_id`. |
-| **Non-blocking completion polling** | Producers can publish completions while consumers poll. |
-| **Independent send and receive progress** | Two-way traffic no longer stalls because one direction reserves the other's buffers. |
-| **Fragment sequencing** | Sequence gaps report loss and drop damaged messages; they detect loss but do not retransmit. |
-| **Byte-verifying stress test** | `tests/odl_rdma_stress.c` catches truncation, reordering, stale data, and loss in one-way, `--bidir`, and `--latency` runs. |
-
-### Measured results on Strix Halo
-
-These two-node measurements used a USB4v1 cable; the driver reported 10 Gb/s × 2 lanes.
-
-| Test | Measured result | Context |
-|---|---:|---|
-| Round-trip latency | **22.0 µs median** | **286 µs TCP; ~13×** |
-| Median reproducibility | **±0.19 µs** | p95/p99 swing **~3×** |
-| Byte-verified bulk | **21 GiB at 8.38 Gb/s** | **86016/86016** |
-| Byte-verified full duplex | **2 GiB each way at 9.84 Gb/s** | **8192/8192** |
-| llama.cpp 27B Q6_K, 2 nodes, `-sm layer`, tg128 | **9.16 t/s** | **9.07 t/s** thunderbolt_ibverbs; **8.83 t/s** TCP |
-| llama.cpp 27B Q6_K, 1 node, tg128 | **9.50 t/s** | Single node |
-| Inline send, 1 KiB | **min −1.93 µs; stddev −52%** | median **22.58 off / 22.50 on** |
-
-The median is reproducible, but p95/p99 are not; the bulk results are byte-verified. A single node at 9.50 t/s remains faster than two nodes, which are for capacity rather than speed.
-
-**Not measured: tensor parallelism.** RCCL loads and selects this plugin, but no tensor-parallel run over it has been made yet — nothing is known to block one. All inference figures above are pipeline parallelism, which crosses the cable once per token and so gains little from lower latency.
-
+#Thunderbolt 5 Test / USB4v2
+![USB4v2 / Thunderbolt 5 Test](https://github.com/Geramy/OdinLink-Five/blob/main/assets/Screenshot_2026-02-27_10-07-33.png)
 ---
 
 ## Progress
