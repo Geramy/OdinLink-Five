@@ -121,7 +121,21 @@ struct odl_tb5_stream_hdr {
 
 #define ODL_TB5_BATCH_BUF_SIZE		(256 * 1024)
 #define ODL_TB5_BATCH_FRAMES		(ODL_TB5_BATCH_BUF_SIZE / ODL_TB5_FRAME_SIZE)
-#define ODL_TB5_BATCH_BUF_COUNT		8
+/*
+ * One buffer is consumed per in-flight throughput-mode message, whatever its
+ * size, and it is returned only once every one of its TX descriptors has run
+ * its completion callback. So this count IS the hardware staging window: a
+ * sender that posts N messages before reaping completions blocks on buffer
+ * N+1 (5-second wait_event in odl_tb5_stream_send_throughput).
+ *
+ * ds4's bulk prefill round posts DS4_TP_RDMA_BULK_SLOTS=32 linked 128 KiB
+ * sends before polling its CQ, so at 8 buffers messages 9..32 of EVERY round
+ * queued behind that wait - 4x oversubscribed unconditionally, which turned
+ * any transient peer-side RX slowdown into a hard multi-minute stall
+ * ("throughput TX stalled waiting for batch buf (free=0 ...)"). Match the
+ * window to that consumer's depth. 32 x 256 KiB = 8 MiB per device.
+ */
+#define ODL_TB5_BATCH_BUF_COUNT		32
 #define ODL_TB5_THROUGHPUT_THRESH	65536	/* bytes: msg > 64KB → throughput */
 #define ODL_TB5_MODE_HYSTERESIS		4	/* consecutive low polls to downshift */
 
