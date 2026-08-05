@@ -1453,13 +1453,13 @@ struct odl_tb5_stream *odl_tb5_stream_create(struct odl_tb5_device *dev,
 	INIT_LIST_HEAD(&stream->rx_queue);
 	spin_lock_init(&stream->rx_lock);
 	stream->rx_queue_len = 0;
+	/* A single ~1 MiB message needs about 264 frames. The old limit of
+	 * 256 silently dropped frames when a busy receiver fell behind,
+	 * desynchronizing the transport and hanging its consumer. */
 	stream->rx_queue_max = 65536;
 	stream->rx_asm_next_frag = 0;
 	stream->rx_asm_bad = false;
-	atomic_set(&stream->rx_frag_drops, 0);   /* was 256: a single ~1MB msg = ~264 frames;
-					 * under load the sender runs >256 frames ahead
-					 * and the old cap silently DROPPED frames ->
-					 * plugin framing desync -> vLLM hang. */
+	atomic_set(&stream->rx_frag_drops, 0);
 	atomic_set(&stream->rx_complete, 0);
 	init_waitqueue_head(&stream->rx_waitq);
 

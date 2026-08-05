@@ -499,33 +499,32 @@ static void do_transfer(struct odl_tb5_comm *comm, struct odl_tb5_request *req)
 		if (ret < 0 || actual != sizeof(total)) {
 			req->failed = 1;
 		} else {
-			uint32_t advertised = total;
-			int      overflow   = 0;
+			int overflow = total > (uint32_t)req->size;
 
 			/*
 			 * If the sender advertises more than the posted receive
-			 * can hold, the old code silently clamped `total` and
-			 * consumed only that prefix. The remaining frames stayed
-			 * queued, and the NEXT receive read the first 4 payload
-			 * bytes as a length header - so one size mismatch
-			 * corrupted every later request on the connection
-			 * instead of failing in isolation.
+			 * can hold, consume every complete chunk into a scratch
+			 * buffer. Do not read a partial chunk into the caller's
+			 * buffer: stream_recv discards the uncopied part of that
+			 * individual message, so accounting it as still queued
+			 * would make the drain wait forever.
 			 *
-			 * Fail this request, but still drain the full advertised
-			 * message so the stream stays framed for the next one.
+			 * The request still fails, but consuming all complete
+			 * chunks leaves the next length header aligned.
 			 */
-			if ((int)total > req->size) {
-				overflow = 1;
-				total = (uint32_t)req->size;
-			}
+			char sink[ODL_CHUNK];
+
 			while (off < (int)total) {
 				int n = (int)total - off;
+
 				if (n > ODL_CHUNK)
 					n = ODL_CHUNK;
 				DBG(2, "  recv chunk sid=%u off=%d n=%d", comm->stream_id, off, n);
 				ret = odl_tb5_stream_recv(comm->handle,
 							  comm->stream_id,
-							  (char *)req->data + off,
+							  overflow
+							  ? sink
+							  : (char *)req->data + off,
 							  (uint32_t)n, &src_id,
 							  &actual);
 				if (ret < 0) {
@@ -536,28 +535,13 @@ static void do_transfer(struct odl_tb5_comm *comm, struct odl_tb5_request *req)
 				if (actual == 0)
 					break;
 			}
-			if (overflow && !req->failed) {
-				/* Discard the untaken remainder in bounded
-				 * chunks so the next header lands aligned. */
-				char     sink[ODL_CHUNK];
-				uint32_t drained = (uint32_t)off;
-
-				while (drained < advertised) {
-					uint32_t want = advertised - drained;
-
-					if (want > (uint32_t)ODL_CHUNK)
-						want = (uint32_t)ODL_CHUNK;
-					ret = odl_tb5_stream_recv(comm->handle,
-								  comm->stream_id,
-								  sink, want,
-								  &src_id, &actual);
-					if (ret < 0 || actual == 0)
-						break;
-					drained += actual;
-				}
-				WARN("recv overflow on sid=%u: advertised=%u posted=%d, drained=%u - failing request but stream stays framed",
-				     comm->stream_id, advertised, req->size,
-				     drained);
+			if (overflow) {
+				WARN("recv overflow on sid=%u: advertised=%u posted=%d, drained=%u - failing request%s",
+				     comm->stream_id, total, req->size,
+				     (unsigned int)off,
+				     off == (int)total
+				     ? " after restoring framing"
+				     : " with framing not restored");
 				req->failed = 1;
 			}
 
