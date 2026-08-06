@@ -64,6 +64,13 @@ static void odl_dbg_init(void)
 			(unsigned long)pthread_self() & 0xffff, ##__VA_ARGS__); \
 	} } while (0)
 
+/* Protocol-level faults must be visible regardless of debug level: silently
+ * dropping them is what let the stream-desync bug corrupt whole runs. */
+#define WARN(fmt, ...) do { \
+	FILE *_f = odl_dbg_fp ? odl_dbg_fp : stderr; \
+	fprintf(_f, "odl_tb5 WARN: " fmt "\n", ##__VA_ARGS__); \
+} while (0)
+
 static rcclDebugLogger_t odl_logger;
 static char hw_ids[ODL_TB5_MAX_RCCL_DEVICES][64];
 static int num_devices;
@@ -317,20 +324,37 @@ static rcclResult_t odl_tb5_connect(int dev, void *handle, void **sendComm,
 	if (sendDevComm)
 		*sendDevComm = NULL;
 
+	/*
+	 * The v7 contract: when the connection cannot be made *yet*, return
+	 * rcclSuccess with *sendComm left NULL and RCCL will call again. Only a
+	 * genuinely fatal condition returns an error.
+	 *
+	 * Returning rcclSystemError for a transient case aborts ncclCommInitRank
+	 * outright. That is not theoretical - it is exactly what happened here:
+	 * the peer rpc-server started before the link reached READY, this
+	 * returned an error, and the whole world init failed with "world
+	 * communicator init failed; collectives will fall back to lazy init".
+	 */
+	*sendComm = NULL;
+
 	comm = calloc(1, sizeof(*comm));
 	if (!comm)
-		return rcclSystemError;
+		return rcclSystemError;   /* out of memory: genuinely fatal */
 
 	if (get_shared_handle(dev, &comm->handle) != rcclSuccess) {
+		/* Device not open or link not READY yet - transient. */
 		free(comm);
-		return rcclSystemError;
+		DBG(1, "connect dev=%d: device not ready, asking RCCL to retry", dev);
+		return rcclSuccess;
 	}
 
 	/* Local send stream (auto-assigned); target the peer's advertised id. */
 	if (odl_tb5_stream_open(comm->handle, 0, &sid) < 0) {
+		/* No stream available yet - transient. */
 		put_shared_handle();
 		free(comm);
-		return rcclSystemError;
+		DBG(1, "connect dev=%d: no stream available, asking RCCL to retry", dev);
+		return rcclSuccess;
 	}
 	comm->stream_id = sid;
 	comm->dst_id = peer_cid;
@@ -358,9 +382,13 @@ static rcclResult_t odl_tb5_accept(void *listenComm, void **recvComm,
 	if (recvDevComm)
 		*recvDevComm = NULL;
 
+	/* Same retry contract as connect(): NULL comm + rcclSuccess means
+	 * "not yet, call me again", not "failed". */
+	*recvComm = NULL;
+
 	comm = calloc(1, sizeof(*comm));
 	if (!comm)
-		return rcclSystemError;
+		return rcclSystemError;   /* out of memory: genuinely fatal */
 
 	/* Reuse the recv stream + handle ref already opened in listen(). */
 	comm->handle = lh->handle;
@@ -471,16 +499,32 @@ static void do_transfer(struct odl_tb5_comm *comm, struct odl_tb5_request *req)
 		if (ret < 0 || actual != sizeof(total)) {
 			req->failed = 1;
 		} else {
-			if ((int)total > req->size)
-				total = (uint32_t)req->size;
+			int overflow = total > (uint32_t)req->size;
+
+			/*
+			 * If the sender advertises more than the posted receive
+			 * can hold, consume every complete chunk into a scratch
+			 * buffer. Do not read a partial chunk into the caller's
+			 * buffer: stream_recv discards the uncopied part of that
+			 * individual message, so accounting it as still queued
+			 * would make the drain wait forever.
+			 *
+			 * The request still fails, but consuming all complete
+			 * chunks leaves the next length header aligned.
+			 */
+			char sink[ODL_CHUNK];
+
 			while (off < (int)total) {
 				int n = (int)total - off;
+
 				if (n > ODL_CHUNK)
 					n = ODL_CHUNK;
 				DBG(2, "  recv chunk sid=%u off=%d n=%d", comm->stream_id, off, n);
 				ret = odl_tb5_stream_recv(comm->handle,
 							  comm->stream_id,
-							  (char *)req->data + off,
+							  overflow
+							  ? sink
+							  : (char *)req->data + off,
 							  (uint32_t)n, &src_id,
 							  &actual);
 				if (ret < 0) {
@@ -491,6 +535,16 @@ static void do_transfer(struct odl_tb5_comm *comm, struct odl_tb5_request *req)
 				if (actual == 0)
 					break;
 			}
+			if (overflow) {
+				WARN("recv overflow on sid=%u: advertised=%u posted=%d, drained=%u - failing request%s",
+				     comm->stream_id, total, req->size,
+				     (unsigned int)off,
+				     off == (int)total
+				     ? " after restoring framing"
+				     : " with framing not restored");
+				req->failed = 1;
+			}
+
 			if (!req->failed)
 				stats_record_rx(off);
 		}
@@ -546,6 +600,21 @@ static void comm_stop_worker(struct odl_tb5_comm *comm)
 	comm->stop = 1;
 	pthread_cond_signal(&comm->q_cond);
 	pthread_mutex_unlock(&comm->q_lock);
+
+	/*
+	 * The worker may be parked inside a BLOCKING odl_tb5_stream_recv(),
+	 * where it cannot observe ->stop. Setting the flag and joining would
+	 * then hang forever whenever the peer disconnects or simply never
+	 * sends the header/chunk we are waiting for - which is exactly the
+	 * error-recovery path RCCL relies on. Close the stream first: the
+	 * pending recv fails, the worker unwinds, and the join completes.
+	 * Closing twice is harmless; the caller's close is now a no-op.
+	 */
+	if (comm->stream_id > 0) {
+		odl_tb5_stream_close(comm->handle, comm->stream_id);
+		comm->stream_id = 0;
+	}
+
 	pthread_join(comm->worker, NULL);
 	pthread_mutex_destroy(&comm->q_lock);
 	pthread_cond_destroy(&comm->q_cond);
@@ -593,9 +662,18 @@ static rcclResult_t odl_tb5_irecv(void *recvComm, int n, void **data,
 {
 	struct odl_tb5_comm *c = recvComm;
 	(void)tags; (void)mhandles;
-	/* maxRecvs=1: RCCL posts one buffer per recv. */
-	if (n < 1)
+	/*
+	 * getProperties advertises maxRecvs = 1, so RCCL should only ever pass
+	 * n == 1. Reject anything else rather than silently servicing element
+	 * zero and dropping the rest - that would look like a successful
+	 * transfer while losing the caller's data, which is the hardest class
+	 * of bug to find. Observed n has always been 1 in practice; this makes
+	 * the assumption enforced instead of implicit.
+	 */
+	if (n != 1) {
+		WARN("irecv called with n=%d but maxRecvs=1 - refusing", n);
 		return rcclInvalidArgument;
+	}
 	DBG(1, "irecv   POST comm=%p sid=%u n=%d size=%d", recvComm, c->stream_id, n, sizes[0]);
 	return start_request(recvComm, data[0], sizes[0], 0, request);
 }
@@ -639,7 +717,8 @@ static rcclResult_t odl_tb5_closeSend(void *sendComm)
 		return rcclSuccess;
 	DBG(1, "close   comm=%p sid=%u is_send=%d", (void *)comm, comm->stream_id, comm->is_send);
 	comm_stop_worker(comm);
-	odl_tb5_stream_close(comm->handle, comm->stream_id);
+	if (comm->stream_id > 0)   /* may already be closed by stop_worker */
+		odl_tb5_stream_close(comm->handle, comm->stream_id);
 	put_shared_handle();
 	free(comm);
 	return rcclSuccess;

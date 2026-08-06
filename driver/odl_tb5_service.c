@@ -38,18 +38,27 @@ MODULE_PARM_DESC(protocol,
 
 bool odl_e2e = true;
 module_param_named(e2e, odl_e2e, bool, 0444);
-MODULE_PARM_DESC(e2e,
-	"Enable end-to-end flow control (default=1). Set 0 for TB3 controllers "
-	"that do not support RING_FLAG_E2E.");
 
+/* upstream PR #21: bounded RX busy-poll before sleeping. The RX softirq
+ * increments rx_complete on another CPU, so a spinning reader sees it within
+ * cache-coherency latency and skips a ~10-15 us context-switch wake. */
 unsigned int odl_busy_poll_us = 0;
 module_param(odl_busy_poll_us, uint, 0644);
 MODULE_PARM_DESC(odl_busy_poll_us,
-	"Busy-poll up to N us for an RX completion before sleeping (default 0=off). "
-	"Trades a CPU core during the wait for lower context-switch/wake latency on "
-	"small (<= ~512B) latency-bound request/response traffic. Does NOT help "
-	">= 1KB messages (they hit the NHI hardware completion-visibility floor) or "
-	"pipelined RCCL/NCCL collectives (their receives rarely sleep).");
+	"Bounded RX busy-poll window in microseconds before sleeping (0 = off)");
+
+/* Bind at most N XDomain services (0 = unlimited).  With two Thunderbolt
+ * cables both peer services sit at route=2 (BUG 2) and the handshake cannot
+ * complete; unbinding one afterwards runs the full teardown path, so bind
+ * only one from the start instead. */
+int odl_max_devices = 0;
+module_param_named(max_devices, odl_max_devices, int, 0444);
+MODULE_PARM_DESC(max_devices,
+	"Bind at most N XDomain services (0 = unlimited; use 1 with two cables)");
+static atomic_t odl_bound_count = ATOMIC_INIT(0);
+MODULE_PARM_DESC(e2e,
+	"Enable end-to-end flow control (default=1). Set 0 for TB3 controllers "
+	"that do not support RING_FLAG_E2E.");
 
 /* Apple protocol uses its own property key and registers as an alternate
  * service so macOS ThunderboltRDMA can discover us via XDomain matching. */
@@ -71,6 +80,13 @@ MODULE_DEVICE_TABLE(tbsvc, odl_tb5_ids);
 static int odl_tb5_probe(struct tb_service *svc,
 			 const struct tb_service_id *id)
 {
+	if (odl_max_devices > 0 &&
+	    atomic_inc_return(&odl_bound_count) > odl_max_devices) {
+		atomic_dec(&odl_bound_count);
+		pr_info("odl_tb5: max_devices=%d reached, skipping service\n",
+			odl_max_devices);
+		return -ENODEV;
+	}
 	struct odl_tb5_device *dev;
 	int ret;
 
@@ -109,6 +125,9 @@ static int odl_tb5_probe(struct tb_service *svc,
 	mutex_init(&dev->stream_lock);
 	INIT_WORK(&dev->tx_drain_work, odl_tb5_tx_drain_work_fn);
 	atomic_set(&dev->rx_posted, 0);
+	/* rx_posted_min is a low-water mark: start high so the first real
+	 * value wins. The rest are plain counters and kzalloc zeroed them. */
+	atomic_set(&dev->rx_posted_min, INT_MAX);
 	dev->rx_target = 0;
 
 	atomic_set(&dev->removing, 0);
@@ -119,7 +138,8 @@ static int odl_tb5_probe(struct tb_service *svc,
 	/* Watermarks gate the shared frame pool (ODL_TB5_FRAME_POOL_SIZE
 	 * slots), NOT the NHI ring depth.  With large odl_ring_size the raw
 	 * ring*3/4 exceeds the pool, so the adaptive logic can never trip and
-	 * TX flow control is miscalibrated.  Clamp to the usable pool. */
+	 * TX flow control is miscalibrated.  Clamp to the usable pool.
+	 * (upstream PR #20) */
 	dev->tx_adaptive.high_watermark =
 		min_t(unsigned int, odl_ring_size * 3 / 4,
 		      ODL_TB5_FRAME_POOL_SIZE - ODL_TB5_TX_POOL_RESERVE);
@@ -173,6 +193,8 @@ err_rings:
 err_chardev:
 	odl_tb5_chardev_destroy(dev);
 err_free_dev:
+	if (odl_max_devices > 0)
+		atomic_dec(&odl_bound_count);
 	ida_free(&odl_tb5_ida, dev->index);
 	kfree(dev);
 	return ret;
@@ -223,17 +245,40 @@ static void odl_tb5_remove(struct tb_service *svc)
 	odl_tb5_dma_bufs_free(dev);
 	odl_tb5_rings_free(dev);
 
-	if (saved_state == ODL_TB5_STATE_CONNECTED ||
-	    saved_state == ODL_TB5_STATE_READY) {
+	/* BUG1 fix: release regardless of connection state.  The original code
+	 * released only from CONNECTED/READY, so removal during HANDSHAKE
+	 * (login retrying, peer gone, admin unbind) leaked the hop-ID until
+	 * enable_paths returned -ENOMEM on every later load.  Ordering is kept
+	 * exactly as upstream: this runs AFTER rings_stop()/bufs_free() above. */
+	if (dev->in_hopid_valid) {
 		tb_xdomain_disable_paths(dev->xd,
 					 dev->local_tx_hopid,
 					 dev->tx.ring ? dev->tx.ring->hop : -1,
-					 dev->remote_tx_hopid,
+					 dev->in_hopid,
 					 dev->rx.ring ? dev->rx.ring->hop : -1);
-		tb_xdomain_release_in_hopid(dev->xd, dev->remote_tx_hopid);
+		tb_xdomain_release_in_hopid(dev->xd, dev->in_hopid);
+		dev->in_hopid_valid = false;
 	}
 
 	odl_tb5_chardev_destroy(dev);
+
+	/*
+	 * Give the slot back. odl_tb5_probe() takes one from odl_bound_count
+	 * and the probe error path returns it, but this — the normal removal
+	 * path — did not. With max_devices=1 that leaks the only slot the
+	 * moment the peer goes away, so every later probe is rejected with
+	 * "max_devices reached, skipping service" and the link can never come
+	 * back on its own.
+	 *
+	 * Observed exactly that: peer restarted, this node logged "removed
+	 * device index 0", then refused the replacement service two seconds
+	 * later and sat printing "incoming packet route 2 — no matching
+	 * device" indefinitely. The only escape was reloading the module,
+	 * which on this hardware is the risky operation this leak forces you
+	 * into.
+	 */
+	if (odl_max_devices > 0)
+		atomic_dec(&odl_bound_count);
 
 	pr_info("odl_tb5: removed device index %d\n", dev->index);
 
@@ -418,6 +463,15 @@ static void __exit odl_tb5_exit(void)
 		tb_property_free_dir(odl_tb5_apple_property_dir);
 	}
 out:
+	/*
+	 * Streams are freed with kfree_rcu(), so a grace period may still be
+	 * outstanding here. kfree_rcu() is serviced by the core kernel rather
+	 * than by module text, so unloading cannot jump into freed code — but
+	 * waiting is cheap at unload and leaves nothing in flight against a
+	 * module that is going away.
+	 */
+	rcu_barrier();
+
 	odl_tb5_chardev_exit();
 	ida_destroy(&odl_tb5_ida);
 	pr_info("odl_tb5: OdinLink TB5 driver unloaded\n");

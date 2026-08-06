@@ -72,20 +72,70 @@ struct odl_tb5_stream_hdr {
 	__u8   src_id;
 	__u8   dst_id;
 	__u8   flags;
+	__u8   reserved;	/* pad: lands the payload 8-byte aligned */
 	__le16 payload_len;
+	__le16 frag_idx;	/* fragment index within the message, from 0 */
 } __packed;
 
 /* ── DMA frame pool (replaces old double-buffer scheme) ─────────────── */
 
-#define ODL_TB5_FRAME_POOL_SIZE		1024
-#define ODL_TB5_TX_POOL_RESERVE		64  /* keep free for RX repost */
-#define ODL_TB5_POLL_INTERVAL_NS	(10 * 1000)  /* 10 us */
+/*
+ * The frame pool is SHARED between TX and RX repost, so it must comfortably
+ * back the peer's pre-posted receive ring or bidirectional traffic starves RX
+ * and the NHI drops inbound frames in bursts.
+ *
+ * Sizing, for the ggml-rpc transport (the most demanding consumer here):
+ *   256 KiB message / 4024 B payload  = 66 frames per message
+ *   24 pre-posted receives            = 1587 frames of RX ring
+ * The old 1024-frame pool was smaller than the RX ring alone, and the 64-frame
+ * "reserve for RX" was less than a SINGLE message - so a busy sender routinely
+ * left nothing for repost. Observed as 32-fragment burst losses under
+ * bidirectional load.
+ *
+ * 4096 frames = 16 MiB per device; the reserve now guarantees the full RX ring
+ * can always be reposted no matter how hard TX is pushing. Pure memory: no
+ * extra work per frame, so the latency path is unaffected (and it removes
+ * stalls waiting for free frames).
+ */
+#define ODL_TB5_FRAME_POOL_SIZE		4096
+/*
+ * The reserve is a floor TX may not dig below, NOT the size of the RX ring.
+ * rx_target already claims pool/2 (2048) for posted receives, so setting the
+ * reserve to 2048 as well left free_count == reserve exactly and
+ * odl_tb5_stream_can_send() (free > reserve) was false forever - TX deadlocked
+ * with a healthy link. Keep it a small guard so RX repost can always obtain a
+ * few frames, while leaving TX ~1700 frames (~26 x 256 KiB messages) of room.
+ */
+#define ODL_TB5_TX_POOL_RESERVE		256  /* floor kept free for RX repost */
+/*
+ * Fallback poll interval for ring completions. NHI MSI-X fires, but the
+ * ring_work it schedules can run before the descriptor write-back lands, so
+ * this timer bounds how long a completion can sit unprocessed. It is the
+ * dominant term in end-to-end latency: the median-minus-min spread of the
+ * 22.4 us RTT is essentially this wait. 3 us keeps the tail close to the
+ * 13.6 us best case at a modest timer cost.
+ */
+#define ODL_TB5_POLL_INTERVAL_NS	(3 * 1000)   /* 3 us */
 
 /* ── SG batch buffer pool (throughput mode) ──────────────────────────── */
 
 #define ODL_TB5_BATCH_BUF_SIZE		(256 * 1024)
 #define ODL_TB5_BATCH_FRAMES		(ODL_TB5_BATCH_BUF_SIZE / ODL_TB5_FRAME_SIZE)
-#define ODL_TB5_BATCH_BUF_COUNT		8
+/*
+ * One buffer is consumed per in-flight throughput-mode message, whatever its
+ * size, and it is returned only once every one of its TX descriptors has run
+ * its completion callback. So this count IS the hardware staging window: a
+ * sender that posts N messages before reaping completions blocks on buffer
+ * N+1 (5-second wait_event in odl_tb5_stream_send_throughput).
+ *
+ * ds4's bulk prefill round posts DS4_TP_RDMA_BULK_SLOTS=32 linked 128 KiB
+ * sends before polling its CQ, so at 8 buffers messages 9..32 of EVERY round
+ * queued behind that wait - 4x oversubscribed unconditionally, which turned
+ * any transient peer-side RX slowdown into a hard multi-minute stall
+ * ("throughput TX stalled waiting for batch buf (free=0 ...)"). Match the
+ * window to that consumer's depth. 32 x 256 KiB = 8 MiB per device.
+ */
+#define ODL_TB5_BATCH_BUF_COUNT		32
 #define ODL_TB5_THROUGHPUT_THRESH	65536	/* bytes: msg > 64KB → throughput */
 #define ODL_TB5_MODE_HYSTERESIS		4	/* consecutive low polls to downshift */
 
@@ -183,9 +233,22 @@ struct odl_tb5_stream {
 	size_t			rx_asm_len;
 	size_t			rx_asm_cap;
 	u8			rx_asm_src_id;
+	u16			rx_asm_next_frag;
+	bool			rx_asm_bad;
+	atomic_t		rx_frag_drops;
+
+	/* Set once, before waking every waiter, when the stream is being torn
+	 * down. Waiters must test this or they sleep on a stream that no longer
+	 * exists — closing a stream is how consumers cancel a blocking receive
+	 * (the RCCL plugin closes then joins its worker). */
+	bool			dying;
 
 	struct kref		refcount;
 	struct hlist_node	node;
+
+	/* The stream is looked up under RCU, so the object must outlive any
+	 * reader still walking the hash chain. Freed via kfree_rcu(). */
+	struct rcu_head		rcu;
 };
 
 /* ── Per-fd context (crash-safe auto-cleanup) ────────────────────────── */
@@ -245,6 +308,11 @@ struct odl_tb5_device {
 	bool			login_sent;
 	bool			login_received;
 	int			stale_remote_tx_hopid;
+	/* BUG1 fix: authoritative record of the hop-ID actually allocated by
+	 * tb_xdomain_alloc_in_hopid(), so every teardown path can release it
+	 * regardless of connection state. */
+	bool			in_hopid_valid;
+	int			in_hopid;
 
 	/* DMA verification (ping/pong) */
 	struct work_struct	verify_work;
@@ -252,6 +320,12 @@ struct odl_tb5_device {
 	struct hrtimer		rx_poll_timer;
 	wait_queue_head_t	verify_waitq;
 	bool			pong_received;
+	/* Set when we answer a peer PING. Unlike pong_received this is NOT
+	 * cleared by verify_work, because the peer's ping can arrive BEFORE
+	 * our own verify starts -- clearing it there loses the proof and the
+	 * verify then times out with the link perfectly healthy. Reset only
+	 * when a new connection begins. */
+	bool			peer_ping_answered;
 	int			verify_rx_type;
 
 	/* Connection state */
@@ -298,6 +372,37 @@ struct odl_tb5_device {
 
 	/* RX repost tracking */
 	atomic_t		rx_posted;
+
+	/*
+	 * RX diagnostics. The receive callback used to validate only
+	 * frame->size, so a frame the NHI had already flagged as bad was
+	 * consumed as if it were good — and, worse, frames that never arrived
+	 * left no trace anywhere. These count what was previously discarded in
+	 * silence. They are reported alongside the fragment-gap warning, so a
+	 * gap and its possible cause appear in the same log line.
+	 */
+	atomic_t		rx_err_crc;        /* NHI reported a CRC failure   */
+	atomic_t		rx_err_overrun;    /* NHI reported buffer overrun  */
+	atomic_t		rx_canceled;       /* ring teardown reclaimed it   */
+	atomic_t		rx_err_short;      /* smaller than a stream header */
+	atomic_t		rx_err_len;        /* payload_len exceeds the frame*/
+	atomic_t		rx_frames_ok;      /* accepted, for a denominator  */
+
+	/*
+	 * RX repost starvation. odl_tb5_rx_repost() gives up silently when the
+	 * shared frame pool has nothing left, leaving the receive ring short.
+	 * Frames that then arrive with no posted buffer are dropped by the NHI
+	 * itself — with no CRC or overrun flag, because nothing was wrong with
+	 * them. That is invisible at every layer, and it is the leading
+	 * candidate for the duplex fragment loss.
+	 *
+	 * This has bitten before: the pool sizing comment above records
+	 * "32-fragment burst losses under bidirectional load" from exactly this
+	 * cause. rx_posted_min is a low-water mark, initialised to INT_MAX.
+	 */
+	atomic_t		rx_repost_starved; /* repost gave up: pool empty   */
+	atomic_t		rx_repost_short;   /* worst shortfall vs rx_target */
+	atomic_t		rx_posted_min;     /* low-water mark of rx_posted  */
 	int			rx_target;
 
 	struct list_head	list;

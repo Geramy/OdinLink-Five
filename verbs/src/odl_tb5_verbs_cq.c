@@ -1,3 +1,5 @@
+#include <fcntl.h>
+#include <stdbool.h>
 /*
  * OdinLink — Verbs: Completion Queues (Where Finished Ops Are Reported)
  *
@@ -35,8 +37,33 @@ struct ibv_cq *odl_create_cq(struct ibv_context *context, int cqe,
     cq->ctx = ctx;
     pthread_mutex_init(&cq->lock, NULL);
 
+    /* One slot is always sacrificed to distinguish full from empty, so
+     * allocate cqe+1 to make the ADVERTISED depth actually usable. */
+    cq->ring_cap = cq->base.cqe + 1;
+    if (cq->ring_cap < ODL_VERBS_COMP_CHANNEL_BACKLOG)
+        cq->ring_cap = ODL_VERBS_COMP_CHANNEL_BACKLOG;
+    if (cq->ring_cap > ODL_VERBS_COMP_CHANNEL_MAX)
+        cq->ring_cap = ODL_VERBS_COMP_CHANNEL_MAX;
+    cq->ring = calloc((size_t)cq->ring_cap, sizeof(*cq->ring));
+    if (!cq->ring) {
+        pthread_mutex_destroy(&cq->lock);
+        free(cq);
+        errno = ENOMEM;
+        return NULL;
+    }
+    /* Report what we can actually hold, so a consumer that reads back cqe is
+     * not lied to. */
+    cq->base.cqe = cq->ring_cap - 1;
+
     /* Create eventfd for async notification */
     cq->eventfd_fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (cq->eventfd_fd >= 0) {
+        /* Belt and braces: ibv_poll_cq must never block, so guarantee the
+         * flag rather than trusting it (BUG19). */
+        int fl = fcntl(cq->eventfd_fd, F_GETFL, 0);
+        if (fl >= 0 && !(fl & O_NONBLOCK))
+            fcntl(cq->eventfd_fd, F_SETFL, fl | O_NONBLOCK);
+    }
     if (cq->eventfd_fd < 0) {
         odl_logerr("eventfd failed: %s", strerror(errno));
         pthread_mutex_destroy(&cq->lock);
@@ -86,6 +113,7 @@ int odl_destroy_cq(struct ibv_cq *cq)
 
     if (ocq->eventfd_fd >= 0) close(ocq->eventfd_fd);
     pthread_mutex_destroy(&ocq->lock);
+    free(ocq->ring);
     free(ocq);
 
     ODL_TRACE_EXIT_VAL(0);
@@ -96,21 +124,49 @@ int odl_poll_cq(struct ibv_cq *cq, int num_entries, struct ibv_wc *wc)
     struct odl_verbs_cq *ocq = odl_cq_from_ibv(cq);
     int polled = 0;
 
+    /*
+     * Deliberately does NOT drain the receive queue. Draining from here
+     * deadlocks: two threads polling different CQs both enter odl_rq_drain,
+     * which posts completions into the *other* CQ, so they acquire the two
+     * locks in opposite orders (ABBA). Reproduced with odl_rdma_stress
+     * --bidir. Receive progress is owned by the QP's dedicated RX thread, so
+     * it is independent of who is polling what.
+     */
     pthread_mutex_lock(&ocq->lock);
 
     while (polled < num_entries && ocq->head != ocq->tail) {
         wc[polled] = ocq->ring[ocq->head];
-        ocq->head = (ocq->head + 1) % ODL_VERBS_COMP_CHANNEL_BACKLOG;
+        ocq->head = (ocq->head + 1) % ocq->ring_cap;
         polled++;
     }
 
-    /* Clear eventfd if we drained the ring */
-    if (ocq->head == ocq->tail) {
-        eventfd_t val;
-        eventfd_read(ocq->eventfd_fd, &val);
-    }
+    bool drained = (ocq->head == ocq->tail);
 
     pthread_mutex_unlock(&ocq->lock);
+
+    /*
+     * BUG19: this eventfd drain used to run INSIDE the mutex with a plain
+     * eventfd_read(). ibv_poll_cq() must never block -- consumers busy-poll
+     * it -- but when the ring was empty the read blocked on a zero counter
+     * while still holding ocq->lock, and odl_cq_post() needs that same lock
+     * to deliver a completion. The only thread that could wake the poller was
+     * therefore locked out of doing so: a self-deadlock that froze the first
+     * bulk transfer.
+     *
+     * Drain outside the lock, and force O_NONBLOCK on the fd rather than
+     * trusting the creation flags, so an empty CQ can only ever return 0.
+     */
+    /*
+     * Only touch the eventfd when we actually consumed completions and
+     * emptied the ring. On an empty CQ -- the overwhelmingly common case in a
+     * busy-poll loop -- do nothing: two syscalls per poll iteration would
+     * dominate the transfer.
+     */
+    if (polled > 0 && drained && ocq->eventfd_fd >= 0) {
+        eventfd_t val;
+        (void)eventfd_read(ocq->eventfd_fd, &val);   /* EAGAIN when empty */
+    }
+
     return polled;
 }
 
@@ -137,7 +193,7 @@ int odl_cq_post(struct odl_verbs_cq *cq, struct ibv_wc *wc)
 {
     pthread_mutex_lock(&cq->lock);
 
-    int next = (cq->tail + 1) % ODL_VERBS_COMP_CHANNEL_BACKLOG;
+    int next = (cq->tail + 1) % cq->ring_cap;
     if (next == cq->head) {
         /* CQ full — drop completion */
         odl_logerr("CQ %p ring full! dropping completion", (void*)cq);

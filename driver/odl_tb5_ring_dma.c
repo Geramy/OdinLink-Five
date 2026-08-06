@@ -31,12 +31,13 @@ static void odl_tb5_stream_free(struct kref *ref);
 
 /*
  * High-resolution fallback poll timer — kicks both TX and RX ring_work
- * every 50 us.
+ * every ODL_TB5_POLL_INTERVAL_NS (the comment previously said 50 us; the
+ * constant has always been much smaller).
  *
  * NHI MSI-X interrupts DO fire, but ring_work triggered by the ISR
  * sometimes doesn't see completions yet (descriptor write-back delay).
- * This timer ensures completions are processed within ~50 us instead of
- * waiting for the next jiffy tick.
+ * This timer ensures completions are processed within one poll interval
+ * instead of waiting for the next jiffy tick.
  *
  * schedule_work is idempotent, so ISR-driven and timer-driven kicks
  * are safely additive.
@@ -226,9 +227,43 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 			atomic_dec(&dev->rx_posted);
 
 			if (canceled) {
+				atomic_inc(&dev->rx_canceled);
 				odl_tb5_frame_pool_put(&dev->frame_pool, slot);
 				return;
 			}
+
+			/*
+			 * The NHI tells us when a frame is bad. Until now
+			 * nothing here looked. A CRC failure or a buffer
+			 * overrun means the payload cannot be trusted, and
+			 * accepting it hands corruption straight to the
+			 * consumer — while dropping it without a counter is
+			 * why missing frames have been impossible to
+			 * attribute.
+			 *
+			 * Count, warn once in a while, and drop. Do not
+			 * rate-limit away the only evidence: the counters are
+			 * exact, only the printing is throttled.
+			 */
+			if (frame->flags & RING_DESC_CRC_ERROR) {
+				atomic_inc(&dev->rx_err_crc);
+				pr_warn_ratelimited("odl_tb5: RX CRC error (size=%u flags=0x%x) - frame dropped, total=%d\n",
+						    frame->size, frame->flags,
+						    atomic_read(&dev->rx_err_crc));
+				odl_tb5_frame_pool_put(&dev->frame_pool, slot);
+				return;
+			}
+
+			if (frame->flags & RING_DESC_BUFFER_OVERRUN) {
+				atomic_inc(&dev->rx_err_overrun);
+				pr_warn_ratelimited("odl_tb5: RX buffer overrun (size=%u flags=0x%x) - frame dropped, total=%d\n",
+						    frame->size, frame->flags,
+						    atomic_read(&dev->rx_err_overrun));
+				odl_tb5_frame_pool_put(&dev->frame_pool, slot);
+				return;
+			}
+
+			atomic_inc(&dev->rx_frames_ok);
 
 			/* First check for raw DMA control message
 			 * (no stream header — used during verify). */
@@ -270,6 +305,8 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 							data + ODL_TB5_STREAM_HDR_SIZE;
 						u8 flags = shdr->flags;
 
+						u16 fidx = le16_to_cpu(shdr->frag_idx);
+
 						/* Start of new message — reset assembly */
 						if (flags & ODL_TB5_SHDR_F_MSG_START) {
 							kfree(stream->rx_asm_buf);
@@ -277,7 +314,45 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 							stream->rx_asm_len = 0;
 							stream->rx_asm_cap = 0;
 							stream->rx_asm_src_id = shdr->src_id;
+							stream->rx_asm_next_frag = 0;
+							stream->rx_asm_bad = false;
 						}
+
+						/*
+						 * Fragment sequencing: one compare, no
+						 * round-trips, so the latency path is
+						 * untouched (a SINGLE frame is always
+						 * fidx 0 and trivially valid). Without
+						 * this a dropped frame was invisible and
+						 * silently produced a short, corrupt
+						 * message. On a gap, poison the message
+						 * and drop it at MSG_END rather than
+						 * handing up bad data.
+						 */
+						if (fidx != stream->rx_asm_next_frag) {
+							if (!stream->rx_asm_bad)
+								/*
+								 * Report the NHI error counters with the gap.
+								 * If the missing frames were dropped by
+								 * hardware, crc/ovr moved too and the cause is
+								 * settled in one line. If every counter is
+								 * zero, the frames were lost somewhere this
+								 * driver can see, and the search moves inward.
+								 */
+								pr_warn_ratelimited("odl_tb5: stream %u fragment gap: got %u expected %u (lost %u) - dropping message; rx crc=%d ovr=%d cancel=%d short=%d len=%d ok=%d\n",
+										    dst_id, fidx,
+										    stream->rx_asm_next_frag,
+										    fidx - stream->rx_asm_next_frag,
+										    atomic_read(&dev->rx_err_crc),
+										    atomic_read(&dev->rx_err_overrun),
+										    atomic_read(&dev->rx_canceled),
+										    atomic_read(&dev->rx_err_short),
+										    atomic_read(&dev->rx_err_len),
+										    atomic_read(&dev->rx_frames_ok));
+							stream->rx_asm_bad = true;
+							atomic_inc(&stream->rx_frag_drops);
+						}
+						stream->rx_asm_next_frag = fidx + 1;
 
 						/* Append payload to assembly buffer */
 						if (stream->rx_asm_len + payload_len >
@@ -289,6 +364,9 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 								    payload_len));
 							void *nb = kmalloc(new_cap,
 									   GFP_ATOMIC);
+							if (!nb)
+								pr_warn_ratelimited("odl_tb5: rx_asm kmalloc(%zu, GFP_ATOMIC) FAILED - payload will be dropped\n",
+										    new_cap);
 							if (nb) {
 								if (stream->rx_asm_buf)
 									memcpy(nb,
@@ -306,12 +384,29 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 							       stream->rx_asm_len,
 							       payload, payload_len);
 							stream->rx_asm_len += payload_len;
+						} else {
+							pr_warn_ratelimited("odl_tb5: rx_asm DROP payload_len=%u asm_len=%zu cap=%zu buf=%p\n",
+									    payload_len,
+									    stream->rx_asm_len,
+									    stream->rx_asm_cap,
+									    stream->rx_asm_buf);
 						}
 
 						/* End of message — enqueue complete msg */
 						if (flags & ODL_TB5_SHDR_F_MSG_END) {
 							struct odl_tb5_rx_msg *rxm;
 							unsigned long rxflags;
+
+							if (stream->rx_asm_bad) {
+								/* Incomplete: never deliver it. */
+								kfree(stream->rx_asm_buf);
+								stream->rx_asm_buf = NULL;
+								stream->rx_asm_len = 0;
+								stream->rx_asm_cap = 0;
+								stream->rx_asm_bad = false;
+								stream->rx_asm_next_frag = 0;
+								goto rx_frame_done;
+							}
 
 							rxm = kzalloc(sizeof(*rxm),
 								      GFP_ATOMIC);
@@ -361,6 +456,7 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 							}
 						}
 
+rx_frame_done:
 						kref_put(&stream->refcount,
 							 odl_tb5_stream_free);
 					}
@@ -1296,7 +1392,20 @@ static void odl_tb5_stream_free(struct kref *ref)
 	}
 
 	kfree(stream->rx_asm_buf);
-	kfree(stream);
+
+	/*
+	 * NOT kfree(). odl_tb5_stream_lookup() walks the stream hash inside
+	 * rcu_read_lock() and dereferences the object (stream->id, and the
+	 * refcount itself) *before* kref_get_unless_zero() can tell it the
+	 * stream is dead. kref_get_unless_zero() stops a dead refcount being
+	 * resurrected; it does nothing to stop the memory being freed under a
+	 * reader that is mid-walk. Removing with hash_del_rcu() and then
+	 * freeing immediately is a use-after-free.
+	 *
+	 * kfree_rcu() holds the allocation until every reader that could still
+	 * be walking the chain has left, which is what hash_del_rcu() promised.
+	 */
+	kfree_rcu(stream, rcu);
 }
 
 struct odl_tb5_stream *odl_tb5_stream_create(struct odl_tb5_device *dev,
@@ -1344,10 +1453,13 @@ struct odl_tb5_stream *odl_tb5_stream_create(struct odl_tb5_device *dev,
 	INIT_LIST_HEAD(&stream->rx_queue);
 	spin_lock_init(&stream->rx_lock);
 	stream->rx_queue_len = 0;
-	stream->rx_queue_max = 65536;   /* was 256: a single ~1MB msg = ~264 frames;
-					 * under load the sender runs >256 frames ahead
-					 * and the old cap silently DROPPED frames ->
-					 * plugin framing desync -> vLLM hang. */
+	/* A single ~1 MiB message needs about 264 frames. The old limit of
+	 * 256 silently dropped frames when a busy receiver fell behind,
+	 * desynchronizing the transport and hanging its consumer. */
+	stream->rx_queue_max = 65536;
+	stream->rx_asm_next_frag = 0;
+	stream->rx_asm_bad = false;
+	atomic_set(&stream->rx_frag_drops, 0);
 	atomic_set(&stream->rx_complete, 0);
 	init_waitqueue_head(&stream->rx_waitq);
 
@@ -1382,6 +1494,14 @@ void odl_tb5_stream_destroy(struct odl_tb5_stream *stream)
 
 	pr_info("odl_tb5: stream %u destroying\n", stream->id);
 
+	/*
+	 * Order matters. Publish the shutdown state first, then unpublish the
+	 * stream so no new waiter can find it, then release everyone already
+	 * waiting. A waiter that evaluates its condition after this store
+	 * returns immediately instead of sleeping on a dead stream.
+	 */
+	WRITE_ONCE(stream->dying, true);
+
 	mutex_lock(&dev->stream_lock);
 
 	hash_del_rcu(&stream->node);
@@ -1392,6 +1512,16 @@ void odl_tb5_stream_destroy(struct odl_tb5_stream *stream)
 		list_del(&stream->owner_list);
 		spin_unlock(&stream->owner->lock);
 	}
+
+	/*
+	 * Without this, a thread parked in a blocking receive is never released:
+	 * the only other wake site is data arrival, and no data is coming. The
+	 * caller then blocks forever joining it. Closing the fd does not help
+	 * either — release() cannot run while a thread is inside an ioctl on
+	 * that fd, so the stream is not even destroyed until the process exits.
+	 */
+	wake_up_interruptible_all(&stream->rx_waitq);
+	wake_up_interruptible_all(&stream->tx_waitq);
 
 	ida_free(&dev->stream_ida, stream->id);
 	kref_put(&stream->refcount, odl_tb5_stream_free);
@@ -1411,6 +1541,8 @@ void odl_tb5_streams_destroy_all(struct odl_tb5_device *dev)
 	mutex_lock(&dev->stream_lock);
 	hash_for_each_safe(dev->streams, bkt, tmp, stream, node) {
 
+		WRITE_ONCE(stream->dying, true);
+
 		hash_del_rcu(&stream->node);
 
 		if (stream->owner) {
@@ -1418,6 +1550,12 @@ void odl_tb5_streams_destroy_all(struct odl_tb5_device *dev)
 			list_del(&stream->owner_list);
 			spin_unlock(&stream->owner->lock);
 		}
+
+		/* Same reasoning as odl_tb5_stream_destroy(): device teardown
+		 * must not leave a caller blocked on a stream it just removed. */
+		wake_up_interruptible_all(&stream->rx_waitq);
+		wake_up_interruptible_all(&stream->tx_waitq);
+
 		ida_free(&dev->stream_ida, stream->id);
 		kref_put(&stream->refcount, odl_tb5_stream_free);
 	}
@@ -1515,6 +1653,7 @@ static int odl_tb5_stream_send_latency(struct odl_tb5_stream *stream,
 					const void __user *data,
 					size_t len)
 {
+	u16 frag_idx = 0;
 	struct odl_tb5_device *dev = stream->dev;
 	struct odl_tb5_frame_pool *pool = &dev->frame_pool;
 	struct odl_tb5_tx_msg *msg;
@@ -1560,6 +1699,8 @@ static int odl_tb5_stream_send_latency(struct odl_tb5_stream *stream,
 		hdr = slot->virt;
 		hdr->src_id = stream->id;
 		hdr->dst_id = dst_id;
+		hdr->reserved = 0;
+		hdr->frag_idx = cpu_to_le16(frag_idx++);
 		if (first && last)
 			hdr->flags = ODL_TB5_SHDR_F_SINGLE;
 		else if (first)
@@ -1624,6 +1765,7 @@ static int odl_tb5_stream_send_throughput(struct odl_tb5_stream *stream,
 					   const void __user *data,
 					   size_t len)
 {
+	u16 frag_idx = 0;
 	struct odl_tb5_device *dev = stream->dev;
 	struct odl_tb5_batch_pool *bpool = &dev->batch_pool;
 	struct odl_tb5_tx_msg *msg;
@@ -1656,6 +1798,9 @@ static int odl_tb5_stream_send_throughput(struct odl_tb5_stream *stream,
 			bpool->free_count > 0,
 			msecs_to_jiffies(5000));
 		if (ret <= 0) {
+			pr_warn_ratelimited("odl_tb5: throughput TX stalled waiting for batch buf (free=%d ret=%ld sent=%zu/%zu)\n",
+					    bpool->free_count, ret,
+					    total_sent, len);
 			if (ret == 0)
 				ret = -ETIMEDOUT;
 			goto wait_pending;
@@ -1688,6 +1833,8 @@ static int odl_tb5_stream_send_throughput(struct odl_tb5_stream *stream,
 			/* Stream header */
 			hdr->src_id = stream->id;
 			hdr->dst_id = dst_id;
+			hdr->reserved = 0;
+			hdr->frag_idx = cpu_to_le16(frag_idx++);
 			if (first && last)
 				hdr->flags = ODL_TB5_SHDR_F_SINGLE;
 			else if (first)
@@ -1768,14 +1915,44 @@ wait_pending:
  * Non-blocking availability checks (for poll/epoll + async ioctl).
  * Returns true if a send/recv would not block.
  */
+extern unsigned int odl_busy_poll_us;
+
+/* Optional bounded busy-poll for an RX completion before sleeping.  The RX
+ * softirq (odl_tb5_rx_callback) increments rx_complete on another CPU, so a
+ * spinning reader sees it within cache-coherency latency and skips the
+ * context-switch wake (~10-15 us on this box).  Bounded + falls back to
+ * wait_event, so it never hangs.  Off unless odl_busy_poll_us > 0.
+ * (upstream PR #21) */
+static inline void odl_tb5_rx_busy_poll(struct odl_tb5_stream *stream)
+{
+	ktime_t deadline;
+
+	if (!odl_busy_poll_us || atomic_read(&stream->rx_complete) > 0)
+		return;
+	deadline = ktime_add_ns(ktime_get(), (u64)odl_busy_poll_us * 1000);
+	while (atomic_read(&stream->rx_complete) == 0) {
+		if (ktime_after(ktime_get(), deadline))
+			break;
+		cpu_relax();
+	}
+}
+
 bool odl_tb5_stream_can_send(struct odl_tb5_stream *stream)
 {
 	struct odl_tb5_device *dev = stream->dev;
 	struct odl_tb5_frame_pool *pool = &dev->frame_pool;
+	bool ok;
 
 	/* Can send if we have frames available and state is ready */
-	return dev->state == ODL_TB5_STATE_READY &&
-	       pool && pool->free_count > ODL_TB5_TX_POOL_RESERVE;
+	ok = dev->state == ODL_TB5_STATE_READY &&
+	     pool && pool->free_count > ODL_TB5_TX_POOL_RESERVE;
+
+	if (!ok)
+		pr_info_ratelimited("odl_tb5: can_send=0 state=%d free=%d reserve=%d rx_target=%d rx_posted=%d\n",
+				    dev->state, pool ? pool->free_count : -1,
+				    ODL_TB5_TX_POOL_RESERVE, dev->rx_target,
+				    atomic_read(&dev->rx_posted));
+	return ok;
 }
 
 bool odl_tb5_stream_can_recv(struct odl_tb5_stream *stream)
@@ -1795,6 +1972,7 @@ int odl_tb5_stream_send(struct odl_tb5_stream *stream,
 {
 	struct odl_tb5_device *dev = stream->dev;
 	enum odl_tb5_tx_mode mode;
+
 
 	if (dev->state != ODL_TB5_STATE_READY)
 		return -ENOTCONN;
@@ -1917,25 +2095,6 @@ int odl_tb5_stream_wait_tx(struct odl_tb5_stream *stream, u32 timeout_ms)
  * Stream RX Path
  * ══════════════════════════════════════════════════════════════════════ */
 
-/* Optional bounded busy-poll for an RX completion before sleeping.  The RX
- * softirq (odl_tb5_rx_callback) increments rx_complete on another CPU, so a
- * spinning reader sees it within cache-coherency latency and skips the
- * context-switch wake (~10-15 us on this box).  Bounded + falls back to
- * wait_event, so it never hangs.  Off unless odl_busy_poll_us > 0. */
-static inline void odl_tb5_rx_busy_poll(struct odl_tb5_stream *stream)
-{
-	ktime_t deadline;
-
-	if (!odl_busy_poll_us || atomic_read(&stream->rx_complete) > 0)
-		return;
-	deadline = ktime_add_ns(ktime_get(), (u64)odl_busy_poll_us * 1000);
-	while (atomic_read(&stream->rx_complete) == 0) {
-		if (ktime_after(ktime_get(), deadline))
-			break;
-		cpu_relax();
-	}
-}
-
 int odl_tb5_stream_recv(struct odl_tb5_stream *stream,
 			void __user *buf, size_t buf_len,
 			u8 *src_id, u32 *actual_len)
@@ -1944,12 +2103,18 @@ int odl_tb5_stream_recv(struct odl_tb5_stream *stream,
 	unsigned long flags;
 	int ret = 0;
 
-	/* Wait for a complete assembled message */
+	/* Wait for a complete assembled message, or for teardown. Testing
+	 * ->dying is what makes closing a stream able to cancel a blocked
+	 * receive; report it distinctly so the caller can tell "shutting down"
+	 * apart from "spurious wake, queue empty" (-EAGAIN below). */
 	odl_tb5_rx_busy_poll(stream);
 	ret = wait_event_interruptible(stream->rx_waitq,
-		atomic_read(&stream->rx_complete) > 0);
+		atomic_read(&stream->rx_complete) > 0 ||
+		READ_ONCE(stream->dying));
 	if (ret)
 		return -EINTR;
+	if (READ_ONCE(stream->dying) && atomic_read(&stream->rx_complete) <= 0)
+		return -ESHUTDOWN;
 
 	/* Dequeue one complete message */
 	spin_lock_irqsave(&stream->rx_lock, flags);
@@ -1981,18 +2146,28 @@ int odl_tb5_stream_wait_rx(struct odl_tb5_stream *stream, u32 timeout_ms)
 	long ret;
 
 	odl_tb5_rx_busy_poll(stream);
+
 	if (timeout_ms == 0) {
 		ret = wait_event_interruptible(stream->rx_waitq,
-			atomic_read(&stream->rx_complete) > 0);
+			atomic_read(&stream->rx_complete) > 0 ||
+			READ_ONCE(stream->dying));
 	} else {
 		ret = wait_event_interruptible_timeout(stream->rx_waitq,
-			atomic_read(&stream->rx_complete) > 0,
+			atomic_read(&stream->rx_complete) > 0 ||
+			READ_ONCE(stream->dying),
 			msecs_to_jiffies(timeout_ms));
 		if (ret == 0)
 			return -ETIMEDOUT;
 	}
 
-	return ret < 0 ? -EINTR : 0;
+	if (ret < 0)
+		return -EINTR;
+
+	/* Woken by teardown rather than by data. */
+	if (READ_ONCE(stream->dying) && atomic_read(&stream->rx_complete) <= 0)
+		return -ESHUTDOWN;
+
+	return 0;
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -2008,8 +2183,24 @@ void odl_tb5_rx_repost(struct odl_tb5_device *dev)
 		struct odl_tb5_frame_slot *slot;
 
 		slot = odl_tb5_frame_pool_get(&dev->frame_pool);
-		if (!slot)
+		if (!slot) {
+			/*
+			 * Pool exhausted: the receive ring stays short of
+			 * rx_target and inbound frames will be dropped by the
+			 * NHI with no error flag set. Record it — this used to
+			 * be a bare break, which is why the loss had no
+			 * fingerprint.
+			 */
+			int shortfall = target - posted;
+
+			atomic_inc(&dev->rx_repost_starved);
+			if (shortfall > atomic_read(&dev->rx_repost_short))
+				atomic_set(&dev->rx_repost_short, shortfall);
+			pr_warn_ratelimited("odl_tb5: RX repost starved: posted=%d target=%d short=%d pool_free=%d (frames will be dropped unflagged)\n",
+					    posted, target, shortfall,
+					    dev->frame_pool.free_count);
 			break;
+		}
 
 		slot->frame.buffer_phy = slot->phys;
 		slot->frame.size = 0; /* NHI fills this on RX completion */
@@ -2025,4 +2216,9 @@ void odl_tb5_rx_repost(struct odl_tb5_device *dev)
 		atomic_inc(&dev->rx_posted);
 		posted++;
 	}
+
+	/* Low-water mark, so a transient dip that never fully starves is still
+	 * visible after the fact. */
+	if (posted < atomic_read(&dev->rx_posted_min))
+		atomic_set(&dev->rx_posted_min, posted);
 }

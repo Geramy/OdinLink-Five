@@ -54,10 +54,10 @@ static int odl_compat_query_device(struct ibv_context *context,
     memset(attr, 0, sizeof(*attr));
     attr->phys_port_cnt    = 1;
     attr->max_qp           = ODL_VERBS_MAX_QPS;
-    attr->max_qp_wr        = ODL_VERBS_SQ_DEPTH;
+    attr->max_qp_wr        = ODL_VERBS_SQ_DEPTH_MAX;
     attr->max_sge          = 1;
     attr->max_cq           = ODL_VERBS_MAX_CQS;
-    attr->max_cqe          = ODL_VERBS_COMP_CHANNEL_BACKLOG;
+    attr->max_cqe          = ODL_VERBS_COMP_CHANNEL_MAX - 1;
     attr->max_mr           = ODL_VERBS_MAX_MRS;
     attr->max_pd           = ODL_VERBS_MAX_PDS;
     attr->max_mr_size      = SIZE_MAX;

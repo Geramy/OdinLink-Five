@@ -507,9 +507,19 @@ static __poll_t odl_tb5_poll(struct file *filp, poll_table *wait)
 	if (atomic_read(&dev->rx.completed) > 0)
 		mask |= EPOLLIN | EPOLLRDNORM;
 
-	/* Writable if TX has room (completed tx < submitted tx means
-	 * some TX completions have drained) */
-	if (atomic_read(&dev->tx.completed) > 0)
+	/*
+	 * BUG17: this used to require atomic_read(&dev->tx.completed) > 0,
+	 * i.e. "writable only once a previous TX has completed" -- a
+	 * chicken-and-egg that is never true before the first send. Every
+	 * non-blocking sender therefore burned the full poll timeout (5 s)
+	 * per message: traffic still flowed, but at ~0.2 messages/second.
+	 *
+	 * POLLOUT must mean "a send would succeed now", which is exactly the
+	 * condition odl_tb5_stream_can_send() applies.
+	 */
+	if (dev->state == ODL_TB5_STATE_READY &&
+	    dev->frame_pool.slots &&
+	    dev->frame_pool.free_count > ODL_TB5_TX_POOL_RESERVE)
 		mask |= EPOLLOUT | EPOLLWRNORM;
 
 	/* Per-stream readability: check if any stream has pending RX */

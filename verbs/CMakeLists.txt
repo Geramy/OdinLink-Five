@@ -50,6 +50,7 @@ set(VERBS_LIBS
 
 add_library(odl_tb5_verbs SHARED
     ${VERBS_CORE_SOURCES}
+    src/odl_tb5_verbs_discovery.c
     src/odl_tb5_verbs_main.c
 )
 
