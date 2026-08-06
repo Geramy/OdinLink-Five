@@ -117,6 +117,7 @@ struct apple_intr_state {
 struct apple_priv {
 	struct platform_device	*pdev;
 	void __iomem		*mmio;
+	resource_size_t		mmio_size;
 	struct device		*dma_dev;
 	int			irq;
 	int			local_tx_hopid;
@@ -141,9 +142,27 @@ static inline struct apple_priv *apple_priv(struct odl_tb5_device *dev)
 
 /* ── MMIO helpers ───────────────────────────────────────────────────── */
 
+/*
+ * Register offsets are built from device-tree layout properties and hop IDs
+ * (base + hopid * stride), so a device tree describing more hops than the
+ * mapping covers would otherwise walk straight off the end of the ioremap.
+ */
+static inline bool apple_reg_ok(struct apple_priv *priv, u32 offset)
+{
+	if (offset + sizeof(u32) <= priv->mmio_size)
+		return true;
+
+	WARN_ONCE(1, "odl_tb5 apple: register offset 0x%x outside the %pa MMIO mapping\n",
+		  offset, &priv->mmio_size);
+	return false;
+}
+
 static inline void apple_reg_write(struct apple_priv *priv,
 				   u32 offset, u32 value)
 {
+	if (!apple_reg_ok(priv, offset))
+		return;
+
 	apple_dbg(APPLE_DBG_REG, "reg_write offset=0x%04x value=0x%08x\n",
 		  offset, value);
 	writel(value, priv->mmio + offset);
@@ -151,7 +170,12 @@ static inline void apple_reg_write(struct apple_priv *priv,
 
 static inline u32 apple_reg_read(struct apple_priv *priv, u32 offset)
 {
-	u32 val = readl(priv->mmio + offset);
+	u32 val;
+
+	if (!apple_reg_ok(priv, offset))
+		return 0;
+
+	val = readl(priv->mmio + offset);
 	apple_dbg(APPLE_DBG_REG, "reg_read  offset=0x%04x value=0x%08x\n",
 		  offset, val);
 	return val;
@@ -466,14 +490,6 @@ static int apple_ring_alloc(struct odl_tb5_device *dev)
 	}
 
 	/*
-	 * The shared ring callbacks locate their device by matching on
-	 * ring_handle, so both rings need a stable, distinct, non-NULL
-	 * cookie. There is no tb_ring here, so use the ring state itself.
-	 */
-	dev->tx.ring_handle = (struct tb_ring *)&priv->tx;
-	dev->rx.ring_handle = (struct tb_ring *)&priv->rx;
-
-	/*
 	 * Compute per-ring register bases from the ACIO layout.
 	 * If DT properties override the defaults, those are used.
 	 */
@@ -484,7 +500,26 @@ static int apple_ring_alloc(struct odl_tb5_device *dev)
 	of_property_read_u32(priv->pdev->dev.of_node, "apple,hopid",
 			     &priv->local_tx_hopid);
 
+	if (priv->tx.hop_id > APPLE_TB5_MAX_HOPID ||
+	    priv->rx.hop_id > APPLE_TB5_MAX_HOPID ||
+	    priv->tx.hop_id >= priv->layout.max_tx_rings ||
+	    priv->rx.hop_id >= priv->layout.max_rx_rings) {
+		apple_err("hop IDs out of range (tx=%d rx=%d, max_tx=%u max_rx=%u)\n",
+			  priv->tx.hop_id, priv->rx.hop_id,
+			  priv->layout.max_tx_rings, priv->layout.max_rx_rings);
+		ret = -ERANGE;
+		goto err_free_slot_frames;
+	}
+
 	apple_compute_ring_bases(priv, priv->tx.hop_id, priv->rx.hop_id);
+
+	/*
+	 * The shared ring callbacks locate their device by matching on
+	 * ring_handle, so both rings need a stable, distinct, non-NULL
+	 * cookie. There is no tb_ring here, so use the ring state itself.
+	 */
+	dev->tx.ring_handle = (struct tb_ring *)&priv->tx;
+	dev->rx.ring_handle = (struct tb_ring *)&priv->rx;
 
 	apple_info("rings allocated: tx_desc_base=0x%x tx_hop_ctrl=0x%x "
 		   "rx_desc_base=0x%x rx_hop_ctrl=0x%x "
@@ -1186,6 +1221,7 @@ static int apple_nhi_probe(struct platform_device *pdev)
 		  (unsigned long long)res->end,
 		  (unsigned long long)resource_size(res));
 
+	priv->mmio_size = resource_size(res);
 	priv->mmio = devm_ioremap_resource(&pdev->dev, res);
 	if (IS_ERR(priv->mmio)) {
 		apple_err("MMIO remap failed (err=%ld)\n",
