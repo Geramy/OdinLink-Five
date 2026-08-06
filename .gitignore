@@ -66,3 +66,9 @@ TODO
 *.note
 *.scratch
 odl_stress
+/tools/ghidra_projects
+UniversalMac_26.5_25F71_Restore.ipsw.download
+
+# Kbuild artifacts
+driver/.*.o.d
+driver/.*.cmd

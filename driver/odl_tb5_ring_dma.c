@@ -51,11 +51,11 @@ enum hrtimer_restart odl_tb5_rx_poll_timer_fn(struct hrtimer *timer)
 	if (atomic_read(&dev->removing))
 		return HRTIMER_NORESTART;
 
-	if (dev->tx.ring && dev->tx.started)
-		schedule_work(&dev->tx.ring->work);
+	if (dev->transport && dev->transport->kick_tx && dev->tx.started)
+		dev->transport->kick_tx(dev);
 
-	if (dev->rx.ring && dev->rx.started)
-		schedule_work(&dev->rx.ring->work);
+	if (dev->transport && dev->transport->kick_rx && dev->rx.started)
+		dev->transport->kick_rx(dev);
 
 	if (dev->state >= ODL_TB5_STATE_CONNECTED &&
 	    (dev->tx.started || dev->rx.started)) {
@@ -67,30 +67,39 @@ enum hrtimer_restart odl_tb5_rx_poll_timer_fn(struct hrtimer *timer)
 	return HRTIMER_NORESTART;
 }
 
+/* The ring callbacks below are transport-agnostic: they match on the opaque
+ * ring_handle and use the ring_frame stub in odl_tb5_core.h, so they build
+ * (and are needed) whether or not the Thunderbolt subsystem is present. */
+
 /* Find which odl_tb5_device owns a given tb_ring and return its ring_ctx. */
 static struct odl_tb5_ring_ctx *
 odl_tb5_ring_to_ctx(struct tb_ring *ring)
 {
 	struct odl_tb5_device *dev;
 
+	if (!ring)
+		return NULL;
+
 	list_for_each_entry_rcu(dev, &odl_tb5_devices_list, list) {
-		if (dev->tx.ring == ring)
+		if (dev->tx.ring_handle == ring)
 			return &dev->tx;
-		if (dev->rx.ring == ring)
+		if (dev->rx.ring_handle == ring)
 			return &dev->rx;
 	}
 
 	return NULL;
 }
 
-/* Given an RX tb_ring pointer, return the owning odl_tb5_device. */
 struct odl_tb5_device *
 odl_tb5_rx_ring_to_dev(struct tb_ring *ring)
 {
 	struct odl_tb5_device *dev;
 
+	if (!ring)
+		return NULL;
+
 	list_for_each_entry_rcu(dev, &odl_tb5_devices_list, list) {
-		if (dev->rx.ring == ring)
+		if (dev->rx.ring_handle == ring)
 			return dev;
 	}
 
@@ -504,128 +513,24 @@ rx_frame_done:
 
 int odl_tb5_rings_alloc(struct odl_tb5_device *dev)
 {
-	struct tb_xdomain *xd = dev->xd;
-	unsigned int sof_mask, eof_mask;
-	unsigned int rs = odl_ring_size;
-	int ret;
+	if (!dev->transport || !dev->transport->ring_alloc)
+		return -ENODEV;
 
-	if (rs < ODL_TB5_RING_SIZE_MIN)
-		rs = ODL_TB5_RING_SIZE_MIN;
-	if (rs > ODL_TB5_RING_SIZE_MAX)
-		rs = ODL_TB5_RING_SIZE_MAX;
-	rs = roundup_pow_of_two(rs);
-
-	dev->tx.ring_size = rs;
-	dev->rx.ring_size = rs;
-
-	pr_info("odl_tb5: ring_size=%u (%u MB per batch, %u MB total)\n",
-		rs,
-		(rs * ODL_TB5_FRAME_SIZE) >> 20,
-		(rs * ODL_TB5_FRAME_SIZE * ODL_TB5_NUM_BUFFERS * 2) >> 20);
-
-	dev->tx.frames = kvzalloc(rs * sizeof(struct ring_frame), GFP_KERNEL);
-	if (!dev->tx.frames)
-		return -ENOMEM;
-
-	dev->rx.frames = kvzalloc(rs * sizeof(struct ring_frame), GFP_KERNEL);
-	if (!dev->rx.frames) {
-		ret = -ENOMEM;
-		goto err_free_tx_frames;
-	}
-
-	ret = tb_xdomain_alloc_out_hopid(xd, -1);
-	if (ret < 0) {
-		pr_err("odl_tb5: failed to allocate output HopID: %d\n", ret);
-		goto err_free_rx_frames;
-	}
-	dev->local_tx_hopid = ret;
-
-	unsigned int ring_flags = RING_FLAG_FRAME;
-	if (odl_e2e)
-		ring_flags |= RING_FLAG_E2E;
-
-	dev->tx.ring = tb_ring_alloc_tx(xd->tb->nhi, -1,
-					rs,
-					ring_flags);
-	if (!dev->tx.ring) {
-		pr_err("odl_tb5: failed to allocate TX ring\n");
-		ret = -ENOMEM;
-		goto err_free_hopid;
-	}
-
-	sof_mask = BIT(ODL_TB5_PDF_SOF_DATA);
-	eof_mask = BIT(ODL_TB5_PDF_EOF_DATA);
-
-	dev->rx.ring = tb_ring_alloc_rx(xd->tb->nhi, -1,
-					rs,
-					ring_flags,
-					dev->tx.ring->hop,
-					sof_mask, eof_mask,
-					NULL, NULL);
-	if (!dev->rx.ring) {
-		pr_err("odl_tb5: failed to allocate RX ring\n");
-		ret = -ENOMEM;
-		goto err_free_tx_ring;
-	}
-
-	pr_info("odl_tb5: rings allocated: TX hop=%d, RX hop=%d, "
-		"local_tx_hopid=%d (E2E enabled, e2e_tx_hop=%d)\n",
-		dev->tx.ring->hop, dev->rx.ring->hop,
-		dev->local_tx_hopid, dev->tx.ring->hop);
-
-	spin_lock_init(&dev->tx.lock);
-	spin_lock_init(&dev->rx.lock);
-	atomic_set(&dev->tx.completed, 0);
-	atomic_set(&dev->tx.submitted, 0);
-	atomic_set(&dev->rx.completed, 0);
-	atomic_set(&dev->rx.submitted, 0);
-	init_waitqueue_head(&dev->tx.waitq);
-	init_waitqueue_head(&dev->rx.waitq);
-
-	return 0;
-
-err_free_tx_ring:
-	tb_ring_free(dev->tx.ring);
-	dev->tx.ring = NULL;
-err_free_hopid:
-	tb_xdomain_release_out_hopid(xd, dev->local_tx_hopid);
-	dev->local_tx_hopid = -1;
-err_free_rx_frames:
-	kvfree(dev->rx.frames);
-	dev->rx.frames = NULL;
-err_free_tx_frames:
-	kvfree(dev->tx.frames);
-	dev->tx.frames = NULL;
-	return ret;
+	return dev->transport->ring_alloc(dev);
 }
 
 void odl_tb5_rings_free(struct odl_tb5_device *dev)
 {
-	if (dev->rx.ring) {
-		tb_ring_free(dev->rx.ring);
-		dev->rx.ring = NULL;
-	}
-
-	if (dev->tx.ring) {
-		tb_ring_free(dev->tx.ring);
-		dev->tx.ring = NULL;
-	}
-
-	if (dev->local_tx_hopid >= 0) {
-		tb_xdomain_release_out_hopid(dev->xd, dev->local_tx_hopid);
-		dev->local_tx_hopid = -1;
-	}
-
-	kvfree(dev->tx.frames);
-	dev->tx.frames = NULL;
-	kvfree(dev->rx.frames);
-	dev->rx.frames = NULL;
+	if (dev->transport && dev->transport->ring_free)
+		dev->transport->ring_free(dev);
 }
 
 int odl_tb5_rings_start(struct odl_tb5_device *dev)
 {
-	tb_ring_start(dev->tx.ring);
-	tb_ring_start(dev->rx.ring);
+	if (!dev->transport || !dev->transport->ring_start)
+		return -ENODEV;
+
+	dev->transport->ring_start(dev);
 	dev->tx.started = true;
 	dev->rx.started = true;
 	return 0;
@@ -633,39 +538,28 @@ int odl_tb5_rings_start(struct odl_tb5_device *dev)
 
 void odl_tb5_rings_stop(struct odl_tb5_device *dev)
 {
-	if (dev->tx.ring && dev->tx.started) {
-		tb_ring_stop(dev->tx.ring);
-		dev->tx.started = false;
-		dev->tx.frames_posted = false;
-	}
+	if (dev->transport && dev->transport->ring_stop)
+		dev->transport->ring_stop(dev);
 
-	if (dev->rx.ring && dev->rx.started) {
-		tb_ring_stop(dev->rx.ring);
-		dev->rx.started = false;
-		dev->rx.frames_posted = false;
-	}
+	dev->tx.started = false;
+	dev->rx.started = false;
+	dev->tx.frames_posted = false;
+	dev->rx.frames_posted = false;
 }
 
-/* Reset both rings to a clean state after kernel verification. */
 void odl_tb5_rings_reset(struct odl_tb5_device *dev)
 {
-	if (dev->tx.ring && dev->tx.started) {
-		tb_ring_stop(dev->tx.ring);
-		tb_ring_start(dev->tx.ring);
-		dev->tx.frames_posted = false;
-		dev->tx.swapped_since_post = false;
-		atomic_set(&dev->tx.completed, 0);
-		atomic_set(&dev->tx.submitted, 0);
-	}
+	if (dev->transport && dev->transport->ring_reset)
+		dev->transport->ring_reset(dev);
 
-	if (dev->rx.ring && dev->rx.started) {
-		tb_ring_stop(dev->rx.ring);
-		tb_ring_start(dev->rx.ring);
-		dev->rx.frames_posted = false;
-		dev->rx.swapped_since_post = false;
-		atomic_set(&dev->rx.completed, 0);
-		atomic_set(&dev->rx.submitted, 0);
-	}
+	dev->tx.frames_posted = false;
+	dev->tx.swapped_since_post = false;
+	atomic_set(&dev->tx.completed, 0);
+	atomic_set(&dev->tx.submitted, 0);
+	dev->rx.frames_posted = false;
+	dev->rx.swapped_since_post = false;
+	atomic_set(&dev->rx.completed, 0);
+	atomic_set(&dev->rx.submitted, 0);
 }
 
 int odl_tb5_dma_bufs_alloc(struct odl_tb5_device *dev)
@@ -674,7 +568,10 @@ int odl_tb5_dma_bufs_alloc(struct odl_tb5_device *dev)
 	size_t buf_size;
 	int i;
 
-	dma_dev = tb_ring_dma_device(dev->tx.ring);
+	if (!dev->transport || !dev->transport->dma_device)
+		return -ENODEV;
+
+	dma_dev = dev->transport->dma_device(dev);
 	buf_size = (size_t)ODL_TB5_FRAME_SIZE * dev->tx.ring_size;
 
 	for (i = 0; i < ODL_TB5_NUM_BUFFERS; i++) {
@@ -717,14 +614,16 @@ err_free:
 
 void odl_tb5_dma_bufs_free(struct odl_tb5_device *dev)
 {
-	struct device *dma_dev;
+	struct device *dma_dev = NULL;
 	int i;
 
-	if (dev->tx.ring)
-		dma_dev = tb_ring_dma_device(dev->tx.ring);
-	else if (dev->rx.ring)
-		dma_dev = tb_ring_dma_device(dev->rx.ring);
-	else
+	if (!dev->transport || !dev->transport->dma_device)
+		return;
+
+	if (dev->tx.ring_handle || dev->rx.ring_handle)
+		dma_dev = dev->transport->dma_device(dev);
+
+	if (!dma_dev)
 		return;
 
 	for (i = 0; i < ODL_TB5_NUM_BUFFERS; i++) {
@@ -766,8 +665,8 @@ int odl_tb5_submit_tx(struct odl_tb5_device *dev,
 		if (tw <= 0) {
 			pr_warn("odl_tb5: TX drain timeout (%ld), "
 				"resetting ring\n", tw);
-			tb_ring_stop(dev->tx.ring);
-			tb_ring_start(dev->tx.ring);
+			if (dev->transport && dev->transport->ring_reset)
+				dev->transport->ring_reset(dev);
 		}
 		dev->tx.frames_posted = false;
 		dev->tx.swapped_since_post = false;
@@ -793,7 +692,7 @@ int odl_tb5_submit_tx(struct odl_tb5_device *dev,
 		frame->sof = ctrl ? ODL_TB5_PDF_SOF_CTRL : ODL_TB5_PDF_SOF_DATA;
 		frame->eof = ctrl ? ODL_TB5_PDF_EOF_CTRL : ODL_TB5_PDF_EOF_DATA;
 
-		ret = tb_ring_tx(dev->tx.ring, frame);
+			ret = dev->transport->ring_tx(dev, frame);
 		if (ret < 0) {
 			pr_err("odl_tb5: tb_ring_tx failed at frame %d: %d\n",
 			       i, ret);
@@ -807,9 +706,8 @@ int odl_tb5_submit_tx(struct odl_tb5_device *dev,
 	dev->tx.frames_posted = true;
 
 	pr_debug("odl_tb5: TX submitted %d frames, offset=%zu len=%zu ctrl=%d "
-		"buf_phys=%pad ring_hop=%d\n",
-		nframes, offset, len, ctrl,
-		&buf->phys, dev->tx.ring->hop);
+		"buf_phys=%pad\n",
+		nframes, offset, len, ctrl, &buf->phys);
 
 	return 0;
 }
@@ -830,8 +728,8 @@ int odl_tb5_submit_rx(struct odl_tb5_device *dev,
 		if (!dev->rx.swapped_since_post)
 			return 0;
 
-		tb_ring_stop(dev->rx.ring);
-		tb_ring_start(dev->rx.ring);
+		if (dev->transport && dev->transport->ring_reset)
+			dev->transport->ring_reset(dev);
 		dev->rx.frames_posted = false;
 		dev->rx.swapped_since_post = false;
 		atomic_set(&dev->rx.completed, 0);
@@ -856,7 +754,7 @@ int odl_tb5_submit_rx(struct odl_tb5_device *dev,
 		frame->sof = ODL_TB5_PDF_SOF_DATA;
 		frame->eof = ODL_TB5_PDF_EOF_DATA;
 
-		ret = tb_ring_rx(dev->rx.ring, frame);
+			ret = dev->transport->ring_rx(dev, frame);
 		if (ret < 0) {
 			pr_err("odl_tb5: tb_ring_rx failed at frame %d: %d\n",
 			       i, ret);
@@ -871,9 +769,8 @@ int odl_tb5_submit_rx(struct odl_tb5_device *dev,
 	dev->rx.posted_buf = dev->rx.front;
 
 	pr_debug("odl_tb5: RX submitted %d frames, offset=%zu len=%zu "
-		"buf_phys=%pad ring_hop=%d\n",
-		nframes, offset, len,
-		&buf->phys, dev->rx.ring->hop);
+		"buf_phys=%pad\n",
+		nframes, offset, len, &buf->phys);
 
 	return 0;
 }
@@ -955,7 +852,7 @@ int odl_tb5_submit_tx_dmabuf(struct odl_tb5_device *dev,
 			frame->sof = ODL_TB5_PDF_SOF_DATA;
 			frame->eof = ODL_TB5_PDF_EOF_DATA;
 
-			ret = tb_ring_tx(dev->tx.ring, frame);
+		ret = dev->transport->ring_tx(dev, frame);
 			if (ret < 0)
 				goto err_unmap;
 
@@ -1066,7 +963,7 @@ int odl_tb5_submit_rx_dmabuf(struct odl_tb5_device *dev,
 			frame->sof = ODL_TB5_PDF_SOF_DATA;
 			frame->eof = ODL_TB5_PDF_EOF_DATA;
 
-			ret = tb_ring_rx(dev->rx.ring, frame);
+		ret = dev->transport->ring_rx(dev, frame);
 			if (ret < 0)
 				goto err_unmap;
 
@@ -1107,7 +1004,12 @@ err_put:
 int odl_tb5_frame_pool_alloc(struct odl_tb5_device *dev)
 {
 	struct odl_tb5_frame_pool *pool = &dev->frame_pool;
-	struct device *dma_dev = tb_ring_dma_device(dev->tx.ring);
+	struct device *dma_dev;
+
+	if (!dev->transport || !dev->transport->dma_device)
+		return -ENODEV;
+
+	dma_dev = dev->transport->dma_device(dev);
 	int i;
 
 	pool->size = ODL_TB5_FRAME_POOL_SIZE;
@@ -1160,13 +1062,14 @@ err_free:
 void odl_tb5_frame_pool_free(struct odl_tb5_device *dev)
 {
 	struct odl_tb5_frame_pool *pool = &dev->frame_pool;
-	struct device *dma_dev;
+	struct device *dma_dev = NULL;
 	int i;
 
 	if (!pool->slots)
 		return;
 
-	dma_dev = tb_ring_dma_device(dev->tx.ring);
+	if (dev->transport && dev->transport->dma_device)
+		dma_dev = dev->transport->dma_device(dev);
 
 	for (i = 0; i < pool->size; i++) {
 		if (pool->slots[i].virt)
@@ -1257,7 +1160,12 @@ int odl_tb5_frame_pool_get_batch(struct odl_tb5_frame_pool *pool,
 int odl_tb5_batch_pool_alloc(struct odl_tb5_device *dev)
 {
 	struct odl_tb5_batch_pool *pool = &dev->batch_pool;
-	struct device *dma_dev = tb_ring_dma_device(dev->tx.ring);
+	struct device *dma_dev;
+
+	if (!dev->transport || !dev->transport->dma_device)
+		return -ENODEV;
+
+	dma_dev = dev->transport->dma_device(dev);
 	int i;
 
 	INIT_LIST_HEAD(&pool->free_list);
@@ -1304,17 +1212,16 @@ err_free:
 void odl_tb5_batch_pool_free(struct odl_tb5_device *dev)
 {
 	struct odl_tb5_batch_pool *pool = &dev->batch_pool;
-	struct device *dma_dev;
+	struct device *dma_dev = NULL;
 	int i;
 
 	if (!pool->bufs[0].virt)
 		return;
 
-	if (dev->tx.ring)
-		dma_dev = tb_ring_dma_device(dev->tx.ring);
-	else if (dev->rx.ring)
-		dma_dev = tb_ring_dma_device(dev->rx.ring);
-	else
+	if (dev->transport && dev->transport->dma_device)
+		dma_dev = dev->transport->dma_device(dev);
+
+	if (!dma_dev)
 		return;
 
 	for (i = 0; i < ODL_TB5_BATCH_BUF_COUNT; i++) {
@@ -1727,7 +1634,7 @@ static int odl_tb5_stream_send_latency(struct odl_tb5_stream *stream,
 		atomic_inc(&msg->frames_pending);
 		msg->sent += payload;
 
-		if (tb_ring_tx(dev->tx.ring, &slot->frame) < 0) {
+		if (dev->transport->ring_tx(dev, &slot->frame) < 0) {
 			atomic_dec(&msg->frames_pending);
 			msg->sent -= payload;
 			odl_tb5_frame_pool_put(pool, slot);
@@ -1875,8 +1782,8 @@ static int odl_tb5_stream_send_throughput(struct odl_tb5_stream *stream,
 
 		/* Submit all frames in this batch to the ring */
 		for (i = 0; i < nframes; i++) {
-			if (tb_ring_tx(dev->tx.ring,
-				       &batch->frames[i]) < 0) {
+			if (dev->transport->ring_tx(dev,
+						    &batch->frames[i]) < 0) {
 				int unsub = nframes - i;
 
 				atomic_sub(unsub, &batch->frames_pending);
@@ -2054,7 +1961,7 @@ void odl_tb5_tx_drain_work_fn(struct work_struct *work)
 				atomic_inc(&msg->frames_pending);
 			}
 
-			if (tb_ring_tx(dev->tx.ring, &slot->frame) < 0) {
+			if (dev->transport->ring_tx(dev, &slot->frame) < 0) {
 				pr_warn("odl_tb5: tb_ring_tx failed for "
 					"stream %u (sent=%zu/%zu)\n",
 					stream->id, msg->sent, msg->len);
@@ -2208,7 +2115,7 @@ void odl_tb5_rx_repost(struct odl_tb5_device *dev)
 		slot->frame.sof = ODL_TB5_PDF_SOF_DATA;
 		slot->frame.eof = ODL_TB5_PDF_EOF_DATA;
 
-		if (tb_ring_rx(dev->rx.ring, &slot->frame) < 0) {
+		if (dev->transport->ring_rx(dev, &slot->frame) < 0) {
 			odl_tb5_frame_pool_put(&dev->frame_pool, slot);
 			break;
 		}

@@ -16,66 +16,32 @@
 
 #include "odl_tb5_core.h"
 
-LIST_HEAD(odl_tb5_devices_list);
-DEFINE_MUTEX(odl_tb5_devices_lock);
-
-static DEFINE_IDA(odl_tb5_ida);
-
-unsigned int odl_ring_size = ODL_TB5_RING_SIZE_DEFAULT;
-module_param(odl_ring_size, uint, 0444);
-MODULE_PARM_DESC(odl_ring_size,
-	"NHI ring entries per direction (power-of-2, default 4096 = 16 MB/batch)");
-
-int odl_loopback_count = 0;
-module_param_named(loopback, odl_loopback_count, int, 0444);
-MODULE_PARM_DESC(loopback,
-	"Create N software loopback devices (max 16, default 0; no NHI hw needed)");
-
-int odl_protocol_mode = 0;
-module_param_named(protocol, odl_protocol_mode, int, 0444);
-MODULE_PARM_DESC(protocol,
-	"XDomain protocol mode: 0=OdinLink (0x4F4C, default), 1=Apple (0xFA57)");
-
-bool odl_e2e = true;
-module_param_named(e2e, odl_e2e, bool, 0444);
-
-/* upstream PR #21: bounded RX busy-poll before sleeping. The RX softirq
- * increments rx_complete on another CPU, so a spinning reader sees it within
- * cache-coherency latency and skips a ~10-15 us context-switch wake. */
-unsigned int odl_busy_poll_us = 0;
-module_param(odl_busy_poll_us, uint, 0644);
-MODULE_PARM_DESC(odl_busy_poll_us,
-	"Bounded RX busy-poll window in microseconds before sleeping (0 = off)");
-
-/* Bind at most N XDomain services (0 = unlimited).  With two Thunderbolt
- * cables both peer services sit at route=2 (BUG 2) and the handshake cannot
- * complete; unbinding one afterwards runs the full teardown path, so bind
- * only one from the start instead. */
-int odl_max_devices = 0;
-module_param_named(max_devices, odl_max_devices, int, 0444);
-MODULE_PARM_DESC(max_devices,
-	"Bind at most N XDomain services (0 = unlimited; use 1 with two cables)");
 static atomic_t odl_bound_count = ATOMIC_INIT(0);
-MODULE_PARM_DESC(e2e,
-	"Enable end-to-end flow control (default=1). Set 0 for TB3 controllers "
-	"that do not support RING_FLAG_E2E.");
 
 /* Apple protocol uses its own property key and registers as an alternate
  * service so macOS ThunderboltRDMA can discover us via XDomain matching. */
+#if IS_ENABLED(CONFIG_USB4)
 static struct tb_property_dir *odl_tb5_apple_property_dir;
-
-const uuid_t odl_tb5_proto_uuid =
-	UUID_INIT(0x4f444c4e, 0x4b54, 0x4235,
-		  0x4f, 0x44, 0x49, 0x4e, 0x4c, 0x49, 0x4e, 0x4b);
+#endif
 
 static struct tb_property_dir *odl_tb5_property_dir;
 
+#if IS_ENABLED(CONFIG_USB4)
 static const struct tb_service_id odl_tb5_ids[] = {
 	{ TB_SERVICE(ODL_TB5_PROTOCOL_KEY, ODL_TB5_PROTOCOL_ID) },
 	{ TB_SERVICE(ODL_TB5_PROTOCOL_KEY_APPLE, ODL_TB5_PROTOCOL_ID_APPLE) },
 	{ }
 };
 MODULE_DEVICE_TABLE(tbsvc, odl_tb5_ids);
+#endif
+
+#if IS_ENABLED(CONFIG_USB4)
+extern const struct odl_tb5_transport_ops odl_tb5_nhi_transport;
+
+struct nhi_priv {
+	struct tb_xdomain	*xd;
+	int			local_tx_hopid;
+};
 
 static int odl_tb5_probe(struct tb_service *svc,
 			 const struct tb_service_id *id)
@@ -88,6 +54,7 @@ static int odl_tb5_probe(struct tb_service *svc,
 		return -ENODEV;
 	}
 	struct odl_tb5_device *dev;
+	struct nhi_priv *priv;
 	int ret;
 
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
@@ -103,7 +70,18 @@ static int odl_tb5_probe(struct tb_service *svc,
 		return ret;
 	}
 	dev->index = ret;
-	dev->local_tx_hopid = -1;
+
+	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
+	if (!priv) {
+		ida_free(&odl_tb5_ida, dev->index);
+		kfree(dev);
+		return -ENOMEM;
+	}
+	priv->xd = dev->xd;
+	priv->local_tx_hopid = -1;
+
+	dev->transport = &odl_tb5_nhi_transport;
+	dev->transport_priv = priv;
 
 	dev->state = ODL_TB5_STATE_DISCONNECTED;
 
@@ -181,8 +159,8 @@ static int odl_tb5_probe(struct tb_service *svc,
 
 	tb_service_set_drvdata(svc, dev);
 
-	pr_info("odl_tb5: probed device index %d on xdomain %pUb\n",
-		dev->index, dev->xd->remote_uuid);
+	pr_info("odl_tb5: probed device index %d (transport=%s)\n",
+		dev->index, dev->transport->name);
 
 	return 0;
 
@@ -250,13 +228,11 @@ static void odl_tb5_remove(struct tb_service *svc)
 	 * (login retrying, peer gone, admin unbind) leaked the hop-ID until
 	 * enable_paths returned -ENOMEM on every later load.  Ordering is kept
 	 * exactly as upstream: this runs AFTER rings_stop()/bufs_free() above. */
-	if (dev->in_hopid_valid) {
-		tb_xdomain_disable_paths(dev->xd,
-					 dev->local_tx_hopid,
-					 dev->tx.ring ? dev->tx.ring->hop : -1,
-					 dev->in_hopid,
-					 dev->rx.ring ? dev->rx.ring->hop : -1);
-		tb_xdomain_release_in_hopid(dev->xd, dev->in_hopid);
+	if (dev->in_hopid_valid && dev->transport) {
+		if (dev->transport->path_disable)
+			dev->transport->path_disable(dev, dev->in_hopid);
+		if (dev->transport->path_release_hopid)
+			dev->transport->path_release_hopid(dev, dev->in_hopid);
 		dev->in_hopid_valid = false;
 	}
 
@@ -282,6 +258,7 @@ static void odl_tb5_remove(struct tb_service *svc)
 
 	pr_info("odl_tb5: removed device index %d\n", dev->index);
 
+	kfree(dev->transport_priv);
 	ida_free(&odl_tb5_ida, dev->index);
 	kfree(dev);
 }
@@ -292,6 +269,7 @@ static struct tb_service_driver odl_tb5_driver = {
 	.remove		= odl_tb5_remove,
 	.id_table	= odl_tb5_ids,
 };
+#endif /* CONFIG_USB4 */
 
 static int __init odl_tb5_init(void)
 {
@@ -322,6 +300,7 @@ static int __init odl_tb5_init(void)
 		return 0;
 	}
 
+#if IS_ENABLED(CONFIG_USB4)
 	odl_tb5_property_dir = tb_property_create_dir(&odl_tb5_proto_uuid);
 	if (!odl_tb5_property_dir) {
 		ret = -ENOMEM;
@@ -389,12 +368,16 @@ static int __init odl_tb5_init(void)
 	ret = tb_register_service_driver(&odl_tb5_driver);
 	if (ret)
 		goto err_proto;
+#endif
+
+	odl_tb5_apple_init();
 
 	pr_info("odl_tb5: OdinLink TB5 driver loaded (ring_size=%u)\n",
 		odl_ring_size);
 
 	return 0;
 
+#if IS_ENABLED(CONFIG_USB4)
 err_proto:
 	odl_tb5_proto_unregister();
 err_dir:
@@ -403,6 +386,7 @@ err_dir:
 		odl_tb5_apple_property_dir = NULL;
 	}
 	tb_property_free_dir(odl_tb5_property_dir);
+#endif
 err_chardev:
 	odl_tb5_chardev_exit();
 	return ret;
@@ -418,8 +402,12 @@ static void __exit odl_tb5_exit(void)
 		goto out;
 	}
 
+#if IS_ENABLED(CONFIG_USB4)
 	/* Unregister first so tb core removes bound services before orphan cleanup. */
 	tb_unregister_service_driver(&odl_tb5_driver);
+#endif
+
+	odl_tb5_apple_exit();
 
 	mutex_lock(&odl_tb5_devices_lock);
 	list_for_each_entry_safe(dev, tmp, &odl_tb5_devices_list, list) {
@@ -447,6 +435,7 @@ static void __exit odl_tb5_exit(void)
 	}
 	mutex_unlock(&odl_tb5_devices_lock);
 
+#if IS_ENABLED(CONFIG_USB4)
 	odl_tb5_proto_unregister();
 
 	/* Unregister property dirs: main dir under its protocol key,
@@ -462,6 +451,7 @@ static void __exit odl_tb5_exit(void)
 					   odl_tb5_apple_property_dir);
 		tb_property_free_dir(odl_tb5_apple_property_dir);
 	}
+#endif
 out:
 	/*
 	 * Streams are freed with kfree_rcu(), so a grace period may still be

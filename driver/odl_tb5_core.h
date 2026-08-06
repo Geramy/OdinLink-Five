@@ -19,7 +19,9 @@
 #define ODL_TB5_CORE_H
 
 #include <linux/module.h>
+#if IS_ENABLED(CONFIG_USB4)
 #include <linux/thunderbolt.h>
+#endif
 #include <linux/cdev.h>
 #include <linux/dma-buf.h>
 #include <linux/wait.h>
@@ -34,6 +36,28 @@
 #include <linux/hashtable.h>
 #include <linux/kref.h>
 #include <linux/version.h>
+
+#if !IS_ENABLED(CONFIG_USB4)
+struct tb_ring;
+struct ring_frame;
+typedef void (*ring_cb)(struct tb_ring *, struct ring_frame *, bool);
+struct ring_frame {
+	dma_addr_t buffer_phy;
+	ring_cb callback;
+	struct list_head list;
+	u32 size:12;
+	u32 flags:12;
+	u32 eof:4;
+	u32 sof:4;
+};
+#define RING_FLAG_FRAME		BIT(1)
+#define RING_FLAG_E2E		BIT(2)
+/* Values mirror enum ring_desc_flags in <linux/thunderbolt.h>; a backend
+ * without the Thunderbolt subsystem must report descriptor errors using the
+ * same bits so the shared RX callback can classify them. */
+#define RING_DESC_CRC_ERROR		0x1
+#define RING_DESC_BUFFER_OVERRUN	0x04
+#endif
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
 #define class_create_compat(name) class_create(THIS_MODULE, (name))
@@ -53,6 +77,8 @@ static inline void hrtimer_setup(struct hrtimer *timer,
 #endif
 
 #include "uapi/odl_tb5_uapi.h"
+#include "odl_tb5_transport.h"
+#include "odl_tb5_xd_proto.h"
 
 /* ── DMA control protocol (kernel-internal, stream 0) ───────────────── */
 
@@ -270,7 +296,7 @@ struct odl_tb5_dma_buf {
 /* ── NHI ring context (shared TX or RX ring) ─────────────────────────── */
 
 struct odl_tb5_ring_ctx {
-	struct tb_ring		*ring;
+	void			*ring_handle;
 	struct ring_frame	*frames;
 	int			ring_size;
 	bool			started;
@@ -292,21 +318,11 @@ struct odl_tb5_ring_ctx {
 /* ── Main device structure ───────────────────────────────────────────── */
 
 struct odl_tb5_device {
+#if IS_ENABLED(CONFIG_USB4)
 	struct tb_service	*svc;
 	struct tb_xdomain	*xd;
-	int			local_tx_hopid;
+#endif
 	int			remote_tx_hopid;
-
-	struct odl_tb5_ring_ctx	tx;
-	struct odl_tb5_ring_ctx	rx;
-
-	/* Login/logout handshake */
-	struct delayed_work	login_work;
-	struct work_struct	connect_work;
-	struct work_struct	restart_work;
-	int			login_retries;
-	bool			login_sent;
-	bool			login_received;
 	int			stale_remote_tx_hopid;
 	/* BUG1 fix: authoritative record of the hop-ID actually allocated by
 	 * tb_xdomain_alloc_in_hopid(), so every teardown path can release it
@@ -314,9 +330,15 @@ struct odl_tb5_device {
 	bool			in_hopid_valid;
 	int			in_hopid;
 
+	struct odl_tb5_ring_ctx	tx;
+	struct odl_tb5_ring_ctx	rx;
+
 	/* DMA verification (ping/pong) */
 	struct work_struct	verify_work;
 	struct work_struct	ctrl_reply_work;
+	struct work_struct	connect_work;
+	struct work_struct	restart_work;
+	struct delayed_work	login_work;
 	struct hrtimer		rx_poll_timer;
 	wait_queue_head_t	verify_waitq;
 	bool			pong_received;
@@ -327,6 +349,9 @@ struct odl_tb5_device {
 	 * when a new connection begins. */
 	bool			peer_ping_answered;
 	int			verify_rx_type;
+	int			login_retries;
+	bool			login_sent;
+	bool			login_received;
 
 	/* Connection state */
 	enum odl_tb5_conn_state	state;
@@ -357,15 +382,8 @@ struct odl_tb5_device {
 		unsigned int		low_watermark;
 	} tx_adaptive;
 
-	/* Software loopback mode (no NHI hardware needed) */
-	void *loopback_data;
-	int (*loopback_stream_send)(struct odl_tb5_device *dev,
-				    uint8_t stream_id, uint8_t dst_id,
-				    const void *data, uint32_t len);
-	int (*loopback_stream_recv)(struct odl_tb5_device *dev,
-				    uint8_t stream_id, void *buf,
-				    uint32_t buf_len, uint32_t *actual_len,
-				    bool block);
+	const struct odl_tb5_transport_ops *transport;
+	void *transport_priv;
 
 	/* TX drain worker */
 	struct work_struct	tx_drain_work;
@@ -415,6 +433,7 @@ struct odl_tb5_device {
 
 extern struct list_head odl_tb5_devices_list;
 extern struct mutex     odl_tb5_devices_lock;
+extern struct ida       odl_tb5_ida;
 extern unsigned int     odl_ring_size;
 
 /* ── Service lifecycle ───────────────────────────────────────────────── */
@@ -534,13 +553,33 @@ void odl_tb5_proto_exit(struct odl_tb5_device *dev);
 int  odl_tb5_proto_send_login(struct odl_tb5_device *dev);
 int  odl_tb5_proto_send_logout(struct odl_tb5_device *dev);
 
-/* ── Module parameters (defined in odl_tb5_service.c) ───────────────── */
+#if IS_ENABLED(CONFIG_USB4)
+struct tb_xdomain;
+void odl_tb5_xd_header_init(struct odl_tb5_xd_header *hdr,
+			     struct tb_xdomain *xd, u32 type,
+			     size_t total_size);
+#endif
+
+/* ── Module parameters (defined in odl_tb5_params.c) ────────────────── */
 
 extern int odl_loopback_count;
 extern int odl_protocol_mode;
 extern bool odl_e2e;
 extern unsigned int odl_busy_poll_us;
+extern int odl_max_devices;
+
+static inline bool odl_tb5_is_loopback(struct odl_tb5_device *dev)
+{
+	return dev->transport && dev->transport->type == ODL_TB5_TRANSPORT_LOOPBACK;
+}
+
+
 int  odl_loopback_init(void);
 void odl_loopback_exit(void);
+
+int  odl_tb5_apple_init(void);
+void odl_tb5_apple_exit(void);
+
+extern struct platform_driver odl_tb5_apple_driver;
 
 #endif /* ODL_TB5_CORE_H */
