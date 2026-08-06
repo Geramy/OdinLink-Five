@@ -20,7 +20,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <mach/mach.h>
-#include <mach_vm.h>
+#include <mach/mach_vm.h>
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
