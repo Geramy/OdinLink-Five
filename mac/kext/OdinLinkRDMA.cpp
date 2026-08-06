@@ -86,7 +86,7 @@ bool OdinLinkRDMA::start(IOService *provider)
 	/* 32 address bits: the Apple DART aperture, matching APPLE_TB5_DMA_BITS
 	 * on the Linux side. */
 	fDMACommand = IODMACommand::withSpecification(
-		IODMACommand::kIODMACommandOutputHost64,
+		kIODMACommandOutputHost64,
 		32,
 		0,
 		IODMACommand::kMapped,
