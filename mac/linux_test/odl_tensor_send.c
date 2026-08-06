@@ -34,7 +34,7 @@
 #include <infiniband/verbs.h>
 
 #define DEFAULT_WIDTH  1920
-#define_HEIGHT_DEFAULT 1080
+#define HEIGHT_DEFAULT 1080
 #define FPS_DEFAULT    30
 #define FRAME_FMT      4 /* RGBA8 = 4 bytes per pixel */
 

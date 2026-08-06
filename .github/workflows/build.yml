@@ -108,6 +108,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
             build-essential cmake pkg-config \
+            libglib2.0-dev \
             linux-headers-$(uname -r)
       - name: Build kernel module (Apple backend)
         run: |

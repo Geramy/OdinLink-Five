@@ -767,4 +767,16 @@ rcclNet_v7_t rcclNetPlugin_v7 = {
 };
 
 /* RCCL's plugin loader dlsym()s the NCCL-prefixed symbol ncclNetPlugin_vN. */
+#ifdef __APPLE__
+/* Mach-O has no symbol aliases, so publish a real second symbol and fill it
+ * in at load time — before any dlsym() caller can reach it. */
+rcclNet_v7_t ncclNetPlugin_v7;
+
+__attribute__((constructor))
+static void odl_tb5_export_nccl_symbol(void)
+{
+	ncclNetPlugin_v7 = rcclNetPlugin_v7;
+}
+#else
 extern rcclNet_v7_t ncclNetPlugin_v7 __attribute__((alias("rcclNetPlugin_v7")));
+#endif
