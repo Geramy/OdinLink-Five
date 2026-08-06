@@ -46,6 +46,20 @@ MODULE_PARM_DESC(apple_debug,
 	"Apple transport debug bitmask: 0x01=reg, 0x02=ring, 0x04=desc, "
 	"0x08=irq, 0x10=probe (default 0)");
 
+/*
+ * Every register offset, control-word bit and index encoding used by this
+ * backend was inferred from disassembly of the macOS kext.  None of it has
+ * been confirmed against silicon, and getting a descriptor field wrong means
+ * handing the DMA engine an address it may write to after we have freed it.
+ * So the register programming is opt-in: without it the backend probes,
+ * maps MMIO and exposes the device, but never arms the hardware.
+ */
+static bool apple_hw;
+module_param_named(apple_hw, apple_hw, bool, 0444);
+MODULE_PARM_DESC(apple_hw,
+	"Arm the reverse-engineered Apple NHI register programming. "
+	"Unverified on real hardware — developers only (default 0)");
+
 #define apple_dbg(mask, fmt, ...) \
 	do { \
 		if (apple_debug & (mask)) \
@@ -61,9 +75,15 @@ MODULE_PARM_DESC(apple_debug,
 struct apple_ring_state {
 	void		*desc_ring;
 	dma_addr_t	desc_ring_phys;
+	/* One entry per descriptor slot, so a completed descriptor can be
+	 * mapped back to the frame whose callback owes a wakeup. */
+	struct ring_frame **slot_frames;
 	unsigned int	desc_count;
 	unsigned int	prod_idx;
 	unsigned int	cons_idx;
+	/* Free-running count of descriptors already handed to their
+	 * callbacks; the distance to prod_idx/cons_idx is what needs reaping. */
+	unsigned int	reap_idx;
 	u32		ring_desc_base;
 	u32		hop_ctrl_base;
 	int		hop_id;
@@ -350,6 +370,18 @@ static int apple_ring_alloc(struct odl_tb5_device *dev)
 		rs = ODL_TB5_RING_SIZE_MAX;
 	rs = roundup_pow_of_two(rs);
 
+	/*
+	 * The size field is 12 bits, so the default ring of 4096 encoded to
+	 * zero and programmed an empty ring.  Cap at what the register can
+	 * actually represent rather than silently truncating.
+	 */
+	if (rs > APPLE_TB5_SIZE_RING_MASK) {
+		rs = rounddown_pow_of_two(APPLE_TB5_SIZE_RING_MASK);
+		apple_warn("ring_size %u exceeds the %lu-descriptor size field, using %u\n",
+			   odl_ring_size,
+			   (unsigned long)APPLE_TB5_SIZE_RING_MASK, rs);
+	}
+
 	dev->tx.ring_size = rs;
 	dev->rx.ring_size = rs;
 
@@ -400,6 +432,7 @@ static int apple_ring_alloc(struct odl_tb5_device *dev)
 	priv->tx.desc_ring_phys = priv->shared_tx.phys;
 	priv->tx.desc_count = rs;
 	priv->tx.prod_idx = 0;
+	priv->tx.reap_idx = 0;
 	apple_dbg(APPLE_DBG_RING, "shared TX buffer: virt=%p phys=0x%016llx "
 		  "size=%zu\n", priv->shared_tx.virt,
 		  (unsigned long long)priv->shared_tx.phys,
@@ -418,9 +451,27 @@ static int apple_ring_alloc(struct odl_tb5_device *dev)
 	}
 	priv->rx.desc_count = rs;
 	priv->rx.cons_idx = 0;
+	priv->rx.reap_idx = 0;
 	apple_dbg(APPLE_DBG_RING, "RX desc ring: virt=%p phys=0x%016llx\n",
 		  priv->rx.desc_ring,
 		  (unsigned long long)priv->rx.desc_ring_phys);
+
+	priv->tx.slot_frames = kvcalloc(rs, sizeof(*priv->tx.slot_frames),
+					GFP_KERNEL);
+	priv->rx.slot_frames = kvcalloc(rs, sizeof(*priv->rx.slot_frames),
+					GFP_KERNEL);
+	if (!priv->tx.slot_frames || !priv->rx.slot_frames) {
+		ret = -ENOMEM;
+		goto err_free_slot_frames;
+	}
+
+	/*
+	 * The shared ring callbacks locate their device by matching on
+	 * ring_handle, so both rings need a stable, distinct, non-NULL
+	 * cookie. There is no tb_ring here, so use the ring state itself.
+	 */
+	dev->tx.ring_handle = (struct tb_ring *)&priv->tx;
+	dev->rx.ring_handle = (struct tb_ring *)&priv->rx;
 
 	/*
 	 * Compute per-ring register bases from the ACIO layout.
@@ -444,6 +495,15 @@ static int apple_ring_alloc(struct odl_tb5_device *dev)
 
 	return 0;
 
+err_free_slot_frames:
+	kvfree(priv->tx.slot_frames);
+	priv->tx.slot_frames = NULL;
+	kvfree(priv->rx.slot_frames);
+	priv->rx.slot_frames = NULL;
+	dma_free_coherent(priv->dma_dev,
+			  priv->rx.desc_count * sizeof(struct apple_tb5_dma_desc),
+			  priv->rx.desc_ring, priv->rx.desc_ring_phys);
+	priv->rx.desc_ring = NULL;
 err_free_shared_tx:
 	dma_free_coherent(priv->dma_dev, priv->shared_tx.size,
 			  priv->shared_tx.virt, priv->shared_tx.phys);
@@ -464,6 +524,14 @@ static void apple_ring_free(struct odl_tb5_device *dev)
 
 	apple_dbg(APPLE_DBG_RING, "freeing rings\n");
 
+	dev->tx.ring_handle = NULL;
+	dev->rx.ring_handle = NULL;
+
+	kvfree(priv->tx.slot_frames);
+	priv->tx.slot_frames = NULL;
+	kvfree(priv->rx.slot_frames);
+	priv->rx.slot_frames = NULL;
+
 	if (priv->rx.desc_ring) {
 		dma_free_coherent(priv->dma_dev,
 				  priv->rx.desc_count * sizeof(struct apple_tb5_dma_desc),
@@ -482,6 +550,139 @@ static void apple_ring_free(struct odl_tb5_device *dev)
 	dev->tx.frames = NULL;
 	kvfree(dev->rx.frames);
 	dev->rx.frames = NULL;
+}
+
+/* ── Doorbell and completion reaping ───────────────────────────────── */
+
+/*
+ * The index register holds a slot number, not the free-running submission
+ * count.  Writing the raw counter masked to 16 bits made the engine chase a
+ * position outside the ring as soon as the counter passed desc_count.
+ *
+ * Caller holds reg_lock.
+ */
+static void apple_ring_doorbell(struct apple_priv *priv,
+				struct apple_ring_state *ring)
+{
+	unsigned int head = (ring == &priv->tx) ? ring->prod_idx : ring->cons_idx;
+
+	if (!apple_hw)
+		return;
+
+	apple_reg_write(priv, ring->ring_desc_base + APPLE_TB5_RING_DESC_INDEX,
+			(head % ring->desc_count) & APPLE_TB5_INDEX_MASK);
+}
+
+/*
+ * Hand every descriptor the engine has finished back to its callback.
+ *
+ * Without this the frame pool drained on the first ring's worth of traffic
+ * and RX data never reached a stream, because nothing ever invoked
+ * frame->callback.
+ *
+ * The completion position is read back from the index register.  That
+ * readback is the one piece of this backend with no corroboration in the
+ * disassembly — the kext only ever writes that register — so treat a
+ * value outside the outstanding window as "nothing completed" rather than
+ * trusting it and releasing buffers the engine may still be writing.
+ */
+static void apple_reap_ring(struct odl_tb5_device *dev,
+			    struct apple_ring_state *ring)
+{
+	struct apple_priv *priv = apple_priv(dev);
+	struct tb_ring *handle = (struct tb_ring *)ring;
+	unsigned int head, done, outstanding, n;
+	unsigned long flags;
+	u32 hw_idx;
+
+	if (!apple_hw || !ring->started || !ring->slot_frames)
+		return;
+
+	spin_lock_irqsave(&priv->reg_lock, flags);
+
+	head = (ring == &priv->tx) ? ring->prod_idx : ring->cons_idx;
+	outstanding = head - ring->reap_idx;
+	if (!outstanding) {
+		spin_unlock_irqrestore(&priv->reg_lock, flags);
+		return;
+	}
+
+	hw_idx = apple_reg_read(priv,
+				ring->ring_desc_base + APPLE_TB5_RING_DESC_INDEX);
+	hw_idx &= APPLE_TB5_INDEX_MASK;
+	if (hw_idx >= ring->desc_count) {
+		spin_unlock_irqrestore(&priv->reg_lock, flags);
+		return;
+	}
+
+	/* Distance from the last reaped slot forward to the engine's slot. */
+	done = (hw_idx - (ring->reap_idx % ring->desc_count)) % ring->desc_count;
+	if (done > outstanding)
+		done = outstanding;
+
+	spin_unlock_irqrestore(&priv->reg_lock, flags);
+
+	for (n = 0; n < done; n++) {
+		struct apple_tb5_dma_desc *desc;
+		struct ring_frame *frame;
+		unsigned int idx;
+
+		spin_lock_irqsave(&priv->reg_lock, flags);
+		idx = ring->reap_idx % ring->desc_count;
+		frame = ring->slot_frames[idx];
+		ring->slot_frames[idx] = NULL;
+		ring->reap_idx++;
+		spin_unlock_irqrestore(&priv->reg_lock, flags);
+
+		if (!frame)
+			continue;
+
+		if (ring == &priv->rx) {
+			desc = (struct apple_tb5_dma_desc *)ring->desc_ring + idx;
+			frame->size = (le32_to_cpu(desc->control) &
+				       APPLE_TB5_DESC_CTRL_LEN_MASK) >>
+				      APPLE_TB5_DESC_CTRL_LEN_SHIFT;
+			frame->flags = 0;
+		}
+
+		if (frame->callback)
+			frame->callback(handle, frame, false);
+	}
+}
+
+/*
+ * Return every outstanding descriptor to its callback marked canceled, so
+ * a teardown does not strand the frames that own the pool slots.
+ */
+static void apple_flush_ring(struct odl_tb5_device *dev,
+			     struct apple_ring_state *ring)
+{
+	struct apple_priv *priv = apple_priv(dev);
+	struct tb_ring *handle = (struct tb_ring *)ring;
+	unsigned long flags;
+
+	if (!ring->slot_frames)
+		return;
+
+	for (;;) {
+		struct ring_frame *frame;
+		unsigned int head, idx;
+
+		spin_lock_irqsave(&priv->reg_lock, flags);
+		head = (ring == &priv->tx) ? ring->prod_idx : ring->cons_idx;
+		if (ring->reap_idx == head) {
+			spin_unlock_irqrestore(&priv->reg_lock, flags);
+			return;
+		}
+		idx = ring->reap_idx % ring->desc_count;
+		frame = ring->slot_frames[idx];
+		ring->slot_frames[idx] = NULL;
+		ring->reap_idx++;
+		spin_unlock_irqrestore(&priv->reg_lock, flags);
+
+		if (frame && frame->callback)
+			frame->callback(handle, frame, true);
+	}
 }
 
 /* ── Ring start/stop/reset ──────────────────────────────────────────── */
@@ -505,6 +706,12 @@ static int apple_ring_start(struct odl_tb5_device *dev)
 	u32 size_hopid;
 	u32 ctrl;
 	u32 vector = 0;
+
+	if (!apple_hw) {
+		apple_warn("not arming the DMA engine: the ACIO register map is "
+			   "unverified. Load with apple_hw=1 to enable it.\n");
+		return -ENODEV;
+	}
 
 	apple_info("starting rings (tx_hop=%d, rx_hop=%d, "
 		   "tx_desc_base=0x%x, rx_desc_base=0x%x)\n",
@@ -623,6 +830,12 @@ static void apple_ring_stop(struct odl_tb5_device *dev)
 	}
 
 	spin_unlock_irqrestore(&priv->reg_lock, flags);
+
+	/* The engine is quiet now, so the frames still sitting in the rings
+	 * will never complete on their own. Release them. */
+	apple_flush_ring(dev, &priv->tx);
+	apple_flush_ring(dev, &priv->rx);
+
 	apple_info("rings stopped\n");
 }
 
@@ -636,7 +849,9 @@ static void apple_ring_reset(struct odl_tb5_device *dev)
 	apple_ring_stop(dev);
 
 	priv->tx.prod_idx = 0;
+	priv->tx.reap_idx = 0;
 	priv->rx.cons_idx = 0;
+	priv->rx.reap_idx = 0;
 
 	if (priv->shared_tx.virt)
 		memset(priv->shared_tx.virt, 0, priv->shared_tx.size);
@@ -677,9 +892,6 @@ static int apple_ring_tx(struct odl_tb5_device *dev, struct ring_frame *frame)
 		return -EIO;
 	}
 
-	idx = priv->tx.prod_idx % priv->tx.desc_count;
-	desc = (struct apple_tb5_dma_desc *)priv->tx.desc_ring + idx;
-
 	buf_phys = frame->buffer_phy;
 
 	control = (frame->size << APPLE_TB5_DESC_CTRL_LEN_SHIFT) &
@@ -690,23 +902,31 @@ static int apple_ring_tx(struct odl_tb5_device *dev, struct ring_frame *frame)
 		control |= APPLE_TB5_DESC_CTRL_EOF;
 	control |= APPLE_TB5_DESC_CTRL_INT_EN;
 
+	spin_lock_irqsave(&priv->reg_lock, flags);
+
+	/* Reject rather than overwrite a descriptor the engine still owns. */
+	if (priv->tx.prod_idx - priv->tx.reap_idx >= priv->tx.desc_count) {
+		spin_unlock_irqrestore(&priv->reg_lock, flags);
+		return -EBUSY;
+	}
+
+	idx = priv->tx.prod_idx % priv->tx.desc_count;
+	desc = (struct apple_tb5_dma_desc *)priv->tx.desc_ring + idx;
+
 	apple_dbg(APPLE_DBG_DESC, "TX desc[%u]: addr=0x%016llx "
 		  "ctrl=0x%08x (len=%u sof=%d eof=%d) prod_idx=%u\n",
 		  idx, (unsigned long long)buf_phys, control,
 		  frame->size, frame->sof, frame->eof,
 		  priv->tx.prod_idx);
 
-	spin_lock_irqsave(&priv->reg_lock, flags);
-
 	desc->addr_lo = cpu_to_le32(lower_32_bits(buf_phys));
 	desc->addr_hi = cpu_to_le32(upper_32_bits(buf_phys));
 	desc->control = cpu_to_le32(control);
 	desc->reserved = 0;
+	priv->tx.slot_frames[idx] = frame;
 
 	priv->tx.prod_idx++;
-	apple_reg_write(priv,
-			priv->tx.ring_desc_base + APPLE_TB5_RING_DESC_INDEX,
-			priv->tx.prod_idx & APPLE_TB5_INDEX_MASK);
+	apple_ring_doorbell(priv, &priv->tx);
 
 	spin_unlock_irqrestore(&priv->reg_lock, flags);
 
@@ -725,6 +945,13 @@ static int apple_ring_rx(struct odl_tb5_device *dev, struct ring_frame *frame)
 		return -EIO;
 	}
 
+	spin_lock_irqsave(&priv->reg_lock, flags);
+
+	if (priv->rx.cons_idx - priv->rx.reap_idx >= priv->rx.desc_count) {
+		spin_unlock_irqrestore(&priv->reg_lock, flags);
+		return -EBUSY;
+	}
+
 	idx = priv->rx.cons_idx % priv->rx.desc_count;
 	desc = (struct apple_tb5_dma_desc *)priv->rx.desc_ring + idx;
 
@@ -733,19 +960,16 @@ static int apple_ring_rx(struct odl_tb5_device *dev, struct ring_frame *frame)
 		  idx, (unsigned long long)frame->buffer_phy,
 		  priv->rx.cons_idx);
 
-	spin_lock_irqsave(&priv->reg_lock, flags);
-
 	desc->addr_lo = cpu_to_le32(lower_32_bits(frame->buffer_phy));
 	desc->addr_hi = cpu_to_le32(upper_32_bits(frame->buffer_phy));
 	desc->control = cpu_to_le32(APPLE_TB5_DESC_CTRL_INT_EN |
 				    (ODL_TB5_FRAME_SIZE <<
 				     APPLE_TB5_DESC_CTRL_LEN_SHIFT));
 	desc->reserved = 0;
+	priv->rx.slot_frames[idx] = frame;
 
 	priv->rx.cons_idx++;
-	apple_reg_write(priv,
-			priv->rx.ring_desc_base + APPLE_TB5_RING_DESC_INDEX,
-			priv->rx.cons_idx & APPLE_TB5_INDEX_MASK);
+	apple_ring_doorbell(priv, &priv->rx);
 
 	spin_unlock_irqrestore(&priv->reg_lock, flags);
 
@@ -807,65 +1031,26 @@ static void apple_path_disable(struct odl_tb5_device *dev, int in_hopid)
 /* ── Login/Logout (Apple XDomain) ─────────────────────────────────── */
 
 /*
- * Send an Apple-style XDomain login.
+ * On Intel the login goes out through tb_xdomain_request(), which handles
+ * bus routing. Apple has no xdomain object, so the login would have to be
+ * pushed through the DMA ring as a control frame — and that transmit path
+ * does not exist yet.
  *
- * On Intel, we use tb_xdomain_request() which handles the Thunderbolt
- * bus routing. On Apple, we send the login packet directly through
- * the DMA ring (the fabric is already set up by firmware tunables).
- *
- * The login message uses Apple's protocol UUID (0xFA57) and the
- * peer route from the device tree (or 0 for local).
- *
- * From odl_tb5_proto.c's handle_packet: Apple's login format may
- * omit the full login_msg struct (just the XDomain header + 8 bytes
- * instead of the full 60 bytes). We send the full struct for
- * compatibility.
+ * This used to build the message, discard it, and return success, which
+ * drove the state machine to CONNECTED over a link that was never
+ * negotiated: the peer's transmit hop-ID was invented from our own local
+ * value. Fail instead, so the connection stays down and says why.
  */
 static int apple_peer_send_login(struct odl_tb5_device *dev)
 {
-	struct apple_priv *priv = apple_priv(dev);
-	struct apple_tb5_login_msg msg = { };
-	u32 remote_tx_hopid;
-
-	apple_info("sending Apple XDomain login "
-		   "(peer_route=0x%llx, tx_hopid=%d)\n",
-		   (unsigned long long)priv->peer_route,
-		   priv->local_tx_hopid);
-
-	apple_tb5_xd_header_init(&msg.xd_hdr, priv->peer_route,
-				 APPLE_TB5_MSG_LOGIN, sizeof(msg));
-	msg.proto_version = 0;
-	msg.transmit_path = cpu_to_le32(priv->local_tx_hopid);
-
-	remote_tx_hopid = le32_to_cpu(msg.transmit_path);
-	dev->remote_tx_hopid = remote_tx_hopid;
-
-	/*
-	 * On Apple, we don't have tb_xdomain_request(). Instead, we
-	 * would send the login frame through the DMA ring.
-	 *
-	 * For now, we set remote_tx_hopid from the local value and
-	 * assume the peer will respond. When the Apple NHI platform
-	 * driver exists and creates xdomain objects, we can use the
-	 * standard protocol handler path instead.
-	 */
-	apple_info("Apple login prepared (remote_tx_hopid=%d)\n",
-		   dev->remote_tx_hopid);
-
-	return 0;
+	apple_warn("XDomain login unimplemented: no control-frame transmit "
+		   "path on Apple yet\n");
+	return -EOPNOTSUPP;
 }
 
 static int apple_peer_send_logout(struct odl_tb5_device *dev)
 {
-	struct apple_priv *priv = apple_priv(dev);
-	struct apple_tb5_logout_msg msg = { };
-
-	apple_info("sending Apple XDomain logout\n");
-
-	apple_tb5_xd_header_init(&msg.xd_hdr, priv->peer_route,
-				 APPLE_TB5_MSG_LOGOUT, sizeof(msg));
-
-	return 0;
+	return -EOPNOTSUPP;
 }
 
 /* ── Kick (for hrtimer poll) ───────────────────────────────────────── */
@@ -879,14 +1064,10 @@ static void apple_kick_tx(struct odl_tb5_device *dev)
 		return;
 
 	spin_lock_irqsave(&priv->reg_lock, flags);
-	apple_dbg(APPLE_DBG_IRQ, "kick_tx: writing prod_idx=%u to "
-		  "reg 0x%04x\n",
-		  priv->tx.prod_idx & APPLE_TB5_INDEX_MASK,
-		  priv->tx.ring_desc_base + APPLE_TB5_RING_DESC_INDEX);
-	apple_reg_write(priv,
-			priv->tx.ring_desc_base + APPLE_TB5_RING_DESC_INDEX,
-			priv->tx.prod_idx & APPLE_TB5_INDEX_MASK);
+	apple_ring_doorbell(priv, &priv->tx);
 	spin_unlock_irqrestore(&priv->reg_lock, flags);
+
+	apple_reap_ring(dev, &priv->tx);
 }
 
 static void apple_kick_rx(struct odl_tb5_device *dev)
@@ -898,59 +1079,46 @@ static void apple_kick_rx(struct odl_tb5_device *dev)
 		return;
 
 	spin_lock_irqsave(&priv->reg_lock, flags);
-	apple_dbg(APPLE_DBG_IRQ, "kick_rx: writing cons_idx=%u to "
-		  "reg 0x%04x\n",
-		  priv->rx.cons_idx & APPLE_TB5_INDEX_MASK,
-		  priv->rx.ring_desc_base + APPLE_TB5_RING_DESC_INDEX);
-	apple_reg_write(priv,
-			priv->rx.ring_desc_base + APPLE_TB5_RING_DESC_INDEX,
-			priv->rx.cons_idx & APPLE_TB5_INDEX_MASK);
+	apple_ring_doorbell(priv, &priv->rx);
 	spin_unlock_irqrestore(&priv->reg_lock, flags);
+
+	apple_reap_ring(dev, &priv->rx);
 }
 
 /* ── Completion callback chain ─────────────────────────────────────── */
 
-/*
- * The Apple kext uses a 3-level completion chain:
- *   Ring::completeCommand -> Queue::completeCommand -> Command object
- *
- * completeCommand (TransmitQueue, ~170 lines) calls 3 virtual methods
- * on the command object:
- *   vtable +0x1C0: release (free the command)
- *   vtable +0x1D0: notify (wake up waiter)
- *   vtable +0x028: completion callback
- *
- * In our Linux driver, completion is simpler: the hrtimer poll
- * detects completed descriptors (producer/consumer index advances),
- * then calls ring_frame callbacks. The callback chain is:
- *   hrtimer -> rx_poll_timer_fn -> ring_frame.callback -> frame_pool_put
- *
- * The interrupt handler below can also trigger this path.
- */
-
 /* ── Interrupt handler ─────────────────────────────────────────────── */
 
+/*
+ * There is no identified interrupt status or acknowledge register: the
+ * previous handler read MMIO offset 0, which under the default layout is
+ * the TX ring's descriptor address register, and claimed the line without
+ * ever acking it — a level-triggered line would have livelocked the CPU.
+ *
+ * So the handler does not attempt to decode a cause. It reaps both rings
+ * and reports IRQ_NONE when there was nothing to reap, which lets the
+ * kernel's spurious-interrupt detector disable the line rather than spin
+ * on it forever.
+ */
 static irqreturn_t apple_nhi_irq(int irq, void *data)
 {
 	struct odl_tb5_device *dev = data;
 	struct apple_priv *priv = apple_priv(dev);
-	u32 status;
+	unsigned int before;
 
-	if (!priv->mmio)
+	if (!priv->mmio || atomic_read(&dev->removing))
 		return IRQ_NONE;
 
-	status = apple_reg_read(priv, 0);
+	before = priv->tx.reap_idx + priv->rx.reap_idx;
 
-	if (!status)
+	apple_reap_ring(dev, &priv->tx);
+	apple_reap_ring(dev, &priv->rx);
+
+	if (priv->tx.reap_idx + priv->rx.reap_idx == before)
 		return IRQ_NONE;
 
-	apple_dbg(APPLE_DBG_IRQ, "IRQ %d fired, status=0x%08x\n",
-		  irq, status);
-
-	if (dev->transport->kick_tx)
-		dev->transport->kick_tx(dev);
-	if (dev->transport->kick_rx)
-		dev->transport->kick_rx(dev);
+	apple_dbg(APPLE_DBG_IRQ, "IRQ %d reaped tx=%u rx=%u\n",
+		  irq, priv->tx.reap_idx, priv->rx.reap_idx);
 
 	return IRQ_HANDLED;
 }
@@ -1113,7 +1281,7 @@ static int apple_nhi_probe(struct platform_device *pdev)
 	 * instant it is armed.  Not devm_ — devm resources are released after
 	 * .remove() returns, which would leave the handler live across the
 	 * kfree(dev) below. */
-	priv->irq = platform_get_irq_optional(pdev, 0);
+	priv->irq = apple_hw ? platform_get_irq_optional(pdev, 0) : -1;
 	if (priv->irq > 0) {
 		ret = request_irq(priv->irq, apple_nhi_irq, 0,
 				  "odl_tb5_apple", dev);

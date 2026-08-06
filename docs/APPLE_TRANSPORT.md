@@ -140,19 +140,47 @@ Converged IO) fabric and has separate MMIO.
 
 ### Transport ops → Apple NHI mapping
 
+**None of this has run on real hardware.** Every register offset, control-word
+bit and index encoding below was inferred from disassembly of the macOS kext,
+so the register programming is gated behind a module parameter:
+
+```
+insmod odl_tb5.ko apple_hw=1
+```
+
+Without `apple_hw=1` the backend probes, maps MMIO and creates the character
+device, but `ring_start` refuses and no MMIO is written. Leave it off unless
+you have a machine you are willing to wedge.
+
 | odl_tb5_transport_ops | Apple NHI equivalent | Status |
 |------------------------|---------------------|--------|
-| `ring_alloc` | Allocate shared TX + per-ring RX DMA descriptor rings | Done (shared TX buffer) |
-| `ring_free` | Free those rings | Done |
-| `ring_start/stop` | Enable/disable NHI DMA engine + per-HopID interrupts | Done (full stopDMA) |
-| `ring_tx` | Submit TX descriptor to Apple NHI ring | Done |
-| `ring_rx` | Post RX descriptor to Apple NHI ring | Done |
+| `ring_alloc` | Allocate shared TX + per-ring RX DMA descriptor rings | Written, untested |
+| `ring_free` | Free those rings | Written, untested |
+| `ring_start/stop` | Enable/disable NHI DMA engine + per-HopID interrupts | Written, untested; gated on `apple_hw=1` |
+| `ring_tx` | Submit TX descriptor to Apple NHI ring | Written, untested |
+| `ring_rx` | Post RX descriptor to Apple NHI ring | Written, untested |
 | `dma_device` | Return device for DART-mapped coherent DMA | Done |
 | `path_enable` | Configure ATCPHY for USB4 mode + enable ACIO path | Stub (needs ATCPHY) |
-| `path_disable` | Tear down USB4 path, return PHY to safe state | Done (stops rings) |
-| `peer_send_login` | Send XDomain login via Apple's packet format (UUID 0xFA57) | Done |
-| `peer_send_logout` | Send XDomain logout | Done |
-| `kick_tx/rx` | Ring the NHI doorbell / kick work queue | Done |
+| `path_disable` | Tear down USB4 path, return PHY to safe state | Partial (stops rings only) |
+| `peer_send_login` | Send XDomain login via Apple's packet format (UUID 0xFA57) | **Not implemented** — returns `-EOPNOTSUPP` |
+| `peer_send_logout` | Send XDomain logout | **Not implemented** — returns `-EOPNOTSUPP` |
+| `kick_tx/rx` | Ring the NHI doorbell, reap completed descriptors | Written, untested |
+
+Because `peer_send_login` fails, the state machine cannot reach `CONNECTED`
+and no data flows even with `apple_hw=1`. The missing piece is a control-frame
+transmit path: Apple has no `tb_xdomain_request()`, so the login has to go out
+through the DMA ring itself.
+
+### Known-unverified: completion reaping
+
+`apple_reap_ring()` decides which descriptors the engine has finished by
+reading back `RING_DESC_INDEX`. That readback is the one part of this backend
+with no corroboration in the disassembly — the kext only ever *writes* that
+register. If it turns out not to be a completion index, the reaper has to be
+rewritten around whatever the real source is (most likely an ownership bit
+written back into the descriptor's control word). Everything else about the
+completion path — per-slot frame tracking, callback invocation, cancel-on-stop
+— is transport-independent and stays as-is.
 
 ### New concerns specific to Apple (status)
 
