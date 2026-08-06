@@ -33,15 +33,33 @@ jobs:
           cd build
           make -j$(nproc) odl_tb5 odl_tb5_verbs odl_tb5_verbs_provider
           make -j$(nproc) odl_tb5_cli odl_tb5_daemon odl_tb5_tray
-      - name: Build kernel module (NHI)
-        continue-on-error: true
-        run: cd build && make -j$(nproc) driver 2>&1
-      - name: Test with Docker Compose
+          make -j$(nproc) odl_tb5_test odl_tb5_test_rccl_dmabuf
+      # A driver that does not compile must turn this job red. This step used
+      # to be continue-on-error, which is how the module reached a PR branch
+      # in a state where it had never once been built.
+      - name: Build kernel module (NHI backend)
+        run: cd build && make -j$(nproc) driver
+      # The Apple sources are only reachable when the Thunderbolt subsystem is
+      # absent, so the NHI build above never compiles them. Force that config
+      # here — it is the same C, and needs no arm64 hardware.
+      - name: Build kernel module (Apple backend, CONFIG_USB4 off)
         run: |
+          make -C /lib/modules/$(uname -r)/build M=$PWD/driver clean
+          make -C /lib/modules/$(uname -r)/build M=$PWD/driver \
+            CONFIG_USB4= modules
+      - name: Compile Linux-side Mac tensor sender
+        run: |
+          gcc -Wall -c mac/linux_test/odl_tensor_send.c \
+            -Ilib/include -Idriver/uapi -o /tmp/odl_tensor_send.o
+      - name: Test with Docker Compose
+        # The suite already exits non-zero on failure. It used to be piped
+        # straight into grep, so the pipeline reported grep's status and a
+        # failing suite went green.
+        run: |
+          set -o pipefail
           docker compose build odl-test 2>&1
-          docker compose run --rm odl-test 2>&1 | grep -E "PASS|FAIL|ALL TESTS"
+          docker compose run --rm odl-test 2>&1 | tee /tmp/odl-test.log
       - name: Package .deb
-        continue-on-error: true
         run: |
           cd build
           sudo cpack -G DEB -D CPACK_DEBIAN_PACKAGE_ARCHITECTURE=amd64 2>&1
@@ -79,53 +97,38 @@ jobs:
 
   linux-arm64:
     name: Linux (arm64, Apple transport)
-    runs-on: ubuntu-24.04
+    # Native arm64. The old job ran on x86_64 and tried to apt-get
+    # linux-headers-arm64, an arm64-architecture package that can never
+    # install there — so the entire job was a no-op behind continue-on-error.
+    runs-on: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
-      - name: Install cross-compilation toolchain
+      - name: Install dependencies
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq \
-            crossbuild-essential-arm64 \
-            linux-headers-arm64 \
-            cmake pkg-config
-      - name: Install arm64 kernel headers
+            build-essential cmake pkg-config \
+            linux-headers-$(uname -r)
+      - name: Build kernel module (Apple backend)
         run: |
-          ARCH_KERNEL=$(ls /usr/src/ | grep linux-headers-.*-arm64 | head -1 | sed 's/linux-headers-//')
-          echo "KERNEL_VERSION=${ARCH_KERNEL}" >> $GITHUB_ENV
-          echo "Using kernel: ${ARCH_KERNEL}"
-          sudo ln -sf /usr/src/linux-headers-${ARCH_KERNEL} /lib/modules/${ARCH_KERNEL}/build 2>/dev/null || true
-          sudo mkdir -p /lib/modules/${ARCH_KERNEL}/build
-      - name: Build kernel module (Apple transport, cross-compile)
-        continue-on-error: true
+          make -C /lib/modules/$(uname -r)/build M=$PWD/driver \
+            CONFIG_USB4= modules
+      - name: Build kernel module (NHI backend)
         run: |
-          KVER=$(ls /usr/src/ | grep linux-headers-.*-arm64 | head -1 | sed 's/linux-headers-//')
-          if [ -z "$KVER" ]; then
-            echo "No arm64 kernel headers found, attempting build with host headers"
-            KVER=$(uname -r)
-          fi
-          cd driver
-          make -C /lib/modules/${KVER}/build M=$(pwd) \
-            ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-            CONFIG_THUNDERBOLT=n \
-            modules 2>&1 || echo "Kernel module build failed (expected without arm64 Thunderbolt subsystem)"
-      - name: Build userspace (arm64 cross-compile)
+          make -C /lib/modules/$(uname -r)/build M=$PWD/driver clean
+          make -C /lib/modules/$(uname -r)/build M=$PWD/driver modules
+      - name: Build userspace
         run: |
           mkdir build && cd build
           cmake .. -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_SYSTEM_NAME=Linux \
-            -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-            -DCMAKE_C_COMPILER=aarch64-linux-gnu-gcc \
             -DBUILD_DAEMON=OFF -DBUILD_TRAY=OFF -DBUILD_VERBS=OFF
-          make -j$(nproc) odl_tb5 2>&1 || true
+          make -j$(nproc) odl_tb5 odl_tb5_cli odl_tb5_test
       - name: Collect driver sources
         if: always()
         run: |
           mkdir -p /tmp/odl-tb5-driver-arm64
-          cp driver/*.c /tmp/odl-tb5-driver-arm64/
-          cp driver/*.h /tmp/odl-tb5-driver-arm64/
-          cp driver/Kbuild /tmp/odl-tb5-driver-arm64/
-          cp driver/Makefile /tmp/odl-tb5-driver-arm64/
+          cp driver/*.c driver/*.h driver/Kbuild driver/Makefile \
+            /tmp/odl-tb5-driver-arm64/
           cp -r driver/uapi /tmp/odl-tb5-driver-arm64/
       - name: Upload driver sources (arm64)
         if: always()
@@ -133,32 +136,42 @@ jobs:
         with:
           name: odl-tb5-driver-arm64
           path: /tmp/odl-tb5-driver-arm64/
-      - name: Upload build logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: odl-tb5-arm64-logs
-          path: build/**/*.log
 
   mac:
-    name: macOS (userspace only)
+    # Build coverage only. Every runtime suite needs /dev/odl_tb5_N, and macOS
+    # cannot load the kext under CI (SIP), so there is nothing to execute.
+    name: macOS (build coverage)
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
         run: brew install cmake pkg-config || true
-      - name: Build core library
+      - name: Build userspace
         run: |
           mkdir build && cd build
           cmake .. -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_DAEMON=OFF -DBUILD_TRAY=OFF -DBUILD_VERBS=OFF
-          make -j$(sysctl -n hw.ncpu) odl_tb5 2>&1
-      - name: Upload build logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: odl-tb5-macos-logs
-          path: build/**/*.log
+          make -j$(sysctl -n hw.ncpu) odl_tb5 odl_tb5_cli odl_tb5_test
+      - name: Compile RDMA client
+        run: |
+          clang -Wall -c mac/odl_rdma_client.c \
+            -Imac/kext -o /tmp/odl_rdma_client.o
+      # The kext had no build coverage at all and could rot unnoticed. Skip
+      # rather than fail if a runner image drops the Kernel headers; a compile
+      # error in our own source still fails the job.
+      - name: Compile kext
+        run: |
+          SDK="$(xcrun --sdk macosx --show-sdk-path)"
+          HDRS="$SDK/System/Library/Frameworks/Kernel.framework/Headers"
+          if [ ! -d "$HDRS" ]; then
+            echo "::warning::Kernel.framework headers absent from $SDK, skipping kext compile"
+            exit 0
+          fi
+          clang++ -c mac/kext/OdinLinkRDMA.cpp -o /tmp/OdinLinkRDMA.o \
+            -isysroot "$SDK" -I"$HDRS" -Imac/kext \
+            -arch arm64 -std=c++17 -fno-builtin -fno-exceptions -fno-rtti \
+            -fapple-kext -mkernel -nostdinc \
+            -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT
       - name: Upload macOS library
         if: always()
         uses: actions/upload-artifact@v4
