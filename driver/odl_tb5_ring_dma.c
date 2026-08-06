@@ -572,6 +572,9 @@ int odl_tb5_dma_bufs_alloc(struct odl_tb5_device *dev)
 		return -ENODEV;
 
 	dma_dev = dev->transport->dma_device(dev);
+	if (!dma_dev)
+		return -ENODEV;
+	dev->dma_dev = dma_dev;
 	buf_size = (size_t)ODL_TB5_FRAME_SIZE * dev->tx.ring_size;
 
 	for (i = 0; i < ODL_TB5_NUM_BUFFERS; i++) {
@@ -614,15 +617,13 @@ err_free:
 
 void odl_tb5_dma_bufs_free(struct odl_tb5_device *dev)
 {
-	struct device *dma_dev = NULL;
+	struct device *dma_dev = dev->dma_dev;
 	int i;
 
-	if (!dev->transport || !dev->transport->dma_device)
-		return;
-
-	if (dev->tx.ring_handle || dev->rx.ring_handle)
-		dma_dev = dev->transport->dma_device(dev);
-
+	/* Use the recorded device rather than asking the transport again: the
+	 * previous code re-queried it only when a ring_handle was still set,
+	 * which the Apple and loopback backends never populate, so every
+	 * coherent buffer leaked on unbind. */
 	if (!dma_dev)
 		return;
 
@@ -643,6 +644,8 @@ void odl_tb5_dma_bufs_free(struct odl_tb5_device *dev)
 			dev->rx.bufs[i].virt = NULL;
 		}
 	}
+
+	dev->dma_dev = NULL;
 }
 
 int odl_tb5_submit_tx(struct odl_tb5_device *dev,

@@ -333,6 +333,14 @@ struct apple_tb5_acio_layout {
 #define APPLE_TB5_DART_SID_ALT_MIN	0x10
 #define APPLE_TB5_DART_SID_ALT_MAX	0x1B
 
+/*
+ * Addresses handed to the ring descriptors are DART IOVAs, and the Apple
+ * DART aperture is 32-bit.  The descriptors still carry a HI word, so this
+ * is deliberately conservative rather than a hardware limit: widening it
+ * without a machine to test on risks descriptors the DART cannot resolve.
+ */
+#define APPLE_TB5_DMA_BITS		32
+
 /* ── ACIO MMIO region ────────────────────────────────────────────── */
 
 /* From ioreg: ACIO0 at 0x40100000, 1MB */

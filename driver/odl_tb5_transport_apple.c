@@ -1029,20 +1029,12 @@ static int apple_nhi_probe(struct platform_device *pdev)
 
 	apple_parse_acio_layout(priv);
 
-	priv->irq = platform_get_irq(pdev, 0);
-	apple_dbg(APPLE_DBG_PROBE, "IRQ = %d\n", priv->irq);
-	if (priv->irq > 0) {
-		ret = devm_request_irq(&pdev->dev, priv->irq,
-				       apple_nhi_irq, 0,
-				       "odl_tb5_apple", dev);
-		if (ret) {
-			apple_warn("IRQ request failed (%d), "
-				   "falling back to poll\n", ret);
-			priv->irq = -1;
-		} else {
-			apple_dbg(APPLE_DBG_PROBE, "IRQ %d registered\n",
-				  priv->irq);
-		}
+	ret = dma_set_mask_and_coherent(&pdev->dev,
+					DMA_BIT_MASK(APPLE_TB5_DMA_BITS));
+	if (ret) {
+		apple_err("no usable %u-bit DMA mask (%d)\n",
+			  APPLE_TB5_DMA_BITS, ret);
+		goto err_free_priv;
 	}
 
 	if (np) {
@@ -1112,6 +1104,28 @@ static int apple_nhi_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, dev);
 
+	ret = odl_tb5_proto_init(dev);
+	if (ret)
+		goto err_list;
+
+	/* Request the IRQ last: the handler dereferences dev->transport and
+	 * transport_priv, and a shared or already-pending line can fire the
+	 * instant it is armed.  Not devm_ — devm resources are released after
+	 * .remove() returns, which would leave the handler live across the
+	 * kfree(dev) below. */
+	priv->irq = platform_get_irq_optional(pdev, 0);
+	if (priv->irq > 0) {
+		ret = request_irq(priv->irq, apple_nhi_irq, 0,
+				  "odl_tb5_apple", dev);
+		if (ret) {
+			apple_warn("IRQ request failed (%d), falling back to poll\n",
+				   ret);
+			priv->irq = -1;
+		}
+	} else {
+		priv->irq = -1;
+	}
+
 	apple_info("probed (hopid=%d, mmio=%p, irq=%d, "
 		   "peer_route=0x%llx)\n",
 		   priv->local_tx_hopid, priv->mmio, priv->irq,
@@ -1119,12 +1133,19 @@ static int apple_nhi_probe(struct platform_device *pdev)
 
 	return 0;
 
+err_list:
+	platform_set_drvdata(pdev, NULL);
+	mutex_lock(&odl_tb5_devices_lock);
+	list_del_rcu(&dev->list);
+	mutex_unlock(&odl_tb5_devices_lock);
+	synchronize_rcu();
+	odl_tb5_dma_bufs_free(dev);
 err_rings:
-	apple_err("ring alloc failed during probe, cleaning up\n");
 	odl_tb5_rings_free(dev);
 err_chardev:
 	odl_tb5_chardev_destroy(dev);
 err_ida:
+	ida_destroy(&dev->stream_ida);
 	ida_free(&odl_tb5_ida, dev->index);
 err_free_priv:
 	kfree(priv);
@@ -1144,7 +1165,12 @@ static void apple_nhi_remove_dev(struct platform_device *pdev)
 	apple_info("removing device index %d\n", dev->index);
 	atomic_set(&dev->removing, 1);
 
-	hrtimer_cancel(&dev->rx_poll_timer);
+	/* Silence the hardware before tearing down anything the handler
+	 * touches; free_irq() waits for an in-flight handler to finish. */
+	if (priv->irq > 0)
+		free_irq(priv->irq, dev);
+
+	odl_tb5_proto_exit(dev);
 	cancel_work_sync(&dev->tx_drain_work);
 
 	odl_tb5_rings_stop(dev);

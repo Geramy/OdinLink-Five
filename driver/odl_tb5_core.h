@@ -333,6 +333,12 @@ struct odl_tb5_device {
 	struct odl_tb5_ring_ctx	tx;
 	struct odl_tb5_ring_ctx	rx;
 
+	/* Recorded when the coherent buffers are allocated.  transport->
+	 * dma_device() is not safe to call at free time on every backend
+	 * (the NHI one derives it from tx.ring_handle, which teardown has
+	 * usually already released). */
+	struct device		*dma_dev;
+
 	/* DMA verification (ping/pong) */
 	struct work_struct	verify_work;
 	struct work_struct	ctrl_reply_work;
