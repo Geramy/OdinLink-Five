@@ -44,8 +44,6 @@
 
 OSDefineMetaClassAndStructors(OdinLinkRDMA, IOService)
 
-static const IOPhysicalAddress kInvalidPhysAddr = 0xFFFFFFFFFFFFFFFFULL;
-
 bool OdinLinkRDMA::start(IOService *provider)
 {
 	if (!super::start(provider))
@@ -60,7 +58,7 @@ bool OdinLinkRDMA::start(IOService *provider)
 	}
 
 	data = OSDynamicCast(OSData, provider->getProperty("reg"));
-	if (data) {
+	if (data && data->getLength() >= 2 * sizeof(uint32_t)) {
 		const uint32_t *reg = (const uint32_t *)data->getBytesNoCopy();
 		IOLog("OdinLinkRDMA: reg = 0x%08x 0x%08x\n", reg[0], reg[1]);
 	}
@@ -178,7 +176,7 @@ void OdinLinkRDMA::stop(IOService *provider)
 IOReturn OdinLinkRDMA::setProperties(OSObject *properties)
 {
 	OSDictionary *dict = OSDynamicCast(OSDictionary, properties);
-	if (!dict)
+	if (!dict || !fLock)
 		return kIOReturnBadArgument;
 
 	OSNumber *frameCount = OSDynamicCast(OSNumber,
@@ -231,31 +229,26 @@ bool OdinLinkRDMA::getFrameInfo(uint64_t *frameCount, uint64_t *frameSize)
 	return ready;
 }
 
+/*
+ * Positional, in enum order — array designators are a C99 construct that C++
+ * only accepts as a compiler extension.
+ */
 IOExternalMethodDispatch OdinLinkRDMAUserClient::sMethods[kOdinLinkClientNumMethods] = {
-	[kOdinLinkGetBufferInfo] = {
-		.function = (IOExternalMethodAction)&OdinLinkRDMAUserClient::externalGetBufferInfo,
-		.checkScalarInputCount = 0,
-		.checkStructureInputSize = 0,
-		.checkScalarOutputCount = 4,
-		.checkStructureOutputSize = 0,
+	{	/* kOdinLinkGetBufferInfo */
+		(IOExternalMethodAction)&OdinLinkRDMAUserClient::externalGetBufferInfo,
+		0, 0, 4, 0,
 	},
-	[kOdinLinkSharedBufferCreate] = {
-		.function = (IOExternalMethodAction)&OdinLinkRDMAUserClient::externalSharedBufferCreate,
-		.checkScalarInputCount = 0,
-		.checkStructureInputSize = 0,
-		.checkScalarOutputCount = 1,
-		.checkStructureOutputSize = 0,
-	},
-	[kOdinLinkGetFrameInfo] = {
-		.function = (IOExternalMethodAction)&OdinLinkRDMAUserClient::externalGetFrameInfo,
-		.checkScalarInputCount = 0,
-		.checkStructureInputSize = 0,
-		.checkScalarOutputCount = 2,
-		.checkStructureOutputSize = 0,
+	{	/* kOdinLinkGetFrameInfo */
+		(IOExternalMethodAction)&OdinLinkRDMAUserClient::externalGetFrameInfo,
+		0, 0, 2, 0,
 	},
 };
 
 OSDefineMetaClassAndStructors(OdinLinkRDMAUserClient, IOUserClient)
+
+/* The user client's base class is IOUserClient, not IOService. */
+#undef super
+#define super IOUserClient
 
 bool OdinLinkRDMAUserClient::start(IOService *provider)
 {
@@ -266,8 +259,6 @@ bool OdinLinkRDMAUserClient::start(IOService *provider)
 	if (!fProvider)
 		return false;
 
-	fSharedMemory = NULL;
-
 	IOLog("OdinLinkRDMAUserClient: started\n");
 	return true;
 }
@@ -275,23 +266,12 @@ bool OdinLinkRDMAUserClient::start(IOService *provider)
 void OdinLinkRDMAUserClient::stop(IOService *provider)
 {
 	IOLog("OdinLinkRDMAUserClient: stopping\n");
-
-	if (fSharedMemory) {
-		fSharedMemory->release();
-		fSharedMemory = NULL;
-	}
-
 	super::stop(provider);
 }
 
 IOReturn OdinLinkRDMAUserClient::clientClose(void)
 {
 	IOLog("OdinLinkRDMAUserClient: client closed\n");
-
-	if (fSharedMemory) {
-		fSharedMemory->release();
-		fSharedMemory = NULL;
-	}
 
 	terminate();
 	return kIOReturnSuccess;
@@ -327,34 +307,29 @@ IOReturn OdinLinkRDMAUserClient::externalGetBufferInfo(
 	return kIOReturnSuccess;
 }
 
-IOReturn OdinLinkRDMAUserClient::externalSharedBufferCreate(
-	OdinLinkRDMAUserClient *target, void *reference,
-	IOExternalMethodArguments *arguments)
+/*
+ * Backs IOConnectMapMemory64().  IOKit releases the descriptor once the
+ * mapping is built, so hand back a retained reference rather than the
+ * provider's only one.
+ */
+IOReturn OdinLinkRDMAUserClient::clientMemoryForType(
+	UInt32 type, IOOptionBits *options, IOMemoryDescriptor **memory)
 {
-	OdinLinkRDMA *prov = target->fProvider;
-	if (!prov)
+	if (type != kOdinLinkSharedBufferType)
+		return kIOReturnUnsupported;
+
+	if (!fProvider)
 		return kIOReturnNotReady;
 
-	IOMemoryDescriptor *bufMem = prov->getBufferMemory();
+	IOMemoryDescriptor *bufMem = fProvider->getBufferMemory();
 	if (!bufMem)
 		return kIOReturnNoMemory;
 
-	if (target->fSharedMemory) {
-		target->fSharedMemory->release();
-		target->fSharedMemory = NULL;
-	}
+	bufMem->retain();
 
-	IOReturn ret = target->copyClientMemoryForVirtualAddress(
-		(mach_vm_address_t)0, &target->fSharedMemory, 0, bufMem);
+	*options = 0;
+	*memory = bufMem;
 
-	if (ret != kIOReturnSuccess) {
-		IOLog("OdinLinkRDMAUserClient: shared buffer create failed: 0x%x\n", ret);
-		return ret;
-	}
-
-	arguments->scalarOutput[0] = (uint64_t)target->fSharedMemory;
-
-	IOLog("OdinLinkRDMAUserClient: shared buffer created\n");
 	return kIOReturnSuccess;
 }
 

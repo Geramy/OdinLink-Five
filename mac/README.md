@@ -14,7 +14,7 @@ Send tensors from Ubuntu → Thunderbolt 5 → Mac, stored in a shared DMA buffe
 │                            │             │                                 │
 │  Tensor data flows via     │             │  odl_rdma_client               │
 │  OdinLink kernel driver    │             │  ├─ IOServiceOpen()            │
-│  → NHI DMA rings           │             │  ├─ mach_vm_map(shared_buf)    │
+│  → NHI DMA rings           │             │  ├─ IOConnectMapMemory64()     │
 │  → Thunderbolt fabric      │             │  └─ Read tensor data          │
 │  → Apple ACIO/NHI          │             │                                 │
 │  → DART translates addr    │             │  (Optional) Metal:             │
@@ -40,7 +40,7 @@ Key insight: Apple Silicon has unified memory. CPU, GPU, and DMA all share the s
 2. **Allocates** an `IOBufferMemoryDescriptor` (physically contiguous, 2 frames of 1920×1080 RGBA8 = ~16.5 MB)
 3. **Creates** an `IODMACommand` which tells DART to map those pages for the NHI's DMA engine
 4. **Exposes** the DART-translated physical address to userspace (the Linux peer needs this as the RDMA target)
-5. **Shares** the buffer via `IOUserClient` shared memory — userspace mmaps it directly
+5. **Shares** the buffer via `IOUserClient::clientMemoryForType()` — userspace maps it with `IOConnectMapMemory64()`
 6. **Polling**: userspace calls `kOdinLinkGetFrameInfo` to check for new frames (could be replaced with MSI notification)
 
 ## Linux Tensor Sender — How It Works

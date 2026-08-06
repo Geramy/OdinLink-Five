@@ -24,7 +24,6 @@
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
-#include <IOKit/IOConnect.h>
 
 #include "OdinLinkRDMA.h"
 
@@ -159,44 +158,23 @@ int main(int argc, char **argv)
 	/* ── Map shared buffer ───────────────────────────────────────── */
 
 	mach_vm_address_t shared_addr = 0;
+	mach_vm_size_t shared_size = 0;
 
-	{
-		uint64_t output[1] = {};
-		uint32_t output_count = 1;
+	kr = IOConnectMapMemory64(conn,
+				  kOdinLinkSharedBufferType,
+				  mach_task_self(),
+				  &shared_addr,
+				  &shared_size,
+				  kIOMapAnywhere);
 
-		kr = IOConnectCallScalarMethod(
-			conn,
-			kOdinLinkSharedBufferCreate,
-			NULL, 0,
-			output, &output_count);
-
-		if (kr != KERN_SUCCESS) {
-			fprintf(stderr, "SharedBufferCreate failed: %s\n",
-				mach_error_string(kr));
-			goto err_close;
-		}
-
-		kr = mach_vm_map(mach_task_self(),
-				 &shared_addr,
-				 buf_size,
-				 0,
-				 VM_FLAGS_ANYWHERE,
-				 conn,
-				 output[0],
-				 FALSE,
-				 VM_PROT_READ | VM_PROT_WRITE,
-				 VM_PROT_READ | VM_PROT_WRITE,
-				 VM_INHERIT_SHARE);
-
-		if (kr != KERN_SUCCESS) {
-			fprintf(stderr, "mach_vm_map failed: %s\n",
-				mach_error_string(kr));
-			goto err_close;
-		}
+	if (kr != KERN_SUCCESS) {
+		fprintf(stderr, "IOConnectMapMemory64 failed: %s\n",
+			mach_error_string(kr));
+		goto err_close;
 	}
 
 	printf("Shared buffer mapped at %p (%llu bytes)\n",
-	       (void *)shared_addr, (unsigned long long)buf_size);
+	       (void *)shared_addr, (unsigned long long)shared_size);
 
 	/* ── Poll for frames or dump ─────────────────────────────────── */
 
@@ -293,7 +271,8 @@ int main(int argc, char **argv)
 	/* ── Cleanup ─────────────────────────────────────────────────── */
 
 	if (shared_addr)
-		mach_vm_deallocate(mach_task_self(), shared_addr, buf_size);
+		IOConnectUnmapMemory64(conn, kOdinLinkSharedBufferType,
+				       mach_task_self(), shared_addr);
 
 err_close:
 	IOServiceClose(conn);

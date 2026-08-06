@@ -7,12 +7,21 @@
 #ifndef ODINLINK_RDMA_H
 #define ODINLINK_RDMA_H
 
+/*
+ * Everything above the KERNEL guard below is the userspace ABI — the buffer
+ * geometry and the method selectors.  The kext's own class declarations pull
+ * in C++ IOKit headers that only exist in the Kernel framework, so they must
+ * stay out of a userland translation unit.
+ */
+
+#ifdef KERNEL
 #include <IOKit/IOService.h>
 #include <IOKit/IOUserClient.h>
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IODMACommand.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <libkern/OSAtomic.h>
+#endif
 
 /* ── Buffer layout ──────────────────────────────────────────────── */
 
@@ -38,9 +47,17 @@
 
 enum OdinLinkRDMAClientMethods {
 	kOdinLinkGetBufferInfo       = 0,  /* Out: phys_addr, size, frame_size, frame_count */
-	kOdinLinkSharedBufferCreate  = 1,  /* Out: shared_memory_handle (mmap this) */
-	kOdinLinkGetFrameInfo        = 2,  /* Out: frame_count, frame_size (poll for new data) */
-	kOdinLinkClientNumMethods    = 3,
+	kOdinLinkGetFrameInfo        = 1,  /* Out: frame_count, frame_size (poll for new data) */
+	kOdinLinkClientNumMethods    = 2,
+};
+
+/*
+ * Memory type for IOConnectMapMemory64().  The buffer is mapped through the
+ * IOKit mapping path rather than handed out as a mach memory-entry name: an
+ * io_connect_t is not a memory entry, so mach_vm_map() cannot consume one.
+ */
+enum OdinLinkRDMAMemoryTypes {
+	kOdinLinkSharedBufferType    = 0,
 };
 
 /* ── Userspace connection interface ──────────────────────────────── */
@@ -51,14 +68,15 @@ enum OdinLinkRDMAClientMethods {
  *   1. io_connect_t conn = IOServiceOpen(..., "OdinLinkRDMAUserClient")
  *   2. IOConnectCallScalarMethod(conn, kOdinLinkGetBufferInfo, ...)
  *      → returns phys_addr, buffer_size, frame_size, frame_count
- *   3. IOConnectCallScalarMethod(conn, kOdinLinkSharedBufferCreate, ...)
- *      → returns a mach_vm_address_t for mmap
- *   4. mmap(0, buffer_size, PROT_READ|PROT_WRITE, MAP_SHARED, mem_fd, 0)
- *      → now you can read the tensor data
- *   5. Poll kOdinLinkGetFrameInfo to check for new frames
+ *   3. IOConnectMapMemory64(conn, kOdinLinkSharedBufferType, mach_task_self(),
+ *                           &addr, &size, kIOMapAnywhere)
+ *      → now you can read the tensor data at addr
+ *   4. Poll kOdinLinkGetFrameInfo to check for new frames
  */
 
 /* ── Kext class declarations ────────────────────────────────────── */
+
+#ifdef KERNEL
 
 class OdinLinkRDMA : public IOService
 {
@@ -101,11 +119,11 @@ public:
 				OSObject *target,
 				void *reference) override;
 
-	static IOReturn externalGetBufferInfo(
-		OdinLinkRDMAUserClient *target, void *reference,
-		IOExternalMethodArguments *arguments);
+	IOReturn clientMemoryForType(UInt32 type,
+				     IOOptionBits *options,
+				     IOMemoryDescriptor **memory) override;
 
-	static IOReturn externalSharedBufferCreate(
+	static IOReturn externalGetBufferInfo(
 		OdinLinkRDMAUserClient *target, void *reference,
 		IOExternalMethodArguments *arguments);
 
@@ -115,9 +133,10 @@ public:
 
 private:
 	OdinLinkRDMA  *fProvider;
-	IOMemoryMap   *fSharedMemory;
 
 	static IOExternalMethodDispatch sMethods[kOdinLinkClientNumMethods];
 };
+
+#endif /* KERNEL */
 
 #endif /* ODINLINK_RDMA_H */
