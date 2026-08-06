@@ -34,6 +34,10 @@ jobs:
           make -j$(nproc) odl_tb5 odl_tb5_verbs odl_tb5_verbs_provider
           make -j$(nproc) odl_tb5_cli odl_tb5_daemon odl_tb5_tray
           make -j$(nproc) odl_tb5_test odl_tb5_test_rccl_dmabuf
+      # The other suites need /dev/odl_tb5_N, which no runner has. This one
+      # is pure userspace and was being built but never executed.
+      - name: Run plugin test suite
+        run: cd build && ./tests/odl_tb5_test plugin
       # A driver that does not compile must turn this job red. This step used
       # to be continue-on-error, which is how the module reached a PR branch
       # in a state where it had never once been built.
@@ -124,6 +128,8 @@ jobs:
           cmake .. -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_DAEMON=OFF -DBUILD_TRAY=OFF -DBUILD_VERBS=OFF
           make -j$(nproc) odl_tb5 odl_tb5_cli odl_tb5_test
+      - name: Run plugin test suite
+        run: cd build && ./tests/odl_tb5_test plugin
       - name: Collect driver sources
         if: always()
         run: |
@@ -139,9 +145,10 @@ jobs:
           path: /tmp/odl-tb5-driver-arm64/
 
   mac:
-    # Build coverage only. Every runtime suite needs /dev/odl_tb5_N, and macOS
-    # cannot load the kext under CI (SIP), so there is nothing to execute.
-    name: macOS (build coverage)
+    # Mostly build coverage: macOS cannot load the kext under CI (SIP), so
+    # anything needing /dev/odl_tb5_N is out of reach. The plugin suite is
+    # pure userspace and does run.
+    name: macOS
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -153,6 +160,8 @@ jobs:
           cmake .. -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_DAEMON=OFF -DBUILD_TRAY=OFF -DBUILD_VERBS=OFF
           make -j$(sysctl -n hw.ncpu) odl_tb5 odl_tb5_cli odl_tb5_test
+      - name: Run plugin test suite
+        run: cd build && ./tests/odl_tb5_test plugin
       - name: Compile RDMA client
         run: |
           clang -Wall -c mac/odl_rdma_client.c \

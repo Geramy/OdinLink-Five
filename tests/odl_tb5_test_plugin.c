@@ -135,7 +135,7 @@ int odl_tb5_test_plugin(void)
 				FAIL("listen returned error");
 			}
 		} else {
-			printf("SKIP (no devices)\n");
+			printf("SKIP (no device node)\n");
 			pass_count++;
 		}
 	}
