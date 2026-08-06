@@ -83,8 +83,10 @@ bool OdinLinkRDMA::start(IOService *provider)
 		return false;
 	}
 
+	/* 32 address bits: the Apple DART aperture, matching APPLE_TB5_DMA_BITS
+	 * on the Linux side. */
 	fDMACommand = IODMACommand::withSpecification(
-		kIODMACommandOutputHost,
+		IODMACommand::kIODMACommandOutputHost64,
 		32,
 		0,
 		IODMACommand::kMapped,
@@ -106,12 +108,26 @@ bool OdinLinkRDMA::start(IOService *provider)
 
 	{
 		IODMACommand::Segment64 seg;
+		UInt64 offset = 0;
 		UInt32 numSeg = 1;
+
+		/* (offset, segments, numSegments) — the previous call had the
+		 * first and last arguments transposed. */
 		IOReturn ret = fDMACommand->gen64IOVMSegments(
-			&numSeg, &seg, 0);
+			&offset, &seg, &numSeg);
 
 		if (ret != kIOReturnSuccess || numSeg != 1) {
 			IOLog("OdinLinkRDMA: gen64IOVMSegments failed: 0x%x\n", ret);
+			goto err_free_dma;
+		}
+
+		/* A single segment must cover the whole buffer, or the peer's
+		 * RDMA writes would run off the end of the first one. */
+		if (seg.fLength < fBufferBytes) {
+			IOLog("OdinLinkRDMA: DART gave a %llu byte segment for a "
+			      "%llu byte buffer\n",
+			      (unsigned long long)seg.fLength,
+			      (unsigned long long)fBufferBytes);
 			goto err_free_dma;
 		}
 

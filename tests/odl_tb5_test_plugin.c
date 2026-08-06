@@ -12,6 +12,23 @@
 #include <dlfcn.h>
 
 #include "net_v7.h"
+#include "odl_tb5/odl_tb5.h"
+
+/*
+ * devices() reports what the plugin can drive, not what is present, so it
+ * cannot gate the tests that need a bound driver.  Probe the device node
+ * instead — that is the resource listen() actually consumes.
+ */
+static int device_present(void)
+{
+	odl_tb5_t handle;
+
+	if (odl_tb5_open(&handle, 0) != 0)
+		return 0;
+
+	odl_tb5_close(handle);
+	return 1;
+}
 
 static int test_count;
 static int pass_count;
@@ -107,7 +124,7 @@ int odl_tb5_test_plugin(void)
 		int ndev = 0;
 		plugin->devices(&ndev);
 
-		if (ndev > 0) {
+		if (ndev > 0 && device_present()) {
 			void *listenComm = NULL;
 			char handle[64] = {0};
 			rcclResult_t res = plugin->listen(0, handle, &listenComm);
