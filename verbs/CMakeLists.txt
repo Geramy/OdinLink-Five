@@ -76,14 +76,23 @@ install(TARGETS odl_tb5_verbs
 option(ODL_VERBS_BUILD_PROVIDER_PLUGIN "Build rdma-core provider plugin" ON)
 
 if(ODL_VERBS_BUILD_PROVIDER_PLUGIN)
-    # Determine provider plugin install directory
+    # Prefer the multiarch libibverbs dir matching the host, not a hard-coded
+    # aarch64 path that wins on multiarch x86 boxes (issue #23).
     unset(IBVERBS_PROVIDER_DIR)
-    foreach(DIR
-        "/usr/lib/aarch64-linux-gnu/libibverbs"
-        "/usr/lib/x86_64-linux-gnu/libibverbs"
-        "/usr/lib64/libibverbs"
-        "/usr/lib/libibverbs"
-        "${CMAKE_INSTALL_LIBDIR}/libibverbs")
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+        set(_ODL_IBV_CANDIDATES
+            "/usr/lib/aarch64-linux-gnu/libibverbs"
+            "/usr/lib64/libibverbs"
+            "/usr/lib/libibverbs"
+            "${CMAKE_INSTALL_LIBDIR}/libibverbs")
+    else()
+        set(_ODL_IBV_CANDIDATES
+            "/usr/lib/x86_64-linux-gnu/libibverbs"
+            "/usr/lib64/libibverbs"
+            "/usr/lib/libibverbs"
+            "${CMAKE_INSTALL_LIBDIR}/libibverbs")
+    endif()
+    foreach(DIR ${_ODL_IBV_CANDIDATES})
         if(IS_DIRECTORY "${DIR}")
             set(IBVERBS_PROVIDER_DIR "${DIR}")
             break()

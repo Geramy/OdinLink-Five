@@ -77,7 +77,7 @@ static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
 
 	if (!dev) {
 		mutex_unlock(&odl_tb5_devices_lock);
-		pr_warn("OdinLink: incoming packet route %llx — no matching device\n",
+		pr_warn("odl_tb5: incoming packet route %llx — no matching device\n",
 			route);
 		return 0;
 	}
@@ -109,7 +109,7 @@ static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
 			proto_ver = payload[0];
 		}
 
-		pr_info("OdinLink: received login from peer "
+		pr_info("odl_tb5: received login from peer "
 			"(version=%u, tx_path=%u, size=%zu)\n",
 			proto_ver, remote_tx_hopid, size);
 
@@ -120,12 +120,32 @@ static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
 			(sizeof(resp) / 4 - XD_HDR_SIZE_DW);
 		resp.xd_hdr.uuid      = odl_tb5_proto_uuid;
 		resp.xd_hdr.type      = ODL_TB5_MSG_LOGIN_RSP;
-		resp.status            = 0;
+		resp.status            = ODL_TB5_LOGIN_STATUS_OK;
 		resp.transmit_path     = dev->transport->local_tx_hopid(dev);
+
+		/*
+		 * Full OdinLink login packets carry proto_version and must
+		 * match. Short / Apple-style packets omit a meaningful
+		 * version (often 0) — skip the check for those and when
+		 * protocol=1 (macOS compat).
+		 */
+		if (odl_protocol_mode == 0 &&
+		    size >= sizeof(*pkg) &&
+		    proto_ver != ODL_TB5_PROTOCOL_VER) {
+			pr_err("odl_tb5: peer protocol version %u != local %u "
+			       "— refusing (update both nodes to the same "
+			       "driver revision)\n",
+			       proto_ver, ODL_TB5_PROTOCOL_VER);
+			resp.status = ODL_TB5_LOGIN_STATUS_PROTO_MISMATCH;
+			ret = tb_xdomain_response(dev->xd, &resp, sizeof(resp),
+						  TB_CFG_PKG_XDOMAIN_RESP);
+			mutex_unlock(&odl_tb5_devices_lock);
+			return 1;
+		}
 
 		ret = tb_xdomain_response(dev->xd, &resp, sizeof(resp),
 					  TB_CFG_PKG_XDOMAIN_RESP);
-		pr_info("OdinLink: sent login response (ret=%d, route=%llx, "
+		pr_info("odl_tb5: sent login response (ret=%d, route=%llx, "
 			"sn=%u, tx_hopid=%d)\n",
 			ret, dev->xd->route,
 			(hdr->length_sn & XD_SN_MASK) >> 27,
@@ -133,7 +153,7 @@ static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
 
 		mutex_lock(&dev->state_lock);
 		if (dev->state != ODL_TB5_STATE_HANDSHAKE) {
-			pr_info("OdinLink: peer restarted (our state=%d), "
+			pr_info("odl_tb5: peer restarted (our state=%d), "
 				"scheduling restart\n", dev->state);
 			dev->stale_remote_tx_hopid = dev->remote_tx_hopid;
 			dev->remote_tx_hopid = remote_tx_hopid;
@@ -158,7 +178,7 @@ static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
 	}
 
 	case ODL_TB5_MSG_LOGOUT:
-		pr_info("OdinLink: received logout from peer\n");
+		pr_info("odl_tb5: received logout from peer\n");
 
 		mutex_lock(&dev->state_lock);
 		dev->stale_remote_tx_hopid = dev->remote_tx_hopid;
@@ -212,18 +232,21 @@ int odl_tb5_proto_send_login(struct odl_tb5_device *dev)
 	if (!dev->transport || !dev->transport->peer_send_login)
 		return -ENODEV;
 
+	/* peer_send_login validates the response (UUID/type/status),
+	 * including PROTOCOL_VER mismatch → -ECONNREFUSED. */
 	ret = dev->transport->peer_send_login(dev);
 	if (ret) {
-		pr_warn("OdinLink: login request failed: %d\n", ret);
+		pr_warn("odl_tb5: login request failed: %d\n", ret);
 		return ret;
 	}
 
+	mutex_lock(&dev->state_lock);
 	dev->login_sent = true;
 	if (dev->login_received && dev->state == ODL_TB5_STATE_HANDSHAKE)
 		need_complete = true;
 	mutex_unlock(&dev->state_lock);
 
-	pr_info("OdinLink: login sent OK, remote_tx_hopid=%d\n",
+	pr_info("odl_tb5: login sent OK, remote_tx_hopid=%d\n",
 		dev->remote_tx_hopid);
 
 	if (need_complete)
@@ -256,7 +279,7 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 		ret = dev->transport->path_alloc_hopid(dev,
 						       dev->remote_tx_hopid);
 		if (ret < 0) {
-			pr_err("OdinLink: failed to allocate input HopID: %d\n",
+			pr_err("odl_tb5: failed to allocate input HopID: %d\n",
 			       ret);
 			return ret;
 		}
@@ -266,7 +289,7 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 
 	ret = odl_tb5_rings_start(dev);
 	if (ret) {
-		pr_err("OdinLink: failed to start rings: %d\n", ret);
+		pr_err("odl_tb5: failed to start rings: %d\n", ret);
 		goto err_release_hopid;
 	}
 
@@ -275,18 +298,18 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 
 		ret = odl_tb5_submit_rx(dev, 0, rx_prime);
 		if (ret) {
-			pr_err("OdinLink: failed to prime RX: %d\n", ret);
+			pr_err("odl_tb5: failed to prime RX: %d\n", ret);
 			odl_tb5_rings_stop(dev);
 			goto err_release_hopid;
 		}
-		pr_info("OdinLink: RX primed with 16 frames before "
+		pr_info("odl_tb5: RX primed with 16 frames before "
 			"enable_paths\n");
 	}
 
 	if (dev->transport->path_enable) {
 		ret = dev->transport->path_enable(dev);
 		if (ret) {
-			pr_err("OdinLink: failed to enable paths: %d\n", ret);
+			pr_err("odl_tb5: failed to enable paths: %d\n", ret);
 			odl_tb5_rings_stop(dev);
 			goto err_release_hopid;
 		}
@@ -306,7 +329,7 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 		if (dev->transport->rx_ring_info)
 			rx_info = dev->transport->rx_ring_info(dev);
 
-		pr_info("OdinLink: connected to peer "
+		pr_info("odl_tb5: connected to peer "
 			"(remote_tx_hopid=%d, "
 			"tx_ring_hop=%d, rx_ring_hop=%d, "
 			"ring_size=%d, E2E enabled)\n",
@@ -323,7 +346,7 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 		int pool_ret = odl_tb5_frame_pool_alloc(dev);
 
 		if (pool_ret)
-			pr_warn("OdinLink: frame pool alloc failed (%d), "
+			pr_warn("odl_tb5: frame pool alloc failed (%d), "
 				"verify will use legacy path\n", pool_ret);
 	}
 
@@ -332,7 +355,7 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 		int bret = odl_tb5_batch_pool_alloc(dev);
 
 		if (bret)
-			pr_warn("OdinLink: batch pool alloc failed (%d), "
+			pr_warn("odl_tb5: batch pool alloc failed (%d), "
 				"throughput mode disabled\n", bret);
 	}
 
@@ -364,7 +387,7 @@ static void odl_tb5_connect_work_fn(struct work_struct *work)
 		dev->login_received = false;
 		mutex_unlock(&dev->state_lock);
 
-		pr_warn("OdinLink: connection completion failed (%d), "
+		pr_warn("odl_tb5: connection completion failed (%d), "
 			"retrying handshake\n", ret);
 		schedule_delayed_work(&dev->login_work,
 				      msecs_to_jiffies(1000));
@@ -430,7 +453,7 @@ static void odl_tb5_ctrl_reply_work_fn(struct work_struct *work)
 	if (type == ODL_TB5_DMA_PING) {
 		int ret;
 
-		pr_info("OdinLink: DMA ping received, sending pong\n");
+		pr_info("odl_tb5: DMA ping received, sending pong\n");
 		ret = odl_tb5_send_dma_msg(dev, ODL_TB5_DMA_PONG);
 
 		/* BUG 10 fix: answering a PING is itself proof the DMA path
@@ -449,7 +472,7 @@ static void odl_tb5_ctrl_reply_work_fn(struct work_struct *work)
 			wake_up_all(&dev->verify_waitq);
 		}
 	} else {
-		pr_warn("OdinLink: unexpected DMA ctrl message type %d\n",
+		pr_warn("odl_tb5: unexpected DMA ctrl message type %d\n",
 			type);
 	}
 }
@@ -478,14 +501,14 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 	if (dev->frame_pool.slots) {
 		dev->rx_target = dev->frame_pool.size / 2;
 		odl_tb5_rx_repost(dev);
-		pr_info("OdinLink: verify using pool RX (target=%d)\n",
+		pr_info("odl_tb5: verify using pool RX (target=%d)\n",
 			dev->rx_target);
 	} else {
 		size_t buf_size = (size_t)ODL_TB5_FRAME_SIZE * 16;
 
 		ret = odl_tb5_submit_rx(dev, 0, buf_size);
 		if (ret) {
-			pr_warn("OdinLink: DMA verify: failed to post RX "
+			pr_warn("odl_tb5: DMA verify: failed to post RX "
 				"(%ld)\n", ret);
 			goto out_reset;
 		}
@@ -503,13 +526,13 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 
 		ret = odl_tb5_send_dma_msg(dev, ODL_TB5_DMA_PING);
 		if (ret) {
-			pr_warn("OdinLink: DMA verify: send ping failed "
+			pr_warn("odl_tb5: DMA verify: send ping failed "
 				"(%ld)\n", ret);
 			goto out_reset;
 		}
 
 		if (attempt == 0)
-			pr_info("OdinLink: DMA ping sent, "
+			pr_info("odl_tb5: DMA ping sent, "
 				"waiting for pong\n");
 
 		ret = wait_event_interruptible_timeout(
@@ -523,7 +546,7 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 			goto out_reset;
 
 		if ((attempt + 1) % 50 == 0)
-			pr_info("OdinLink: DMA ping attempt %d, "
+			pr_info("odl_tb5: DMA ping attempt %d, "
 				"still waiting for pong\n", attempt + 1);
 
 		/* Do NOT reset the RX ring here — that kills in-flight
@@ -531,12 +554,12 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 	}
 
 	if (!dev->pong_received && !dev->peer_ping_answered) {
-		pr_err("OdinLink: DMA verify failed after %d attempts\n",
+		pr_err("odl_tb5: DMA verify failed after %d attempts\n",
 		       attempt);
 		goto out_reset;
 	}
 
-	pr_info("OdinLink: DMA path verified, resetting rings for userspace\n");
+	pr_info("odl_tb5: DMA path verified, resetting rings for userspace\n");
 
 	flush_work(&dev->ctrl_reply_work);
 	hrtimer_cancel(&dev->rx_poll_timer);
@@ -562,7 +585,7 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 		      ns_to_ktime(ODL_TB5_POLL_INTERVAL_NS),
 		      HRTIMER_MODE_REL);
 
-	pr_info("OdinLink: entering READY state\n");
+	pr_info("odl_tb5: entering READY state\n");
 	return;
 
 out_reset:
@@ -606,7 +629,7 @@ static void odl_tb5_restart_work_fn(struct work_struct *work)
 	dev->login_retries = 0;
 	mutex_unlock(&dev->state_lock);
 
-	pr_info("OdinLink: connection restarted, beginning handshake\n");
+	pr_info("odl_tb5: connection restarted, beginning handshake\n");
 	schedule_delayed_work(&dev->login_work, 0);
 }
 
@@ -629,7 +652,7 @@ static void odl_tb5_login_work_fn(struct work_struct *work)
 
 		if (dev->login_retries <= 5 ||
 		    dev->login_retries % 10 == 0)
-			pr_info("OdinLink: login attempt %d failed (%d), "
+			pr_info("odl_tb5: login attempt %d failed (%d), "
 				"retrying in %lu ms\n",
 				dev->login_retries, ret, delay_ms);
 
@@ -641,7 +664,7 @@ static void odl_tb5_login_work_fn(struct work_struct *work)
 		 * Give up and stay quiescent instead. */
 		if (odl_login_max_retries > 0 &&
 		    dev->login_retries >= odl_login_max_retries) {
-			pr_warn("OdinLink: giving up after %d login attempts "
+			pr_warn("odl_tb5: giving up after %d login attempts "
 				"(last err %d); staying idle.  Check the peer "
 				"is up and only ONE service is bound.\n",
 				dev->login_retries, ret);
@@ -664,7 +687,7 @@ int odl_tb5_proto_send_logout(struct odl_tb5_device *dev)
 	wake_up_all(&dev->state_waitq);
 	mutex_unlock(&dev->state_lock);
 
-	pr_info("OdinLink: logout sent to peer\n");
+	pr_info("odl_tb5: logout sent to peer\n");
 
 	return 0;
 }

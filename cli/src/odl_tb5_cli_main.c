@@ -61,10 +61,11 @@ static void parse_block_sizes(const char *str, struct odl_cli_params *p)
 	snprintf(buf, sizeof(buf), "%s", str);
 	p->num_block_sizes = 0;
 
-	tok = strtok_r(buf, ",", &saveptr);
+	/* Accept comma or slash separators (e.g. 4K,64K,1M or 4K/64K/1M). */
+	tok = strtok_r(buf, ",/", &saveptr);
 	while (tok && p->num_block_sizes < 16) {
 		p->block_sizes[p->num_block_sizes++] = parse_size(tok);
-		tok = strtok_r(NULL, ",", &saveptr);
+		tok = strtok_r(NULL, ",/", &saveptr);
 	}
 }
 

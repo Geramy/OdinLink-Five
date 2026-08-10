@@ -9,16 +9,19 @@ include_directories(third_party/rccl)
 # =============================================================================
 # Consolidated dependency check
 # =============================================================================
+# Missing items are tracked as "pkg: <module>" or "tool: <name>" so the
+# remediation message is distro-agnostic (issue #23: Fedora containers do not
+# speak `apt install`).
 set(ODL_MISSING_DEPS "")
 
 find_program(KERNEL_GCC NAMES gcc-15 gcc-14 gcc QUIET)
 if(NOT KERNEL_GCC)
-    list(APPEND ODL_MISSING_DEPS "gcc-14")
+    list(APPEND ODL_MISSING_DEPS "tool: gcc-14|gcc-15|gcc (matching kernel)")
 endif()
 
-find_program(PKG_CONFIG_EXE NAMES pkg-config QUIET)
+find_program(PKG_CONFIG_EXE NAMES pkg-config pkgconf QUIET)
 if(NOT PKG_CONFIG_EXE)
-    list(APPEND ODL_MISSING_DEPS "pkg-config")
+    list(APPEND ODL_MISSING_DEPS "tool: pkg-config (Debian) / pkgconf (Fedora)")
 endif()
 
 # gdbus-codegen is required only when building the daemon (checked in daemon/CMakeLists.txt)
@@ -28,15 +31,22 @@ option(BUILD_DAEMON "Build OdinLink TB5 system daemon" ON)
 option(BUILD_TRAY   "Build OdinLink TB5 tray application" ON)
 find_program(GDBUS_CODEGEN_EXE NAMES gdbus-codegen QUIET)
 if(NOT GDBUS_CODEGEN_EXE AND BUILD_DAEMON)
-    list(APPEND ODL_MISSING_DEPS "libglib2.0-dev-bin")
+    list(APPEND ODL_MISSING_DEPS "tool: gdbus-codegen (pkg: libglib2.0-dev-bin / glib2-devel)")
 endif()
 
-# Kernel module build — optional. Skip header check when building userspace only.
+# Kernel module build — optional. If headers are absent (typical container
+# userspace-only build), default BUILD_KERNEL_MODULE off instead of failing.
 option(BUILD_KERNEL_MODULE "Build the odl_tb5 kernel module" ON)
-if(BUILD_KERNEL_MODULE AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     execute_process(COMMAND uname -r OUTPUT_VARIABLE KERNEL_RELEASE OUTPUT_STRIP_TRAILING_WHITESPACE)
-    if(NOT EXISTS "/lib/modules/${KERNEL_RELEASE}/build")
-        list(APPEND ODL_MISSING_DEPS "linux-headers-${KERNEL_RELEASE}")
+    set(ODL_KERNEL_BUILD_DIR "/lib/modules/${KERNEL_RELEASE}/build")
+    if(BUILD_KERNEL_MODULE AND NOT EXISTS "${ODL_KERNEL_BUILD_DIR}")
+        message(STATUS
+            "Kernel headers not found at ${ODL_KERNEL_BUILD_DIR} — "
+            "defaulting BUILD_KERNEL_MODULE=OFF (userspace-only build). "
+            "Install linux-headers-${KERNEL_RELEASE} (or distro equivalent) "
+            "and reconfigure with -DBUILD_KERNEL_MODULE=ON to build the driver.")
+        set(BUILD_KERNEL_MODULE OFF CACHE BOOL "Build the odl_tb5 kernel module" FORCE)
     endif()
 endif()
 
@@ -44,57 +54,57 @@ if(PKG_CONFIG_EXE)
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
         pkg_check_modules(_CHK_GLIB2 QUIET glib-2.0>=2.56)
-        if(NOT _CHK_GLIB2_FOUND)
-            list(APPEND ODL_MISSING_DEPS "libglib2.0-dev")
+        if(NOT _CHK_GLIB2_FOUND AND BUILD_DAEMON)
+            list(APPEND ODL_MISSING_DEPS "pkg: glib-2.0 (Debian: libglib2.0-dev, Fedora: glib2-devel)")
         endif()
         if(BUILD_TRAY)
             pkg_check_modules(_CHK_GTK3 QUIET gtk+-3.0>=3.22)
             if(NOT _CHK_GTK3_FOUND)
-                list(APPEND ODL_MISSING_DEPS "libgtk-3-dev")
+                list(APPEND ODL_MISSING_DEPS "pkg: gtk+-3.0 (Debian: libgtk-3-dev, Fedora: gtk3-devel)")
             endif()
             pkg_check_modules(_CHK_APPIND QUIET ayatana-appindicator3-0.1)
             if(NOT _CHK_APPIND_FOUND)
-                list(APPEND ODL_MISSING_DEPS "libayatana-appindicator3-dev")
+                list(APPEND ODL_MISSING_DEPS "pkg: ayatana-appindicator3-0.1 (Debian: libayatana-appindicator3-dev)")
             endif()
         endif()
         # Optional
         pkg_check_modules(_CHK_FUSE3 QUIET fuse3>=3.1)
         if(NOT _CHK_FUSE3_FOUND)
-            message(STATUS "Optional: libfuse3-dev not found (distributed file access disabled)")
+            message(STATUS "Optional: fuse3 not found (distributed file access disabled)")
         endif()
         pkg_check_modules(_CHK_OPENSSL QUIET libcrypto)
         if(NOT _CHK_OPENSSL_FOUND)
-            message(STATUS "Optional: libssl-dev not found (SHA-256 sync disabled)")
+            message(STATUS "Optional: libcrypto not found (SHA-256 sync disabled)")
         endif()
     endif()
 else()
-    list(APPEND ODL_MISSING_DEPS "libglib2.0-dev" "libgtk-3-dev" "libayatana-appindicator3-dev")
+    if(BUILD_DAEMON OR BUILD_TRAY)
+        list(APPEND ODL_MISSING_DEPS "tool: pkg-config (needed to probe glib/gtk)")
+    endif()
 endif()
 
 list(REMOVE_DUPLICATES ODL_MISSING_DEPS)
 if(ODL_MISSING_DEPS)
-    string(REPLACE ";" " " _DEPS_STR "${ODL_MISSING_DEPS}")
+    string(REPLACE ";" "\n    - " _DEPS_STR "${ODL_MISSING_DEPS}")
     message(WARNING
         "\n"
         "============================================================\n"
-        "  Missing build dependencies!\n"
+        "  Missing optional/component build dependencies:\n"
         "\n"
-        "  Run:\n"
-        "    sudo apt install ${_DEPS_STR}\n"
+        "    - ${_DEPS_STR}\n"
         "\n"
-        "  Then re-run cmake.\n"
+        "  Daemon/tray auto-disable when their deps are absent.\n"
+        "  Userspace-only (e.g. container consumers):\n"
+        "    cmake .. -DBUILD_KERNEL_MODULE=OFF -DBUILD_DAEMON=OFF -DBUILD_TRAY=OFF\n"
+        "  Fedora container example:\n"
+        "    dnf install -y rdma-core-devel libibverbs-utils pkgconf-pkg-config make gcc cmake\n"
         "============================================================\n")
-    # Fail only if a required dep is missing (not optional fuse3/openssl)
-    if(BUILD_KERNEL_MODULE)
-        if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
-           (NOT KERNEL_GCC OR NOT PKG_CONFIG_EXE OR NOT GDBUS_CODEGEN_EXE
-            OR NOT EXISTS "/lib/modules/${KERNEL_RELEASE}/build"))
-            message(FATAL_ERROR "Cannot continue without required dependencies.")
-        endif()
-    else()
-        if(NOT PKG_CONFIG_EXE)
-            message(FATAL_ERROR "Cannot continue without required dependencies.")
-        endif()
+    # Hard-fail only when pkg-config itself is missing and we cannot build
+    # anything useful (daemon/tray already soft-disable; kernel already off).
+    if(NOT PKG_CONFIG_EXE AND (BUILD_DAEMON OR BUILD_TRAY))
+        message(STATUS "pkg-config missing — disabling BUILD_DAEMON and BUILD_TRAY")
+        set(BUILD_DAEMON OFF)
+        set(BUILD_TRAY OFF)
     endif()
 endif()
 if(NOT ODL_MISSING_DEPS)

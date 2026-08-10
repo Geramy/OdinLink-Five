@@ -285,7 +285,7 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 					u32 type = le32_to_cpu(dhdr->type);
 
 					if (type == ODL_TB5_DMA_PONG) {
-						pr_info("OdinLink: DMA pong received (pool)\n");
+						pr_info("odl_tb5: DMA pong received (pool)\n");
 						dev->pong_received = true;
 						wake_up_interruptible(&dev->verify_waitq);
 					} else {
@@ -496,7 +496,7 @@ rx_frame_done:
 			u32 type = le32_to_cpu(hdr->type);
 
 			if (type == ODL_TB5_DMA_PONG) {
-				pr_info("OdinLink: DMA pong received\n");
+				pr_info("odl_tb5: DMA pong received\n");
 				dev->pong_received = true;
 				wake_up_interruptible(&dev->verify_waitq);
 			} else {

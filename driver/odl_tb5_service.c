@@ -132,18 +132,70 @@ static int odl_tb5_probe(struct tb_service *svc,
 		goto err_free_dev;
 	}
 
-	ret = odl_tb5_rings_alloc(dev);
-	if (ret) {
-		pr_err("odl_tb5: ring alloc failed for index %d: %d\n",
-		       dev->index, ret);
-		goto err_chardev;
-	}
+	/*
+	 * On identity-IOMMU hosts (common with iommu=pt on Proxmox/virt),
+	 * dma_alloc_coherent needs physically contiguous memory. The default
+	 * odl_ring_size=4096 requests 16 MB batches (order-12) and fails with
+	 * -ENOMEM even when RAM is free. Retry with progressively smaller
+	 * power-of-two ring sizes so probe still succeeds (issue #23).
+	 */
+	{
+		unsigned int try_rs = odl_ring_size;
+		unsigned int requested = odl_ring_size;
+		int last_err = -ENOMEM;
 
-	ret = odl_tb5_dma_bufs_alloc(dev);
-	if (ret) {
-		pr_err("odl_tb5: DMA buf alloc failed for index %d: %d\n",
-		       dev->index, ret);
-		goto err_rings;
+		while (try_rs >= ODL_TB5_RING_SIZE_MIN) {
+			odl_ring_size = try_rs;
+			ret = odl_tb5_rings_alloc(dev);
+			if (ret) {
+				last_err = ret;
+				pr_err("odl_tb5: ring alloc failed for index %d "
+				       "(odl_ring_size=%u): %d\n",
+				       dev->index, try_rs, ret);
+				try_rs >>= 1;
+				continue;
+			}
+
+			ret = odl_tb5_dma_bufs_alloc(dev);
+			if (!ret) {
+				if (try_rs != requested)
+					pr_warn("odl_tb5: reduced odl_ring_size "
+						"%u → %u after alloc failure "
+						"(identity IOMMU / iommu=pt often "
+						"needs odl_ring_size=1024)\n",
+						requested, try_rs);
+				/* Keep the working size for any later probes. */
+				odl_ring_size = try_rs;
+				dev->tx_adaptive.high_watermark =
+					min_t(unsigned int, try_rs * 3 / 4,
+					      ODL_TB5_FRAME_POOL_SIZE -
+					      ODL_TB5_TX_POOL_RESERVE);
+				dev->tx_adaptive.low_watermark =
+					min_t(unsigned int, try_rs / 4,
+					      (ODL_TB5_FRAME_POOL_SIZE -
+					       ODL_TB5_TX_POOL_RESERVE) / 2);
+				break;
+			}
+
+			last_err = ret;
+			pr_err("odl_tb5: DMA buf alloc failed for index %d "
+			       "(odl_ring_size=%u, %zu bytes/batch): %d\n",
+			       dev->index, try_rs,
+			       (size_t)ODL_TB5_FRAME_SIZE * try_rs, ret);
+			odl_tb5_rings_free(dev);
+			try_rs >>= 1;
+		}
+
+		if (ret) {
+			odl_ring_size = requested;
+			pr_err("odl_tb5: could not allocate DMA rings/buffers "
+			       "down to odl_ring_size=%u (last err %d). On "
+			       "iommu=pt hosts try: modprobe odl_tb5 "
+			       "odl_ring_size=1024\n",
+			       ODL_TB5_RING_SIZE_MIN, last_err);
+			ret = last_err;
+			goto err_chardev;
+		}
 	}
 
 	ret = odl_tb5_proto_init(dev);
@@ -278,7 +330,7 @@ static int __init odl_tb5_init(void)
 	if (!is_power_of_2(odl_ring_size) ||
 	    odl_ring_size < ODL_TB5_RING_SIZE_MIN ||
 	    odl_ring_size > ODL_TB5_RING_SIZE_MAX) {
-		pr_err("odl_tb5: invalid ring_size=%u (must be power-of-2, %u-%u)\n",
+		pr_err("odl_tb5: invalid odl_ring_size=%u (must be power-of-2, %u-%u)\n",
 		       odl_ring_size, ODL_TB5_RING_SIZE_MIN,
 		       ODL_TB5_RING_SIZE_MAX);
 		return -EINVAL;
@@ -372,7 +424,7 @@ static int __init odl_tb5_init(void)
 
 	odl_tb5_apple_init();
 
-	pr_info("odl_tb5: OdinLink TB5 driver loaded (ring_size=%u)\n",
+	pr_info("odl_tb5: OdinLink TB5 driver loaded (odl_ring_size=%u)\n",
 		odl_ring_size);
 
 	return 0;

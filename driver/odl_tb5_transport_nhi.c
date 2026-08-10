@@ -44,7 +44,7 @@ static int nhi_ring_alloc(struct odl_tb5_device *dev)
 	dev->tx.ring_size = rs;
 	dev->rx.ring_size = rs;
 
-	pr_info("odl_tb5: ring_size=%u (%u MB per batch, %u MB total)\n",
+	pr_info("odl_tb5: odl_ring_size=%u (%u MB per batch, %u MB total)\n",
 		rs,
 		(rs * ODL_TB5_FRAME_SIZE) >> 20,
 		(rs * ODL_TB5_FRAME_SIZE * ODL_TB5_NUM_BUFFERS * 2) >> 20);
@@ -241,7 +241,7 @@ static int nhi_path_enable(struct odl_tb5_device *dev)
 		if (!ret)
 			return 0;
 		if (i < ODL_TB5_ENABLE_RETRIES - 1) {
-			pr_warn("OdinLink: enable_paths failed (%d), "
+			pr_warn("odl_tb5: enable_paths failed (%d), "
 				"retry %d/%d in %d ms\n",
 				ret, i + 1, ODL_TB5_ENABLE_RETRIES,
 				ODL_TB5_ENABLE_DELAY);
@@ -249,7 +249,7 @@ static int nhi_path_enable(struct odl_tb5_device *dev)
 		}
 	}
 
-	pr_err("OdinLink: failed to enable XDomain paths after %d attempts: %d\n",
+	pr_err("odl_tb5: failed to enable XDomain paths after %d attempts: %d\n",
 	       ODL_TB5_ENABLE_RETRIES, ret);
 	return ret;
 }
@@ -299,8 +299,17 @@ static int nhi_peer_send_login(struct odl_tb5_device *dev)
 	if (resp.xd_hdr.type != ODL_TB5_MSG_LOGIN_RSP)
 		return -EPROTO;
 
-	if (resp.status != 0)
+	if (resp.status != ODL_TB5_LOGIN_STATUS_OK) {
+		if (resp.status == ODL_TB5_LOGIN_STATUS_PROTO_MISMATCH)
+			pr_err("odl_tb5: peer rejected login — protocol "
+			       "version mismatch (local=%u). Update both "
+			       "nodes to the same driver revision.\n",
+			       ODL_TB5_PROTOCOL_VER);
+		else
+			pr_err("odl_tb5: peer rejected login (status=%u)\n",
+			       resp.status);
 		return -ECONNREFUSED;
+	}
 
 	dev->remote_tx_hopid = resp.transmit_path;
 	return 0;

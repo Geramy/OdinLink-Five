@@ -59,14 +59,30 @@ CMake reports which components are enabled:
 -- BUILD_TRAY:   ON
 ```
 
+## Userspace-Only Build (containers)
+
+When the module runs on the host and only userspace is needed inside a
+container (no kernel headers, no GUI):
+
+```bash
+# Fedora
+dnf install -y rdma-core-devel libibverbs-utils pkgconf-pkg-config make gcc cmake
+
+cmake .. -DBUILD_VERBS=ON -DBUILD_KERNEL_MODULE=OFF -DBUILD_DAEMON=OFF -DBUILD_TRAY=OFF
+cmake --build . --target odl_tb5 odl_tb5_verbs rccl_net_odl_tb5 -j$(nproc)
+```
+
+If `/lib/modules/$(uname -r)/build` is missing, CMake defaults
+`BUILD_KERNEL_MODULE=OFF` instead of hard-failing.
+
 ## Load the Kernel Module
 
 ```bash
 # Load with default ring size (4096 entries = 16 MB per batch)
 sudo insmod driver/odl_tb5.ko
 
-# Or load with custom ring size (power of 2, 64-16384)
-sudo insmod driver/odl_tb5.ko ring_size=16384
+# Custom ring size (power of 2, 64-16384). Name is odl_ring_size, not ring_size.
+sudo insmod driver/odl_tb5.ko odl_ring_size=1024   # recommended with iommu=pt
 
 # Loopback mode (no cable needed)
 sudo insmod driver/odl_tb5.ko loopback=1
@@ -74,8 +90,9 @@ sudo insmod driver/odl_tb5.ko loopback=1
 # Apple-compatible protocol mode
 sudo insmod driver/odl_tb5.ko protocol=1
 
-# Verify
+# Verify — /dev appears only after READY
 lsmod | grep odl_tb5
+dmesg | grep 'odl_tb5: entering READY'
 ls /dev/odl_tb5_*
 
 # Install udev rule for persistent permissions
@@ -86,25 +103,34 @@ sudo udevadm control --reload-rules
 ## Install Verbs Provider Plugin
 
 ```bash
-sudo mkdir -p /usr/lib/aarch64-linux-gnu/libibverbs
-sudo cp build/verbs/libodl_tb5-rdmav34.so /usr/lib/aarch64-linux-gnu/libibverbs/
-ibv_devinfo
+# x86_64:
+sudo mkdir -p /usr/lib/x86_64-linux-gnu/libibverbs
+sudo cp build/verbs/libodl_tb5-rdmav34.so /usr/lib/x86_64-linux-gnu/libibverbs/
+
+# aarch64:
+# sudo mkdir -p /usr/lib/aarch64-linux-gnu/libibverbs
+# sudo cp build/verbs/libodl_tb5-rdmav34.so /usr/lib/aarch64-linux-gnu/libibverbs/
+
+# On OdinLink-only hosts the directory plugin may not load. Use:
+LD_PRELOAD=build/verbs/libodl_tb5_verbs.so ibv_devinfo
 ```
 
 ## Run Performance Tests
 
 Both machines must have the driver loaded and be connected via TB5 cable.
+Wait for `odl_tb5: entering READY state` in dmesg on both sides first
+(after a module reload there is a short DMA-ping window).
 
 ```bash
-# Machine A (server):
-./build/cli/odl_tb5_cli --server --device 0
+# Machine A (server) — positional mode, not --server:
+./build/cli/odl_tb5_cli server -d 0
 
 # Machine B (client):
-./build/cli/odl_tb5_cli --client --device 0 --test bandwidth
-./build/cli/odl_tb5_cli --client --device 0 --test latency
-./build/cli/odl_tb5_cli --client --device 0 --test jitter
-./build/cli/odl_tb5_cli --client --device 0 --test latency-load
-./build/cli/odl_tb5_cli --client --device 0 --test mimo
+./build/cli/odl_tb5_cli client -d 0 -t bandwidth -b 64K,1M,4M
+./build/cli/odl_tb5_cli client -d 0 -t latency
+./build/cli/odl_tb5_cli client -d 0 -t jitter
+./build/cli/odl_tb5_cli client -d 0 -t latency-load
+./build/cli/odl_tb5_cli client -d 0 -t mimo
 ```
 
 ## Start Daemon and Tray
