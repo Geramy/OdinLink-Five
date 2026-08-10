@@ -17,7 +17,7 @@ static int __init odl_tb5_init(void)
 	if (!is_power_of_2(odl_ring_size) ||
 	    odl_ring_size < ODL_TB5_RING_SIZE_MIN ||
 	    odl_ring_size > ODL_TB5_RING_SIZE_MAX) {
-		pr_err("odl_tb5: invalid ring_size=%u (must be power-of-2, %u-%u)\n",
+		pr_err("odl_tb5: invalid odl_ring_size=%u (must be power-of-2, %u-%u)\n",
 		       odl_ring_size, ODL_TB5_RING_SIZE_MIN,
 		       ODL_TB5_RING_SIZE_MAX);
 		return -EINVAL;
@@ -38,7 +38,7 @@ static int __init odl_tb5_init(void)
 
 	odl_tb5_apple_init();
 
-	pr_info("odl_tb5: OdinLink TB5 driver loaded (apple transport, ring_size=%u)\n",
+	pr_info("odl_tb5: OdinLink TB5 driver loaded (apple transport, odl_ring_size=%u)\n",
 		odl_ring_size);
 
 	return 0;
