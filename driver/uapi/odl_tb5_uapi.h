@@ -45,7 +45,15 @@ typedef int64_t  __s64;
 
 #define ODL_TB5_PROTOCOL_KEY   "odinlink"
 #define ODL_TB5_PROTOCOL_ID    0x4F4C
-#define ODL_TB5_PROTOCOL_VER   1
+/* Bumped when the on-wire stream format changes. Login refuses peers that
+ * advertise a different version so mismatched revs fail loudly instead of
+ * looking healthy and timing out every application handshake (issue #23).
+ *   1 — original 5-byte stream header
+ *   2 — 8-byte stream header with frag_idx (commit 14422e6) */
+#define ODL_TB5_PROTOCOL_VER   2
+/* Non-zero status values in the XDomain login response. */
+#define ODL_TB5_LOGIN_STATUS_OK             0
+#define ODL_TB5_LOGIN_STATUS_PROTO_MISMATCH 1
 
 /* Apple ThunderboltRDMA protocol — for cross-platform Mac ↔ Linux interop
  * Source: AppleThunderboltRDMA.kext Info.plist IOPropertyMatch Protocol ID

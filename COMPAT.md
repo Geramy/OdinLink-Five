@@ -237,14 +237,14 @@ build/verbs/tests/test_verbs_mock_loopback
 ```bash
 # Machine A:
 sudo insmod driver/odl_tb5.ko
-build/cli/odl_tb5_cli --server --device 0
+build/cli/odl_tb5_cli server -d 0
 
-# Machine B:
+# Machine B (wait for "odl_tb5: entering READY state"):
 sudo insmod driver/odl_tb5.ko
-build/cli/odl_tb5_cli --client --device 0 --test bandwidth
+build/cli/odl_tb5_cli client -d 0 -t bandwidth
 
 # Or via verbs:
-build/verbs/tests/test_verbs_basic
+LD_PRELOAD=build/verbs/libodl_tb5_verbs.so build/verbs/tests/test_verbs_basic
 ```
 
 ### Mac ↔ Linux (future — needs protocol matching)

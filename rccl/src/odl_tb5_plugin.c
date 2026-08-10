@@ -237,9 +237,25 @@ static void put_shared_handle(void)
 
 static rcclResult_t odl_tb5_init(rcclDebugLogger_t logFunction)
 {
+	const char *preload;
+
 	odl_logger = logFunction;
 	odl_dbg_init();
 	DBG(1, "init: plugin loaded pid=%d", (int)getpid());
+	/* One-line confirmation so logs prove the fast path is active
+	 * (silent Socket fallback is the #1 footgun — issue #23). */
+	if (odl_logger)
+		odl_logger(3 /* INFO */,
+			   "ODL_TB5 net plugin loaded (use NET/ODL_TB5, not Socket)");
+	else
+		fprintf(stderr, "NCCL INFO ODL_TB5 net plugin loaded\n");
+
+	preload = getenv("LD_PRELOAD");
+	if (preload && strstr(preload, "odl_tb5_verbs"))
+		WARN("LD_PRELOAD includes odl_tb5_verbs — that interposer does "
+		     "not help RCCL (it dlopens libibverbs.so.1 directly). "
+		     "This net plugin is the supported path.");
+
 	stats_init();
 	atexit(stats_cleanup);
 	return rcclSuccess;

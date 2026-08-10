@@ -34,12 +34,12 @@ cp driver/Kbuild                "$SRC_DIR/"
 cp driver/Makefile              "$SRC_DIR/"
 cp driver/uapi/odl_tb5_uapi.h   "$SRC_DIR/uapi/"
 
-# Configure dkms.conf with the version
+# Substitute @PROJECT_VERSION@ into dkms.conf and the postinst/prerm helpers.
+# (Copying the helpers verbatim left the placeholder literal and made DKMS
+# look for /usr/src/odl-tb5-@PROJECT_VERSION@ — issue #23.)
 sed "s/@PROJECT_VERSION@/$PACKAGE_VERSION/g" packaging/dkms.conf > "$SRC_DIR/dkms.conf"
-
-# Copy helper scripts
-cp packaging/dkms-postinst.sh    "$SRC_DIR/"
-cp packaging/dkms-prerm.sh      "$SRC_DIR/"
+sed "s/@PROJECT_VERSION@/$PACKAGE_VERSION/g" packaging/dkms-postinst.sh > "$SRC_DIR/dkms-postinst.sh"
+sed "s/@PROJECT_VERSION@/$PACKAGE_VERSION/g" packaging/dkms-prerm.sh > "$SRC_DIR/dkms-prerm.sh"
 chmod +x "$SRC_DIR/dkms-postinst.sh" "$SRC_DIR/dkms-prerm.sh"
 
 # Register with DKMS

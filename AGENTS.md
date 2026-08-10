@@ -48,7 +48,7 @@ mkdir build && cd build && cmake .. && make -j$(nproc)
 
 ## Module Parameters
 
-`ring_size=4096` (range 64–16384, power of 2, 4 KB per entry). `e2e=1` (default, RING_FLAG_E2E). Pass `e2e=0` for TB3 controllers that don't support end-to-end flow control. `protocol=0` (OdinLink, default) or `1` (Apple/macOS compat).
+`odl_ring_size=4096` (range 64–16384, power of 2, 4 KB per entry; probe auto-downgrades on DMA `-ENOMEM` / `iommu=pt`). `e2e=1` (default, RING_FLAG_E2E). Pass `e2e=0` for TB3 controllers that don't support end-to-end flow control. `protocol=0` (OdinLink, default) or `1` (Apple/macOS compat). `ODL_TB5_PROTOCOL_VER` is exchanged at login — mismatched revs refuse READY.
 
 ## Gotchas
 

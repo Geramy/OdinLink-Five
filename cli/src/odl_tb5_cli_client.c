@@ -57,12 +57,30 @@ static int run_single_test(odl_tb5_t handle, uint8_t sid, uint8_t dst,
 
 	switch (test_type) {
 	case ODL_TEST_BANDWIDTH:
-		ret = send_test_request(handle, sid, dst, params, test_type,
-					params->block_sizes[0]);
-		if (ret < 0)
-			return ret;
+		/*
+		 * One TEST_REQ per block size. The bandwidth client used to
+		 * loop TEST_START for every size under a single TEST_REQ, but
+		 * the server returns after one size — so the next TEST_START
+		 * hit the server main loop as a non-REQ message and the
+		 * following data frames failed with "Protocol error" (issue #23).
+		 */
+		for (int i = 0; i < params->num_block_sizes; i++) {
+			struct odl_cli_params one = *params;
 
-		ret = odl_cli_bandwidth_client(handle, sid, dst, params);
+			one.block_sizes[0] = params->block_sizes[i];
+			one.num_block_sizes = 1;
+
+			printf("\n--- Bandwidth Test (block=%u) ---\n",
+			       one.block_sizes[0]);
+			ret = send_test_request(handle, sid, dst, &one,
+						test_type, one.block_sizes[0]);
+			if (ret < 0)
+				return ret;
+
+			ret = odl_cli_bandwidth_client(handle, sid, dst, &one);
+			if (ret < 0)
+				return ret;
+		}
 		break;
 
 	case ODL_TEST_LATENCY:

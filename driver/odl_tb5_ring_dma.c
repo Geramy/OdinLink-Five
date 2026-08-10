@@ -276,7 +276,7 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 					u32 type = le32_to_cpu(dhdr->type);
 
 					if (type == ODL_TB5_DMA_PONG) {
-						pr_info("OdinLink: DMA pong received (pool)\n");
+						pr_info("odl_tb5: DMA pong received (pool)\n");
 						dev->pong_received = true;
 						wake_up_interruptible(&dev->verify_waitq);
 					} else {
@@ -487,7 +487,7 @@ rx_frame_done:
 			u32 type = le32_to_cpu(hdr->type);
 
 			if (type == ODL_TB5_DMA_PONG) {
-				pr_info("OdinLink: DMA pong received\n");
+				pr_info("odl_tb5: DMA pong received\n");
 				dev->pong_received = true;
 				wake_up_interruptible(&dev->verify_waitq);
 			} else {
@@ -518,7 +518,7 @@ int odl_tb5_rings_alloc(struct odl_tb5_device *dev)
 	dev->tx.ring_size = rs;
 	dev->rx.ring_size = rs;
 
-	pr_info("odl_tb5: ring_size=%u (%u MB per batch, %u MB total)\n",
+	pr_info("odl_tb5: odl_ring_size=%u (%u MB per batch, %u MB total)\n",
 		rs,
 		(rs * ODL_TB5_FRAME_SIZE) >> 20,
 		(rs * ODL_TB5_FRAME_SIZE * ODL_TB5_NUM_BUFFERS * 2) >> 20);

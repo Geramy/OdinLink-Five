@@ -28,8 +28,9 @@ OdinLink turns a Thunderbolt cable into a high-speed RDMA interconnect between m
 | 🟢 | rdma-core plugin (`libodl_tb5-rdmav34.so`) | Auto-discovered by `ibv_devinfo` |
 | 🟢 | Async I/O | `poll()` + `O_NONBLOCK` ioctls end-to-end |
 | 🟢 | No-cable testing | `loopback=1` module param + mock library |
-| 🟢 | NCCL verbs transport | NCCL's built-in `NCCL_NET_PLUGIN=IB` transport auto-discovers ODL via `ibv_get_device_list` |
-| 🟡 | NCCL custom plugin | DMA-buf zero-copy path (legacy, use verbs transport instead) |
+| 🟢 | RCCL/NCCL net plugin | **Supported GPU path** — `librccl-net.so` / `libnccl-net-ODL_TB5.so` (see [`docs/GPU.md`](docs/GPU.md)) |
+| 🟡 | NCCL verbs / IB transport | Works only with `LD_PRELOAD=libodl_tb5_verbs.so` health checks; RCCL `dlopen`s libibverbs and **bypasses** preload — use the net plugin |
+| 🟡 | rdma-core provider plugin | Needs a sysfs RDMA device to load; inert on OdinLink-only hosts — use `LD_PRELOAD` for `ibv_devinfo` |
 | 🟡 | Async DMA-buf | Needs callback-based cleanup — stream path is already async via poll() |
 
 ## Quick Start
@@ -53,14 +54,23 @@ build/verbs/tests/test_verbs_basic
 ```bash
 # Machine A:
 sudo insmod driver/odl_tb5.ko
-build/cli/odl_tb5_cli --server --device 0
+build/cli/odl_tb5_cli server -d 0
 
-# Machine B:
+# Machine B (wait for dmesg "entering READY state" first):
 sudo insmod driver/odl_tb5.ko
-build/cli/odl_tb5_cli --client --device 0 --test bandwidth
+build/cli/odl_tb5_cli client -d 0 -t bandwidth -b 64K,1M,4M
 ```
 
-Full install guide → [`docs/INSTALL.md`](docs/INSTALL.md)
+### RCCL (AMD) — use the net plugin, not verbs/IB
+
+```bash
+cmake --build . --target rccl_net_odl_tb5
+# Build tree already has librccl-net.so symlink; or:
+export LD_LIBRARY_PATH=$PWD/rccl:$PWD/lib:$LD_LIBRARY_PATH
+# Confirm logs say:  Using network ODL_TB5   (NOT Socket)
+```
+
+Full install guide → [`docs/INSTALL.md`](docs/INSTALL.md) · GPU → [`docs/GPU.md`](docs/GPU.md)
 
 ## Architecture
 
@@ -204,16 +214,21 @@ Exercises: device discovery, context open, PD/MR/CQ/QP lifecycle, post_send/post
 
 ```bash
 # Machine A:
-build/cli/odl_tb5_cli --server --device 0
+build/cli/odl_tb5_cli server -d 0
 
-# Machine B (wait for server to be ready):
-build/cli/odl_tb5_cli --client --device 0 --test bandwidth
+# Machine B (wait for dmesg: "odl_tb5: entering READY state"):
+build/cli/odl_tb5_cli client -d 0 -t bandwidth
 ```
 
 **5. ibv_devinfo discovery**
 
 ```bash
-ibv_devinfo     # should list an odl_tb5 device
+# Preferred health check on OdinLink-only hosts (no other RDMA NIC):
+LD_PRELOAD=build/verbs/libodl_tb5_verbs.so ibv_devinfo
+
+# The rdma-core directory plugin (libodl_tb5-rdmav34.so) only loads when
+# sysfs already exposes an unclaimed RDMA device — on pure OdinLink machines
+# it is inert. See docs/TROUBLESHOOTING.md.
 ```
 
 ## Module Parameters
@@ -223,14 +238,15 @@ ibv_devinfo     # should list an odl_tb5 device
 | `e2e=0` | 1 (on) | Disables end-to-end flow control handshake. **Only needed for old TB3 controllers** that choke on E2E. TB4/TB5 leave this alone. |
 | `loopback=1` | 0 (off) | Creates fake devices with no cable — data loops back inside your own machine. For testing without a peer. |
 | `protocol=1` | 0 (OdinLink) | Switches to Apple's protocol ID (0xFA57) so macOS peers can discover OdinLink. For Mac↔Linux only. |
-| `ring_size=1024` | 4096 | Number of DMA packet slots per ring. Larger = smoother bursts, more RAM. Fine at 4096 for all TB generations. Lower for RAM-constrained machines. |
+| `odl_ring_size=1024` | 4096 | Number of DMA packet slots per ring. Larger = smoother bursts, more RAM. On `iommu=pt` (identity IOMMU) hosts the default may fail to allocate — use 1024, or let probe auto-downgrade. |
 
 ```bash
 # Examples:
-sudo insmod driver/odl_tb5.ko                  # TB4/TB5, default everything
-sudo insmod driver/odl_tb5.ko e2e=0            # old TB3 controller
-sudo insmod driver/odl_tb5.ko loopback=1        # no cable, just testing
-sudo insmod driver/odl_tb5.ko protocol=1        # talk to macOS
+sudo insmod driver/odl_tb5.ko                       # TB4/TB5, default everything
+sudo insmod driver/odl_tb5.ko e2e=0                 # old TB3 controller
+sudo insmod driver/odl_tb5.ko loopback=1            # no cable, just testing
+sudo insmod driver/odl_tb5.ko protocol=1            # talk to macOS
+sudo insmod driver/odl_tb5.ko odl_ring_size=1024    # iommu=pt / RAM-constrained
 ```
 
 ## Debug
