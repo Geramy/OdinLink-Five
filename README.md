@@ -70,6 +70,12 @@ export LD_LIBRARY_PATH=$PWD/rccl:$PWD/lib:$LD_LIBRARY_PATH
 # Confirm logs say:  Using network ODL_TB5   (NOT Socket)
 ```
 
+```python
+from odinlink import RemoteStore   # Ubuntu trainer → Mac RAM over TB-IP
+mac = RemoteStore("tb5://<mac-bridge-ip>")
+mac.put("kv.42", cuda_tensor)
+```
+
 Full install → [`docs/INSTALL.md`](docs/INSTALL.md) · GPU → [`docs/GPU.md`](docs/GPU.md) · **Ubuntu + PyTorch + Mac RAM** → [`docs/PYTORCH.md`](docs/PYTORCH.md) · **which TB card** → [`docs/HARDWARE.md`](docs/HARDWARE.md) (`scripts/tb-hw-check.sh`)
 
 ## Architecture

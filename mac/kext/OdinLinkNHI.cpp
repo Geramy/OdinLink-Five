@@ -10,6 +10,7 @@
 #include <IOKit/IOLib.h>
 #include <IOKit/IODeviceMemory.h>
 #include <IOKit/IOMemoryDescriptor.h>
+#include <libkern/c++/OSSymbol.h>
 #include <libkern/libkern.h>
 
 #include "OdinLinkRDMA.h"
@@ -301,11 +302,78 @@ bool OdinLinkRDMA::xdomainAppeared(void *target, void *refCon,
 		return true;
 
 	self->logXDomain(newService);
-	IOLog("OdinLinkRDMA: Linux (or Apple RDMA) peer advertised protocol "
-	      "%u — load odl_tb5 on Linux and wait for probe. "
-	      "Arm hardware only after that if you accept the unverified "
-	      "register map.\n", proto);
+	self->claimXDomain(newService);
+	self->tryXDomainRespond(newService);
+	IOLog("OdinLinkRDMA: peer advertised protocol %u. "
+	      "Linux: bind_any/skip_login still works if this response "
+	      "is ignored. Arm RX with odl_rdma_client -a for data.\n",
+	      proto);
 	return true;
+}
+
+void OdinLinkRDMA::claimXDomain(IOService *svc)
+{
+	OSNumber *pid;
+	OSString *key;
+
+	if (!svc)
+		return;
+	if (fXdService)
+		fXdService->release();
+	svc->retain();
+	fXdService = svc;
+
+	pid = OSNumber::withNumber((unsigned long long)ODL_MAC_PROTOCOL_ID, 32);
+	key = OSString::withCString("odinlink");
+	if (pid) {
+		setProperty("Protocol ID", pid);
+		pid->release();
+	}
+	if (key) {
+		setProperty("Protocol Key", key);
+		key->release();
+	}
+	setProperty("OdinLinkPeer", kOSBooleanTrue);
+	IOLog("OdinLinkRDMA: claimed XDomain service, published "
+	      "Protocol ID %u / key odinlink\n", ODL_MAC_PROTOCOL_ID);
+}
+
+void OdinLinkRDMA::tryXDomainRespond(IOService *svc)
+{
+	static const char *names[] = {
+		"response",
+		"sendResponse",
+		"xdomainResponse",
+		"completeRequest",
+		NULL,
+	};
+	unsigned int i;
+	IOReturn ret;
+
+	if (!svc)
+		return;
+
+	/*
+	 * IOThunderboltXDomainService has no public header. Try the
+	 * symbols Apple uses internally; a miss is fine — Linux
+	 * skip_login still brings the data path up.
+	 */
+	for (i = 0; names[i]; i++) {
+		const OSSymbol *sym = OSSymbol::withCString(names[i]);
+		if (!sym)
+			continue;
+		ret = svc->callPlatformFunction(sym, false, NULL, NULL,
+						NULL, NULL);
+		sym->release();
+		if (ret != kIOReturnUnsupported) {
+			IOLog("OdinLinkRDMA: XDomain %s -> 0x%x\n",
+			      names[i], ret);
+			if (ret == kIOReturnSuccess)
+				return;
+		}
+	}
+	IOLog("OdinLinkRDMA: no public XDomain response entry — "
+	      "Linux should use skip_login=1 / bind_any\n");
 }
 
 IOReturn OdinLinkRDMA::armHardware(bool enable)

@@ -116,7 +116,10 @@ private:
 	void              writeNHI(uint32_t offset, uint32_t value);
 	uint32_t          readNHI(uint32_t offset);
 	void              logXDomain(IOService *svc);
+	void              claimXDomain(IOService *svc);
+	void              tryXDomainRespond(IOService *svc);
 
+	IOService                 *fXdService;
 	IOBufferMemoryDescriptor  *fBufferMemory;
 	IODMACommand              *fDMACommand;
 	uint64_t                   fBufferPhysAddr;

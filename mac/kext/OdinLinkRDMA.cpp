@@ -155,6 +155,7 @@ bool OdinLinkRDMA::start(IOService *provider)
 	fWorkLoop = NULL;
 	fTimer = NULL;
 	fXdNotifier = NULL;
+	fXdService = NULL;
 	fLock = IOSimpleLockAlloc();
 	if (fLock)
 		IOSimpleLockInit(fLock);
@@ -214,6 +215,10 @@ void OdinLinkRDMA::stop(IOService *provider)
 	if (fXdNotifier) {
 		fXdNotifier->remove();
 		fXdNotifier = NULL;
+	}
+	if (fXdService) {
+		fXdService->release();
+		fXdService = NULL;
 	}
 	if (fTimer) {
 		fTimer->cancelTimeout();

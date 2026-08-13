@@ -43,21 +43,21 @@ python3 bridge/tb_bridge_server.py --bind 0.0.0.0 --max-gb 96 -v
 # optional: pip install torch  (already have it if you train)
 python3 bridge/benchmark.py --host <mac-tb-ip> --cuda
 
-python3 -c '
-import torch
-from bridge.tb_bridge_client import TBBridgeClient
-
-mac = TBBridgeClient("<mac-tb-ip>")
-x = torch.randn(1024, 4096, dtype=torch.bfloat16, device="cuda")
-mac.put("kv.layer.42", x)                    # GPU -> Mac RAM
-y = mac.get("kv.layer.42", device="cuda")    # Mac RAM -> GPU
-assert torch.equal(x, y)
-print("round-trip OK")
-'
+# from the repo root
+python3 examples/pytorch_mac_offload.py --url tb5://<mac-tb-ip>
 ```
 
-`TBBridgeClient.put` / `.get` accept CUDA tensors. The copy is
-GPU → host → TB-IP → Mac, and back the same way.
+```python
+from odinlink import RemoteStore
+import torch
+
+mac = RemoteStore("tb5://<mac-tb-ip>")
+x = torch.randn(1024, 4096, dtype=torch.bfloat16, device="cuda")
+mac.put("kv.layer.42", x)                 # GPU → Mac RAM
+y = mac.get("kv.layer.42", device="cuda") # Mac RAM → GPU
+```
+
+The copy is GPU → host → Thunderbolt IP → Mac, and back the same way.
 
 ## What is *not* ready
 
