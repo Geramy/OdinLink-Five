@@ -104,65 +104,26 @@ Prefer Option 1 (net plugin) unless you have verified IB discovery.
 | `NCCL_DEBUG=INFO` | Enables NCCL debug logging |
 | `NCCL_NET_DISABLE=0` | Ensures network transport is not disabled |
 
-### Optional GPU compression (nvCOMP) — `odin-compress`
+### Compression — host LZ4 (ODLC), not nvCOMP
 
-Bandwidth on TB is the bottleneck vs VRAM. When **both peers** enable it, large
-CUDA messages are compressed with **nvCOMP** (GDeflate/LZ4/Snappy) before RDMA
-and decompressed on receive (Blackwell uses the hardware DE when available).
+NCCL over Thunderbolt stays uncompressed. nvCOMP is **not wired**:
 
-**Build is optional.** If nvCOMP is not installed, CMake still succeeds and
-links a **stub**: `odl_compress_enabled()` is always 0 and behaviour is
-unchanged. No user without nvCOMP is broken.
+- NCCL `isend` would still DMA a fixed max size, so GDeflate would not
+  shrink the cable transfer.
+- A Mac cannot decode nvCOMP GDeflate / batched LZ4.
+- The 5090 has no Blackwell decompress engine (that is B200/GB200 only).
 
-```bash
-# AUTO (default): enable backend only if headers+lib found
-cmake .. -DODL_ENABLE_NVCOMP=AUTO
-
-# Force off even if nvCOMP is on the machine
-cmake .. -DODL_ENABLE_NVCOMP=OFF
-
-# Force on — warns and stubs if missing (does not fail configure)
-cmake .. -DODL_ENABLE_NVCOMP=ON -DNVCOMP_ROOT=/path/to/nvcomp
-```
-
-**Optional install (Ubuntu):**
+What *is* wired is portable **ODLC lz4_block** on the TB-bridge / Mac
+path (`bridge/odl_compress.py`, `odl_compress_host`). Tensors ≥ 256 KiB
+are compressed unless `ODL_COMPRESS=0`. Ratio is whatever this payload
+measures — `odl_tb5_cli client -t compress` prints zeros, the bandwidth
+`0xAA` fill, and random.
 
 ```bash
-wget https://developer.download.nvidia.com/compute/nvcomp/5.3.0/local_installers/nvcomp-local-repo-ubuntu2604-5.3.0_5.3.0-1_amd64.deb
-sudo dpkg -i nvcomp-local-repo-ubuntu2604-5.3.0_5.3.0-1_amd64.deb
-sudo cp /var/nvcomp-local-repo-ubuntu2604-5.3.0/nvcomp-*-keyring.gpg /usr/share/keyrings/
-sudo apt-get update
-sudo apt-get -y install nvcomp
-```
-
-Or pip wheel + hint:
-
-```bash
-pip install nvidia-nvcomp-cu12
-cmake .. -DNVCOMP_ROOT=$HOME/miniconda3/lib/python3.13/site-packages/nvidia/libnvcomp
-```
-
-**Runtime (both sides):**
-
-| Variable | Default | Meaning |
-|----------|---------|---------|
-| `ODL_COMPRESS` | off | `1` / `true` enables |
-| `ODL_COMPRESS_ALGO` | `gdeflate` | `gdeflate` \| `lz4` \| `snappy` |
-| `ODL_COMPRESS_THRESHOLD` | `262144` | Min message size (bytes) |
-| `ODL_COMPRESS_LEVEL` | `1` | Reserved for future |
-
-```bash
-export ODL_COMPRESS=1
-export ODL_COMPRESS_ALGO=gdeflate
-export ODL_COMPRESS_THRESHOLD=262144
-# then normal NCCL_NET_PLUGIN=ODL_TB5 launch
-```
-
-**Smoke test** (only built when nvCOMP was found):
-
-```bash
-cmake --build . --target odl_compress_bench
-ODL_COMPRESS=1 ./compress/odl_compress_bench 4194304 20
+cmake --build . --target odl_compress_host_test
+./compress/odl_compress_host_test
+python3 compress/tests/test_odl_compress.py
+odl_tb5_cli client -t compress
 ```
 
 ### How It Works

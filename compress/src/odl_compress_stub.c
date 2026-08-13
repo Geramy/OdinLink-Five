@@ -14,8 +14,8 @@ int odl_compress_backend_available(void)
 
 size_t odl_compress_max_wire_bytes(size_t original_bytes)
 {
-	/* No compression — wire size is the raw payload. */
-	return original_bytes;
+	/* No nvCOMP. Host LZ4 bound is still a valid staging size. */
+	return odl_compress_host_max_wire_bytes(original_bytes);
 }
 
 int odl_compress_gpu(const void *d_in, size_t in_bytes,

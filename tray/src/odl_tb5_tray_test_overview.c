@@ -103,6 +103,7 @@ struct overview_ctx {
 	GtkWidget   *card_jitter;
 	GtkWidget   *card_load;
 	GtkWidget   *card_mimo;
+	GtkWidget   *card_comp;
 
 	guint        poll_timer_id;
 	gulong       signal_handler_id;
@@ -214,6 +215,14 @@ static void overview_build_placeholders(struct overview_ctx *ctx)
 	gtk_box_pack_start(GTK_BOX(ctx->cards_box), ctx->card_mimo,
 	                   FALSE, FALSE, 4);
 
+	/* Compression — measured ratios, no invented multiplier */
+	ctx->card_comp = make_card("Compression (measured)", pending, &content);
+	gtk_box_pack_start(GTK_BOX(content),
+	                   make_metric("Ratio:", "--"),
+	                   FALSE, FALSE, 0);
+	gtk_box_pack_start(GTK_BOX(ctx->cards_box), ctx->card_comp,
+	                   FALSE, FALSE, 4);
+
 	gtk_widget_show_all(ctx->cards_box);
 }
 
@@ -284,6 +293,21 @@ static void overview_build_cards(struct overview_ctx *ctx)
 			                   make_metric("Transferred:",
 			                              parsed.bandwidth.transferred),
 			                   FALSE, FALSE, 0);
+		}
+		/* Effective payload only when we measured the same 0xAA fill. */
+		for (int i = 0; i < parsed.compress.nrows; i++) {
+			if (strcmp(parsed.compress.rows[i].name, "fill-0xAA") != 0)
+				continue;
+			if (parsed.compress.rows[i].ratio <= 1.0)
+				break;
+			snprintf(buf, sizeof(buf),
+			         "%.2f Gb/s  (fill-0xAA at %.1fx, measured)",
+			         parsed.bandwidth.gbps * parsed.compress.rows[i].ratio,
+			         parsed.compress.rows[i].ratio);
+			gtk_box_pack_start(GTK_BOX(content),
+			                   make_metric("Payload equiv:", buf),
+			                   FALSE, FALSE, 0);
+			break;
 		}
 		replace_card(ctx, &ctx->card_bw, card);
 	}
@@ -410,6 +434,29 @@ static void overview_build_cards(struct overview_ctx *ctx)
 				}
 			}
 		}
+	}
+
+	if (parsed.compress.valid) {
+		card = make_card("Compression (measured)", "card-pass", &content);
+		if (parsed.compress.backend[0])
+			gtk_box_pack_start(GTK_BOX(content),
+			                   make_metric("Backend:",
+			                              parsed.compress.backend),
+			                   FALSE, FALSE, 0);
+		for (int i = 0; i < parsed.compress.nrows; i++) {
+			const struct odl_parsed_compress_row *r =
+				&parsed.compress.rows[i];
+			if (r->ratio > 0.0)
+				snprintf(buf, sizeof(buf),
+				         "%.2fx   1 GiB wire → %.2f GiB payload",
+				         r->ratio, r->ratio);
+			else
+				snprintf(buf, sizeof(buf), "incompressible");
+			gtk_box_pack_start(GTK_BOX(content),
+			                   make_metric(r->name, buf),
+			                   FALSE, FALSE, 0);
+		}
+		replace_card(ctx, &ctx->card_comp, card);
 	}
 
 	g_free(output);

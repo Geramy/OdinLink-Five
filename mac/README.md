@@ -87,6 +87,16 @@ If step 2 never happens, XDomain matching failed (wrong personality /
 Thunderbolt stack did not publish the service). If step 4 panics, the
 ACIO map is wrong — reboot, do **not** arm, file the panic log.
 
+## Compressed tensors (ODLC)
+
+The TB-bridge and `libodl_compress` wrap large tensors as **ODLC + LZ4
+raw blocks** (algo 4) so more data fits on the Thunderbolt IP link.
+Mac decode: `bridge/odl_compress.py` (uses `libcompression`) or
+`odl_decompress_host()` in `compress/src/odl_compress_lz4.c`.
+
+nvCOMP is not used. If a blob's header `algo` is not 4, reject it —
+do not feed it to MLX.
+
 ## Files
 
 | File | Role |

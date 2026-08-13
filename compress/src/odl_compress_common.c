@@ -13,7 +13,7 @@ extern int odl_compress_backend_available(void);
 
 static int g_inited;
 static int g_want; /* ODL_COMPRESS=1 */
-static int g_algo = ODL_ALGO_GDEFLATE;
+static int g_algo = ODL_ALGO_LZ4_BLOCK;
 static size_t g_threshold = 262144;
 
 static int env_truthy(const char *v)
@@ -53,6 +53,9 @@ int odl_compress_init(void)
 			g_algo = ODL_ALGO_LZ4;
 		else if (strcasecmp(algo, "snappy") == 0)
 			g_algo = ODL_ALGO_SNAPPY;
+		else if (strcasecmp(algo, "lz4_block") == 0 ||
+			 strcasecmp(algo, "lz4block") == 0)
+			g_algo = ODL_ALGO_LZ4_BLOCK;
 		else if (strcasecmp(algo, "none") == 0)
 			g_algo = ODL_ALGO_NONE;
 	}

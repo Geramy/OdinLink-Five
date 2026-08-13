@@ -157,6 +157,18 @@ class TBBridgeClient:
         else:
             raise TypeError(f"unsupported tensor type: {type(tensor)}")
 
+        try:
+            from bridge.odl_compress import maybe_compress, looks_compressed
+        except ImportError:
+            from odl_compress import maybe_compress, looks_compressed
+
+        packed = maybe_compress(arr_bytes)
+        if looks_compressed(packed):
+            meta["odlc"] = True
+            meta["odlc_algo"] = "lz4_block"
+            meta["raw_bytes"] = len(arr_bytes)
+        arr_bytes = packed
+
         meta_bytes = json.dumps(meta).encode("utf-8")
         key_bytes = key.encode("utf-8")
         if len(key_bytes) > 256:
@@ -199,6 +211,13 @@ class TBBridgeClient:
             return meta, data
 
         meta, data = self._call(do)
+
+        try:
+            from bridge.odl_compress import maybe_decompress
+        except ImportError:
+            from odl_compress import maybe_decompress
+
+        data = maybe_decompress(data)
 
         if meta["kind"] == "torch":
             return self._bytes_to_torch(data, meta, device=device)
