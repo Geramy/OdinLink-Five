@@ -104,109 +104,26 @@ Prefer Option 1 (net plugin) unless you have verified IB discovery.
 | `NCCL_DEBUG=INFO` | Enables NCCL debug logging |
 | `NCCL_NET_DISABLE=0` | Ensures network transport is not disabled |
 
-### Optional GPU compression (nvCOMP) — `odin-compress`
+### Compression — host LZ4 (ODLC), not nvCOMP
 
-Bandwidth on TB is the bottleneck vs VRAM. When **both peers** enable it, large
-CUDA messages are compressed with **nvCOMP** (GDeflate/LZ4/Snappy) before RDMA
-and decompressed on receive (Blackwell uses the hardware DE when available).
+NCCL over Thunderbolt stays uncompressed. nvCOMP is **not wired**:
 
-**Build is optional.** If nvCOMP is not installed, CMake still succeeds and
-links a **stub**: `odl_compress_enabled()` is always 0 and behaviour is
-unchanged. No user without nvCOMP is broken.
+- NCCL `isend` would still DMA a fixed max size, so GDeflate would not
+  shrink the cable transfer.
+- A Mac cannot decode nvCOMP GDeflate / batched LZ4.
+- The 5090 has no Blackwell decompress engine (that is B200/GB200 only).
 
-```bash
-# AUTO (default): enable backend only if headers+lib found
-cmake .. -DODL_ENABLE_NVCOMP=AUTO
-
-# Force off even if nvCOMP is on the machine
-cmake .. -DODL_ENABLE_NVCOMP=OFF
-
-# Force on — warns and stubs if missing (does not fail configure)
-cmake .. -DODL_ENABLE_NVCOMP=ON -DNVCOMP_ROOT=/path/to/nvcomp
-```
-
-**Optional install (Ubuntu).** Same local-repo .deb for both toolkits; the
-package name picks CUDA 12 or 13. Product page:
-[developer.nvidia.com/nvcomp](https://developer.nvidia.com/nvcomp) ·
-[install docs](https://docs.nvidia.com/cuda/nvcomp/installation.html)
-
-```bash
-wget https://developer.download.nvidia.com/compute/nvcomp/5.3.0/local_installers/nvcomp-local-repo-ubuntu2604-5.3.0_5.3.0-1_amd64.deb
-sudo dpkg -i nvcomp-local-repo-ubuntu2604-5.3.0_5.3.0-1_amd64.deb
-sudo cp /var/nvcomp-local-repo-ubuntu2604-5.3.0/nvcomp-*-keyring.gpg /usr/share/keyrings/
-sudo apt-get update
-# CUDA 12.x
-sudo apt-get -y install nvcomp-cuda-12
-# CUDA 13.x
-sudo apt-get -y install nvcomp-cuda-13
-```
-
-Or pip (C/C++ headers + lib, which CMake needs):
-
-```bash
-# CUDA 12
-pip install nvidia-libnvcomp-cu12
-# CUDA 13
-pip install nvidia-libnvcomp-cu13
-
-cmake .. -DNVCOMP_ROOT=$HOME/miniconda3/lib/python3.13/site-packages/nvidia/libnvcomp
-```
-
-`nvidia-nvcomp-cu12` / `nvidia-nvcomp-cu13` pull the Python bindings and
-the lib package automatically. CMake still wants `NVCOMP_ROOT` pointed at
-`…/nvidia/libnvcomp`.
-
-**Runtime (both sides):**
-
-| Variable | Default | Meaning |
-|----------|---------|---------|
-| `ODL_COMPRESS` | NCCL: off · bridge: on | `1` / `true` enables; `0` disables. Bridge defaults on. |
-| `ODL_COMPRESS_ALGO` | `gdeflate` | `gdeflate` \| `lz4` \| `snappy` \| `lz4_block` |
-| `ODL_COMPRESS_THRESHOLD` | `262144` | Min message size (bytes) |
-| `ODL_COMPRESS_LEVEL` | `1` | Reserved for future |
-
-`gdeflate` / `lz4` / `snappy` are **nvCOMP native**. A Mac cannot decode
-them. They are Linux↔Linux NCCL only.
-
-**What NVIDIA actually publishes** (not a number we invented):
-
-| Codec | Official claim | In this tree |
-|-------|----------------|--------------|
-| Cascaded | up to **80×** on analytical numerical data, up to 500 GB/s | **Not used** |
-| LZ4 / Snappy | up to **100 GB/s** GPU throughput; no official ratio | nvCOMP algo 2/3, Linux GPU only |
-| GDeflate | GPU format; **no published ratio** | NCCL default when `ODL_COMPRESS=1` |
-| Blackwell DE | up to **600 GB/s decompress** | only if you have Blackwell |
-
-Ratio is payload-dependent. The CLI prints **measured** in/wire for zeros, the same `0xAA` fill as the bandwidth test, and random (`odl_tb5_cli -t compress`). That run needs no cable and works on a Mac.
-
-`lz4_block` is the portable payload (64 KiB standard LZ4 raw blocks + a
-chunk table). The TB-bridge and the Mac always use this. See
-[`compress/include/odl_tb5/odl_compress.h`](../compress/include/odl_tb5/odl_compress.h).
-
-NCCL `isend` still DMAs `max_wire` bytes so both ranks agree on size —
-that path does **not** shrink the Thunderbolt transfer. The bridge does:
-`data_len` on the TCP header is the compressed size.
-
-Host / Mac smoke test (no CUDA):
+What *is* wired is portable **ODLC lz4_block** on the TB-bridge / Mac
+path (`bridge/odl_compress.py`, `odl_compress_host`). Tensors ≥ 256 KiB
+are compressed unless `ODL_COMPRESS=0`. Ratio is whatever this payload
+measures — `odl_tb5_cli client -t compress` prints zeros, the bandwidth
+`0xAA` fill, and random.
 
 ```bash
 cmake --build . --target odl_compress_host_test
 ./compress/odl_compress_host_test
 python3 compress/tests/test_odl_compress.py
-```
-
-```bash
-export ODL_COMPRESS=1
-export ODL_COMPRESS_ALGO=gdeflate
-export ODL_COMPRESS_THRESHOLD=262144
-# then normal NCCL_NET_PLUGIN=ODL_TB5 launch
-```
-
-**Smoke test** (only built when nvCOMP was found):
-
-```bash
-cmake --build . --target odl_compress_bench
-ODL_COMPRESS=1 ./compress/odl_compress_bench 4194304 20
+odl_tb5_cli client -t compress
 ```
 
 ### How It Works

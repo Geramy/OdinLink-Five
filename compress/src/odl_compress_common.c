@@ -13,7 +13,7 @@ extern int odl_compress_backend_available(void);
 
 static int g_inited;
 static int g_want; /* ODL_COMPRESS=1 */
-static int g_algo = ODL_ALGO_GDEFLATE;
+static int g_algo = ODL_ALGO_LZ4_BLOCK;
 static size_t g_threshold = 262144;
 
 static int env_truthy(const char *v)

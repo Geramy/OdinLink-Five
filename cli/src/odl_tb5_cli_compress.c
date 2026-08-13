@@ -2,9 +2,7 @@
  * Local compression report. No cable. Runs on Linux and Mac.
  *
  * Prints measured in/wire/ratio for labeled patterns. Does not invent
- * a multiplier. nvCOMP's published numbers (Cascaded ≤80x on analytical
- * numerical data; LZ4/Snappy ≤100 GB/s GPU) are quoted in docs/GPU.md —
- * we do not ship Cascaded, and NVIDIA does not quote a GDeflate ratio.
+ * a multiplier. nvCOMP is not used.
  */
 #include "odl_tb5_cli.h"
 
@@ -87,7 +85,5 @@ void odl_cli_compress_report(void)
 	one_pattern("zeros", fill_zeros, ODL_COMPRESS_BENCH_BYTES);
 	one_pattern("fill-0xAA", fill_aa, ODL_COMPRESS_BENCH_BYTES);
 	one_pattern("random", fill_random, ODL_COMPRESS_BENCH_BYTES);
-	printf("Note: ratio is this pattern on this machine. "
-	       "NVIDIA does not publish a GDeflate/LZ4 ratio; "
-	       "Cascaded (unused here) is up to 80x on analytical numerical data.\n");
+	printf("Note: ratio is this pattern on this machine. nvCOMP is not used.\n");
 }

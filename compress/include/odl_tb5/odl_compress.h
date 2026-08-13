@@ -5,14 +5,9 @@
  * Wire (little-endian, packed):
  *   [odl_compress_header | payload]
  *
- * Two payload families share this header:
- *
- *   1) nvCOMP native (Linux CUDA only) — algo 1/2/3
- *      GDeflate / batched LZ4 / Snappy from nvCOMP managers.
- *      A Mac cannot decode these. Linux↔Linux NCCL only.
- *
- *   2) Portable LZ4 blocks — algo 4 (ODL_ALGO_LZ4_BLOCK)
- *      This is what the Mac and the TB-bridge speak.
+ * We only write portable LZ4 blocks — algo 4 (ODL_ALGO_LZ4_BLOCK).
+ * Algo 1–3 (nvCOMP GDeflate / batched LZ4 / Snappy) are rejected.
+ * nvCOMP is not linked.
  *
  *      payload:
  *        num_chunks × { u32 raw_bytes, u32 comp_bytes }   (LE)
@@ -22,14 +17,9 @@
  *      compressed_bytes = table + all blocks. Chunks are 64 KiB
  *      except the last. Empty input is never wrapped.
  *
- * Env:
- *   ODL_COMPRESS=1
- *   ODL_COMPRESS_ALGO=gdeflate|lz4|snappy|lz4_block
+ * Env (bridge / host):
+ *   ODL_COMPRESS=0 to disable (on by default for the bridge)
  *   ODL_COMPRESS_THRESHOLD=262144
- *   ODL_COMPRESS_LEVEL=1
- *
- * NCCL (CUDA) uses gdeflate/lz4/snappy when nvCOMP is linked.
- * The Mac / bridge path always writes and reads lz4_block.
  */
 #pragma once
 

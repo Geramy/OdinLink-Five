@@ -94,8 +94,8 @@ raw blocks** (algo 4) so more data fits on the Thunderbolt IP link.
 Mac decode: `bridge/odl_compress.py` (uses `libcompression`) or
 `odl_decompress_host()` in `compress/src/odl_compress_lz4.c`.
 
-nvCOMP GDeflate / batched LZ4 (algo 1–3) is Linux CUDA only. If a blob's
-header `algo` is not 4, reject it — do not feed it to MLX.
+nvCOMP is not used. If a blob's header `algo` is not 4, reject it —
+do not feed it to MLX.
 
 ## Files
 
