@@ -32,6 +32,11 @@ jobs:
           make -j$(nproc) odl_tb5 odl_tb5_cli odl_tb5_test
       - name: Build kernel module
         run: cd build && make driver
+      - name: Sign module (SecureBoot nodes)
+        run: |
+          if [ -x /usr/local/sbin/odl-sign-module ]; then
+            sudo /usr/local/sbin/odl-sign-module driver/odl_tb5.ko
+          fi
       - name: Install driver (loopback mode)
         run: |
           sudo rmmod odl_tb5 2>/dev/null || true
@@ -69,6 +74,11 @@ jobs:
             -DBUILD_DAEMON=OFF -DBUILD_TRAY=OFF -DBUILD_VERBS=ON
           make -j$(nproc) odl_tb5 odl_tb5_cli
           make driver
+      - name: Sign module (SecureBoot nodes)
+        run: |
+          if [ -x /usr/local/sbin/odl-sign-module ]; then
+            sudo /usr/local/sbin/odl-sign-module driver/odl_tb5.ko
+          fi
       - name: Install driver (real link)
         run: |
           sudo rmmod odl_tb5 2>/dev/null || true
