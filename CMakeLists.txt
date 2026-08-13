@@ -126,6 +126,10 @@ add_custom_target(driver
 # Userspace library (libodl_tb5.so)
 add_subdirectory(lib)
 
+# Optional nvCOMP compression (never hard-fails; stub if nvCOMP missing)
+# See compress/CMakeLists.txt and docs/GPU.md §Compression
+add_subdirectory(compress)
+
 # RCCL plugin (librccl_net_odl_tb5.so)
 add_subdirectory(rccl)
 

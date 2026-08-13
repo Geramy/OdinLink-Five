@@ -16,6 +16,7 @@
 #include "net.h"
 #include <odl_tb5/odl_tb5.h>
 #include <odl_tb5/odl_tb5_nccl_stats.h>
+#include <odl_tb5/odl_compress.h>
 
 #define ODL_NCCL_MAX_DEVICES 16
 #define ODL_NCCL_MAX_MR      64
@@ -115,6 +116,13 @@ static void cuda_init(void)
 	if (odl_logger)
 		odl_logger(0, "ODL_NCCL: CUDA driver loaded, DMA-buf export "
 			   "enabled\n");
+
+	/* Optional nvCOMP path — stub if not built/linked with nvCOMP */
+	odl_compress_init();
+	if (odl_logger)
+		odl_logger(0, "ODL_NCCL: compression %s (threshold=%zu)\n",
+			   odl_compress_enabled() ? "ENABLED" : "disabled",
+			   odl_compress_threshold());
 }
 
 static void cuda_cleanup(void)
@@ -535,6 +543,46 @@ static ncclResult_t nccl_odl_getMr(void *comm_ptr, void *data,
 	return ncclInvalidArgument;
 }
 
+/* ── optional compress (nvCOMP) then isend ────────────────────────── */
+
+static int try_compress_send(struct odl_nccl_comm *comm, void *data, int size)
+{
+	/* GPU path only; falls back if nvCOMP missing / ODL_COMPRESS off / small msg. */
+	int fd_probe = export_cuda_dmabuf(data, (size_t)size);
+	int is_cuda = (fd_probe >= 0);
+	if (fd_probe >= 0)
+		close(fd_probe);
+	if (!odl_compress_should((size_t)size, is_cuda))
+		return -1;
+
+	size_t wire_cap = odl_compress_max_wire_bytes((size_t)size);
+	void *d_wire = odl_compress_device_alloc(wire_cap);
+	if (!d_wire)
+		return -1;
+
+	size_t wire_bytes = 0;
+	if (odl_compress_gpu(data, (size_t)size, d_wire, wire_cap,
+			     &wire_bytes, NULL) != 0) {
+		odl_compress_device_free(d_wire);
+		return -1;
+	}
+
+	/* Transport fixed max size so recv can match without a size exchange.
+	 * Actual compressed length is in the header; trailing bytes ignored. */
+	size_t send_bytes = wire_cap;
+	int fd = export_cuda_dmabuf(d_wire, send_bytes);
+	int ret = -1;
+	if (fd >= 0) {
+		ret = odl_tb5_send_dmabuf(comm->handle, fd, 0, (int)send_bytes);
+		close(fd);
+	}
+	odl_compress_device_free(d_wire);
+	if (ret == 0 && odl_logger)
+		odl_logger(0, "ODL_NCCL: compress send %d -> wire_cap=%zu actual=%zu\n",
+			   size, send_bytes, wire_bytes);
+	return ret;
+}
+
 /* ── isend ─────────────────────────────────────────────────────────── */
 
 static ncclResult_t nccl_odl_isend_v5(void *sendComm, void *data,
@@ -551,6 +599,15 @@ static ncclResult_t nccl_odl_isend_v5(void *sendComm, void *data,
 	req = calloc(1, sizeof(*req));
 	if (!req)
 		return ncclSystemError;
+
+	/* Optional compress path (no-op when stub / env off) */
+	if (try_compress_send(comm, data, size) == 0) {
+		stats_record_tx(size);
+		req->done = true;
+		req->size = size;
+		*request = req;
+		return ncclSuccess;
+	}
 
 	if (mhandle) {
 		struct odl_nccl_mr *mr = mhandle;
@@ -625,6 +682,36 @@ static ncclResult_t nccl_odl_isend_v4(void *sendComm, void *data,
 	return nccl_odl_isend_v5(sendComm, data, size, tag, NULL, request);
 }
 
+/* ── compressed irecv: land max-wire staging, decompress into user buf ─ */
+
+static int try_compress_recv(struct odl_nccl_comm *comm, void *data, int size)
+{
+	if (!odl_compress_should((size_t)size, 1))
+		return -1;
+
+	size_t wire_cap = odl_compress_max_wire_bytes((size_t)size);
+	void *d_wire = odl_compress_device_alloc(wire_cap);
+	if (!d_wire)
+		return -1;
+
+	int fd = export_cuda_dmabuf(d_wire, wire_cap);
+	int ret = -1;
+	if (fd >= 0) {
+		ret = odl_tb5_recv_dmabuf(comm->handle, fd, 0, (int)wire_cap);
+		close(fd);
+	}
+	if (ret == 0) {
+		size_t orig = 0;
+		if (odl_decompress_gpu(d_wire, wire_cap, data, (size_t)size,
+				       &orig, NULL) != 0) {
+			/* Peer sent raw despite our expectation — fall through. */
+			ret = -1;
+		}
+	}
+	odl_compress_device_free(d_wire);
+	return ret;
+}
+
 /* ── irecv ─────────────────────────────────────────────────────────── */
 
 static ncclResult_t nccl_odl_irecv_v5(void *recvComm, void *data,
@@ -641,6 +728,15 @@ static ncclResult_t nccl_odl_irecv_v5(void *recvComm, void *data,
 	req = calloc(1, sizeof(*req));
 	if (!req)
 		return ncclSystemError;
+
+	/* Optional compress path — only if we would also compress on send */
+	if (try_compress_recv(comm, data, size) == 0) {
+		stats_record_rx(size);
+		req->done = true;
+		req->size = size;
+		*request = req;
+		return ncclSuccess;
+	}
 
 	if (mhandle) {
 		struct odl_nccl_mr *mr = mhandle;

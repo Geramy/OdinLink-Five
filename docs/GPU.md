@@ -104,6 +104,67 @@ Prefer Option 1 (net plugin) unless you have verified IB discovery.
 | `NCCL_DEBUG=INFO` | Enables NCCL debug logging |
 | `NCCL_NET_DISABLE=0` | Ensures network transport is not disabled |
 
+### Optional GPU compression (nvCOMP) — `odin-compress`
+
+Bandwidth on TB is the bottleneck vs VRAM. When **both peers** enable it, large
+CUDA messages are compressed with **nvCOMP** (GDeflate/LZ4/Snappy) before RDMA
+and decompressed on receive (Blackwell uses the hardware DE when available).
+
+**Build is optional.** If nvCOMP is not installed, CMake still succeeds and
+links a **stub**: `odl_compress_enabled()` is always 0 and behaviour is
+unchanged. No user without nvCOMP is broken.
+
+```bash
+# AUTO (default): enable backend only if headers+lib found
+cmake .. -DODL_ENABLE_NVCOMP=AUTO
+
+# Force off even if nvCOMP is on the machine
+cmake .. -DODL_ENABLE_NVCOMP=OFF
+
+# Force on — warns and stubs if missing (does not fail configure)
+cmake .. -DODL_ENABLE_NVCOMP=ON -DNVCOMP_ROOT=/path/to/nvcomp
+```
+
+**Optional install (Ubuntu):**
+
+```bash
+wget https://developer.download.nvidia.com/compute/nvcomp/5.3.0/local_installers/nvcomp-local-repo-ubuntu2604-5.3.0_5.3.0-1_amd64.deb
+sudo dpkg -i nvcomp-local-repo-ubuntu2604-5.3.0_5.3.0-1_amd64.deb
+sudo cp /var/nvcomp-local-repo-ubuntu2604-5.3.0/nvcomp-*-keyring.gpg /usr/share/keyrings/
+sudo apt-get update
+sudo apt-get -y install nvcomp
+```
+
+Or pip wheel + hint:
+
+```bash
+pip install nvidia-nvcomp-cu12
+cmake .. -DNVCOMP_ROOT=$HOME/miniconda3/lib/python3.13/site-packages/nvidia/libnvcomp
+```
+
+**Runtime (both sides):**
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `ODL_COMPRESS` | off | `1` / `true` enables |
+| `ODL_COMPRESS_ALGO` | `gdeflate` | `gdeflate` \| `lz4` \| `snappy` |
+| `ODL_COMPRESS_THRESHOLD` | `262144` | Min message size (bytes) |
+| `ODL_COMPRESS_LEVEL` | `1` | Reserved for future |
+
+```bash
+export ODL_COMPRESS=1
+export ODL_COMPRESS_ALGO=gdeflate
+export ODL_COMPRESS_THRESHOLD=262144
+# then normal NCCL_NET_PLUGIN=ODL_TB5 launch
+```
+
+**Smoke test** (only built when nvCOMP was found):
+
+```bash
+cmake --build . --target odl_compress_bench
+ODL_COMPRESS=1 ./compress/odl_compress_bench 4194304 20
+```
+
 ### How It Works
 
 1. `regMr` registers CUDA memory with the plugin, exporting it as a Linux
