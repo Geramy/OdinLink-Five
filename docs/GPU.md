@@ -1,55 +1,94 @@
 # GPU Usage
 
-## RCCL (AMD ROCm)
+## RCCL (AMD ROCm) — **supported path: net plugin**
+
+RCCL does **not** discover OdinLink through `NCCL_NET_PLUGIN=IB` / verbs.
+It `dlopen`s `libibverbs.so.1` and resolves symbols from that handle, so
+`LD_PRELOAD=libodl_tb5_verbs.so` is bypassed. If the net plugin is missing,
+RCCL silently falls back to TCP sockets (~4× slower) with no error.
+
+### Build and install the plugin
 
 ```bash
+cmake --build . --target rccl_net_odl_tb5
+# Build dir also has librccl-net.so → librccl_net_odl_tb5.so (RCCL's probe name)
+```
+
+```bash
+# Option A — plugin directory (RCCL probes librccl-net.so there)
+export LD_LIBRARY_PATH=/path/to/build/rccl:/path/to/build/lib:$LD_LIBRARY_PATH
+# Optional name pin used by some RCCL builds:
 export RCCL_NET_PLUGIN=ODL_TB5
 export RCCL_PLUGIN_DIR=/path/to/build/rccl
 
-# Your RCCL/ROCm application will use TB5 automatically
+# Option B — system install (also installs as librccl-net.so)
+sudo cmake --install build --component rccl
 ```
+
+### Confirm you are on the fast path
+
+With `NCCL_DEBUG=INFO` / `RCCL_DEBUG=INFO` you want:
+
+```
+NCCL INFO NET/Plugin: Loaded net plugin ODL_TB5 (v7)
+NCCL INFO Using network ODL_TB5
+```
+
+If you see `Using network Socket` instead, the plugin was not found —
+collectives still complete, just slowly. Fix `LD_LIBRARY_PATH` /
+`RCCL_PLUGIN_DIR` so `librccl-net.so` is visible.
 
 The RCCL plugin exports shared-memory statistics at `/run/odl_tb5/rccl_stats`.
 The daemon reads these and exposes them via D-Bus; the tray app displays
 TX/RX bytes, operation counts, and uptime in a dedicated RCCL Stats window.
 
-## NCCL (NVIDIA CUDA / PyTorch)
+### `iommu=pt` note (virtualisation hosts)
 
-### Option 1: Built-in Verbs Transport (Recommended)
+RCCL may print:
 
-NCCL has a built-in `IB` (InfiniBand Verbs) transport that discovers RDMA
-devices automatically via `ibv_get_device_list`. Once the OdinLink verbs
-provider plugin is installed, NCCL can use it without any custom plugin.
-
-```bash
-# Install provider plugin (one-time)
-sudo cp build/verbs/libodl_tb5-rdmav34.so /usr/lib/aarch64-linux-gnu/libibverbs/
-
-# NCCL discovers ODL automatically via verbs
-export NCCL_NET_PLUGIN=IB
-export NCCL_IB_HCA=odl_tb5               # Restrict to ODL device
-export NCCL_IB_TIMEOUT=22
-export NCCL_IB_RETRY_CNT=7
-
-# Run your NCCL application
-torchrun --nproc_per_node=1 --nnodes=2 \
-    --node_rank=0 --master_addr=192.168.1.1 --master_port=12345 \
-    your_training_script.py
+```
+NCCL WARN Missing "iommu=pt" from kernel command line ...
 ```
 
-The verbs provider implements all operations NCCL's IB transport needs:
-`ibv_reg_mr`, `ibv_create_qp`, `ibv_post_send`, `ibv_post_recv`,
-`ibv_poll_cq`. This is the standard, well-tested path.
+On single-GPU Strix Halo / Proxmox nodes that warning is often wrong for
+OdinLink: `iommu=pt` puts the Thunderbolt NHI in an **identity** IOMMU
+domain where the default `odl_ring_size=4096` (16 MB contiguous) fails to
+allocate. Prefer translated IOMMU, or load with `odl_ring_size=1024`.
 
-### Option 2: Custom Plugin (Legacy)
+## NCCL (NVIDIA CUDA / PyTorch)
 
-The custom NCCL plugin provides a DMA-buf-based zero-copy path for CUDA
-memory. It bypasses the verbs stack for direct kernel driver access.
+### Option 1: Custom net plugin (recommended for multi-node TB)
 
 ```bash
 export NCCL_NET_PLUGIN=ODL_TB5
 export NCCL_PLUGIN_DIR=/path/to/build/nccl
+export NCCL_DEBUG=INFO   # confirm "Using network ODL_TB5"
 ```
+
+### Option 2: Built-in Verbs / IB transport
+
+NCCL's built-in `IB` transport discovers RDMA devices via
+`ibv_get_device_list`. This only works if the OdinLink device is visible
+to libibverbs:
+
+- **`LD_PRELOAD=libodl_tb5_verbs.so`** works for tools like `ibv_devinfo`
+- The **rdma-core directory plugin** (`libodl_tb5-rdmav34.so`) only loads
+  when sysfs already has an unclaimed RDMA device — on OdinLink-only
+  hosts it is inert
+- Many production stacks `dlopen` libibverbs and ignore `LD_PRELOAD`
+  (same footgun as RCCL)
+
+```bash
+# x86_64 install path for the directory plugin (if you have other RDMA NICs)
+sudo cp build/verbs/libodl_tb5-rdmav34.so /usr/lib/x86_64-linux-gnu/libibverbs/
+
+export NCCL_NET_PLUGIN=IB
+export NCCL_IB_HCA=odl_tb5
+export NCCL_IB_TIMEOUT=22
+export NCCL_IB_RETRY_CNT=7
+```
+
+Prefer Option 1 (net plugin) unless you have verified IB discovery.
 
 ### Prerequisites
 - NVIDIA GPU with `nvidia-drm` modeset enabled (`nvidia-drm.modeset=1`)

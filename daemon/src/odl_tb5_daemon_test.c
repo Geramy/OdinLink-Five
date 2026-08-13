@@ -305,14 +305,21 @@ static int daemon_run_single_test(odl_tb5_t handle, uint8_t sid, uint8_t dst,
 
 	switch (test_type) {
 	case ODL_TEST_BANDWIDTH:
+		/* One TEST_REQ + single-size client run per block size.
+		 * bandwidth_client loops TEST_START over num_block_sizes, so
+		 * pass a one-element params or the server sees a bare
+		 * TEST_START and fails with Protocol error (issue #23). */
 		for (int i = 0; i < params->num_block_sizes; i++) {
+			struct odl_cli_params one = *params;
+
+			one.block_sizes[0] = params->block_sizes[i];
+			one.num_block_sizes = 1;
 			ret = daemon_send_test_request(handle, sid, dst,
-						       params, test_type,
-						       params->block_sizes[i]);
+						       &one, test_type,
+						       one.block_sizes[0]);
 			if (ret < 0)
 				return ret;
-			ret = odl_cli_bandwidth_client(handle, sid, dst,
-						       params);
+			ret = odl_cli_bandwidth_client(handle, sid, dst, &one);
 			if (ret < 0)
 				return ret;
 		}
