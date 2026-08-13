@@ -1,0 +1,112 @@
+name: hardware
+
+# Runs on the TB5-connected self-hosted nodes. Deliberately not triggered
+# by pull_request: the repo is public and these runners are real machines.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# The two nodes share one Thunderbolt link; overlapping runs would fight
+# over the driver.
+concurrency:
+  group: tb5-hardware
+  cancel-in-progress: false
+
+jobs:
+  loopback:
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [node-1, node-2]
+    name: driver + loopback suite (${{ matrix.node }})
+    runs-on: [self-hosted, tb5, "${{ matrix.node }}"]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build userspace
+        run: |
+          mkdir -p build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_DAEMON=OFF -DBUILD_TRAY=OFF -DBUILD_VERBS=ON
+          make -j$(nproc) odl_tb5 odl_tb5_cli odl_tb5_test
+      - name: Build kernel module
+        run: cd build && make driver
+      - name: Install driver (loopback mode)
+        run: |
+          sudo rmmod odl_tb5 2>/dev/null || true
+          sudo insmod driver/odl_tb5.ko loopback=1
+          for i in $(seq 1 20); do
+            [ -e /dev/odl_tb5_0 ] && break
+            sleep 0.5
+          done
+          test -e /dev/odl_tb5_0
+      - name: Run full test suite (device, lib_api, plugin)
+        run: cd build && ./tests/odl_tb5_test
+      - name: Unload driver
+        if: always()
+        run: sudo rmmod odl_tb5 2>/dev/null || true
+
+  p2p:
+    needs: loopback
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - node: node-1
+            role: server
+          - node: node-2
+            role: client
+    name: two-node bandwidth (${{ matrix.role }} on ${{ matrix.node }})
+    runs-on: [self-hosted, tb5-connected, "${{ matrix.node }}"]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          mkdir -p build && cd build
+          cmake .. -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_DAEMON=OFF -DBUILD_TRAY=OFF -DBUILD_VERBS=ON
+          make -j$(nproc) odl_tb5 odl_tb5_cli
+          make driver
+      - name: Install driver (real link)
+        run: |
+          sudo rmmod odl_tb5 2>/dev/null || true
+          sudo dmesg -C
+          sudo insmod driver/odl_tb5.ko
+      - name: Wait for XDomain READY
+        run: |
+          for i in $(seq 1 120); do
+            if sudo dmesg | grep -q 'entering READY state'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "peer never reached READY state" >&2
+          sudo dmesg | grep odl_tb5 | tail -50 >&2
+          exit 1
+      - name: Run bandwidth server
+        if: matrix.role == 'server'
+        # The client drives the test; the server side just needs to stay up
+        # long enough. timeout(1) exit 124 means it served until the window
+        # closed, which is success here.
+        run: |
+          rc=0
+          timeout 300 build/cli/odl_tb5_cli server -d 0 || rc=$?
+          [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ]
+      - name: Run bandwidth client
+        if: matrix.role == 'client'
+        run: |
+          # Give the server leg time to come up; it and this job start together.
+          sleep 15
+          for i in 1 2 3; do
+            if build/cli/odl_tb5_cli client -d 0 -t bandwidth -b 64K,1M,4M; then
+              exit 0
+            fi
+            echo "attempt $i failed, retrying" >&2
+            sleep 10
+          done
+          exit 1
+      - name: Unload driver
+        if: always()
+        run: sudo rmmod odl_tb5 2>/dev/null || true
