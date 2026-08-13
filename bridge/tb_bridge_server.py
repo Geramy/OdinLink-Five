@@ -95,15 +95,21 @@ class TensorStore:
             return self._bytes, len(self._store)
 
     def view(self, key: str):
-        """Local MLX (or NumPy) view of a stored blob. See mlx_helpers."""
+        """Local MLX (or NumPy) view. Decompresses ODLC first."""
         entry = self.get(key)
         if entry is None:
             return None
+        meta, data = entry
+        try:
+            from bridge.odl_compress import maybe_decompress
+        except ImportError:
+            from odl_compress import maybe_decompress
+        data = maybe_decompress(data)
         try:
             from mlx_helpers import wrap_blob
         except ImportError:
             from bridge.mlx_helpers import wrap_blob
-        return wrap_blob(entry[0], entry[1])
+        return wrap_blob(meta, data)
 
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:

@@ -43,6 +43,7 @@ enum odl_cli_test_type {
 	ODL_TEST_LATENCY_LOAD  = 3,
 	ODL_TEST_MIMO          = 4,
 	ODL_TEST_JITTER        = 5,
+	ODL_TEST_COMPRESS      = 6, /* local, no peer — measured LZ4 ratios */
 	ODL_TEST_ALL           = 99,
 };
 
@@ -249,5 +250,8 @@ int odl_cli_mimo_server(odl_tb5_t handle, uint8_t sid, uint8_t dst,
 			 const struct odl_cli_test_req *req);
 int odl_cli_jitter_server(odl_tb5_t handle, uint8_t sid, uint8_t dst,
 			   const struct odl_cli_test_req *req);
+
+/* Local measured ratios. No peer. Safe on Mac. */
+void odl_cli_compress_report(void);
 
 #endif

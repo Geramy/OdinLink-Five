@@ -29,7 +29,7 @@ static void print_usage(const char *prog)
 		"  -o <file>       Output results to CSV file\n"
 		"\n"
 		"Client options:\n"
-		"  -t <test>       Test type: bandwidth|latency|latency-load|mimo|jitter|all\n"
+		"  -t <test>       Test type: bandwidth|latency|latency-load|mimo|jitter|compress|all\n"
 		"  -b <sizes>      Block sizes, comma-separated (e.g., 4K,64K,1M,4M)\n"
 		"  -i <count>      Iteration count (default: 1000 for latency, 100 for bw)\n"
 		"  -D <seconds>    Duration per test (default: 10)\n"
@@ -81,6 +81,8 @@ static enum odl_cli_test_type parse_test_type(const char *str)
 		return ODL_TEST_MIMO;
 	if (strcmp(str, "jitter") == 0)
 		return ODL_TEST_JITTER;
+	if (strcmp(str, "compress") == 0 || strcmp(str, "odlc") == 0)
+		return ODL_TEST_COMPRESS;
 	if (strcmp(str, "all") == 0)
 		return ODL_TEST_ALL;
 
@@ -204,6 +206,12 @@ int main(int argc, char *argv[])
 	if (is_client && !params.test_type) {
 		fprintf(stderr, "Client mode requires -t <test>\n");
 		return 1;
+	}
+
+	/* Local only — no /dev, works on a Mac or a box with no NHI. */
+	if (params.test_type == ODL_TEST_COMPRESS) {
+		odl_cli_compress_report();
+		return 0;
 	}
 
 	if (is_server)

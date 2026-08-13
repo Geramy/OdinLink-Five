@@ -62,7 +62,8 @@ Request:
     u32  meta_len
     u8[] meta_json  (dtype, shape, kind: numpy|torch)
     u64  data_len
-    u8[] data       (raw tensor bytes)
+    u8[] data       (raw tensor bytes, or ODLC lz4_block if
+                    meta.odlc is true / data starts with ODLC magic)
 
 Response:
   u8   status       0=OK, 1=NOT_FOUND, 2=BAD_OP, 3=OOM, 4=PROTOCOL
@@ -100,13 +101,13 @@ an extension of the training host's spill pool.
 
 ## What's missing
 
-- **Compression**: bf16 + lz4 would help if you're often offloading
-  near-zero activations. Out of scope for v1.
 - **Encryption**: zero. Run it on a private link only.
 
-Connection reuse and the Mac-side MLX wrap are in:
-`TBBridgeClient` keeps one TCP socket; `bridge/mlx_helpers.py` turns a
+Connection reuse, ODLC LZ4, and the Mac-side MLX wrap are in:
+`TBBridgeClient` keeps one TCP socket; tensors ≥ 256 KiB are ODLC
+lz4_block (`ODL_COMPRESS=0` to disable); `bridge/mlx_helpers.py` turns a
 stored blob into `mlx.array` (`copy=False` when mlx allows it) or a
-NumPy view. `TensorStore.view(key)` is the server-side hook.
+NumPy view. `TensorStore.view(key)` decompresses then wraps.
 
 Local check (no cable): `python3 tests/test_odinlink_remote.py`
+and `python3 compress/tests/test_odl_compress.py`

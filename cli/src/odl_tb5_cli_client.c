@@ -122,6 +122,11 @@ static int run_single_test(odl_tb5_t handle, uint8_t sid, uint8_t dst,
 		ret = odl_cli_jitter_client(handle, sid, dst, params);
 		break;
 
+	case ODL_TEST_COMPRESS:
+		/* Local. Mac and Linux. No TEST_REQ. */
+		odl_cli_compress_report();
+		return 0;
+
 	default:
 		fprintf(stderr, "Unknown test type: %d\n", test_type);
 		return -EINVAL;
@@ -187,6 +192,7 @@ int odl_cli_run_client(const struct odl_cli_params *params)
 			ODL_TEST_JITTER,
 			ODL_TEST_LATENCY_LOAD,
 			ODL_TEST_MIMO,
+			ODL_TEST_COMPRESS,
 		};
 
 		for (int i = 0; i < (int)(sizeof(all_tests) / sizeof(all_tests[0])); i++) {

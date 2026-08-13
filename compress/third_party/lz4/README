@@ -1,0 +1,3 @@
+Vendored LZ4 v1.10.0 (`lz4.c`, `lz4.h`) from https://github.com/lz4/lz4
+BSD-2-Clause. Used for the portable ODLC lz4_block payload the Mac can
+decode. Do not replace with nvCOMP headers.

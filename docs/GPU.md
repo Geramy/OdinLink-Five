@@ -146,10 +146,40 @@ cmake .. -DNVCOMP_ROOT=$HOME/miniconda3/lib/python3.13/site-packages/nvidia/libn
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `ODL_COMPRESS` | off | `1` / `true` enables |
-| `ODL_COMPRESS_ALGO` | `gdeflate` | `gdeflate` \| `lz4` \| `snappy` |
+| `ODL_COMPRESS` | NCCL: off · bridge: on | `1` / `true` enables; `0` disables. Bridge defaults on. |
+| `ODL_COMPRESS_ALGO` | `gdeflate` | `gdeflate` \| `lz4` \| `snappy` \| `lz4_block` |
 | `ODL_COMPRESS_THRESHOLD` | `262144` | Min message size (bytes) |
 | `ODL_COMPRESS_LEVEL` | `1` | Reserved for future |
+
+`gdeflate` / `lz4` / `snappy` are **nvCOMP native**. A Mac cannot decode
+them. They are Linux↔Linux NCCL only.
+
+**What NVIDIA actually publishes** (not a number we invented):
+
+| Codec | Official claim | In this tree |
+|-------|----------------|--------------|
+| Cascaded | up to **80×** on analytical numerical data, up to 500 GB/s | **Not used** |
+| LZ4 / Snappy | up to **100 GB/s** GPU throughput; no official ratio | nvCOMP algo 2/3, Linux GPU only |
+| GDeflate | GPU format; **no published ratio** | NCCL default when `ODL_COMPRESS=1` |
+| Blackwell DE | up to **600 GB/s decompress** | only if you have Blackwell |
+
+Ratio is payload-dependent. The CLI prints **measured** in/wire for zeros, the same `0xAA` fill as the bandwidth test, and random (`odl_tb5_cli -t compress`). That run needs no cable and works on a Mac.
+
+`lz4_block` is the portable payload (64 KiB standard LZ4 raw blocks + a
+chunk table). The TB-bridge and the Mac always use this. See
+[`compress/include/odl_tb5/odl_compress.h`](../compress/include/odl_tb5/odl_compress.h).
+
+NCCL `isend` still DMAs `max_wire` bytes so both ranks agree on size —
+that path does **not** shrink the Thunderbolt transfer. The bridge does:
+`data_len` on the TCP header is the compressed size.
+
+Host / Mac smoke test (no CUDA):
+
+```bash
+cmake --build . --target odl_compress_host_test
+./compress/odl_compress_host_test
+python3 compress/tests/test_odl_compress.py
+```
 
 ```bash
 export ODL_COMPRESS=1

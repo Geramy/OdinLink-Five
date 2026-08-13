@@ -324,6 +324,48 @@ static void parse_jitter_summary(const char *text,
 	js->valid = (js->avg_rtt_ns > 0);
 }
 
+static void parse_compress(const char *text, struct odl_parsed_compress *c)
+{
+	const char *sec = strstr(text, "=== Compression (measured) ===");
+	const char *p;
+	const char *line;
+
+	if (!sec)
+		return;
+	p = strstr(sec, "Backend:");
+	if (p) {
+		p += strlen("Backend:");
+		while (*p && isspace((unsigned char)*p))
+			p++;
+		const char *nl = strchr(p, '\n');
+		size_t n = nl ? (size_t)(nl - p) : strlen(p);
+		if (n >= sizeof(c->backend))
+			n = sizeof(c->backend) - 1;
+		memcpy(c->backend, p, n);
+		c->backend[n] = '\0';
+	}
+	line = sec;
+	while (c->nrows < ODL_PARSE_MAX_COMPRESS) {
+		const char *row = strstr(line, "Payload ");
+		char name[32];
+		double in_b = 0, wire_b = 0, ratio = 0;
+
+		if (!row)
+			break;
+		if (sscanf(row, "Payload %31s in=%lf wire=%lf ratio=%lf",
+			   name, &in_b, &wire_b, &ratio) >= 3) {
+			g_strlcpy(c->rows[c->nrows].name, name,
+				  sizeof(c->rows[c->nrows].name));
+			c->rows[c->nrows].in_bytes = in_b;
+			c->rows[c->nrows].wire_bytes = wire_b;
+			c->rows[c->nrows].ratio = ratio;
+			c->nrows++;
+			c->valid = true;
+		}
+		line = row + 8;
+	}
+}
+
 /* Top-level parser: dispatch to sub-parsers based on output content */
 int odl_parse_test_output(const char *output_text,
                           const char *test_type,
@@ -336,13 +378,15 @@ int odl_parse_test_output(const char *output_text,
 	g_strlcpy(result->test_type, test_type, sizeof(result->test_type));
 
 	parse_bandwidth(output_text, &result->bandwidth);
+	parse_compress(output_text, &result->compress);
 
 	const char *search = output_text;
 	while (result->num_stats < ODL_PARSE_MAX_STATS) {
 		const char *found = strstr(search, "=== ");
 		if (!found)
 			break;
-		if (strstr(found, "=== Latency Comparison") == found) {
+		if (strstr(found, "=== Latency Comparison") == found ||
+		    strstr(found, "=== Compression") == found) {
 			search = found + 4;
 			continue;
 		}

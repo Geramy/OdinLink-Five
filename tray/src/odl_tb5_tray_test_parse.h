@@ -60,6 +60,22 @@ struct odl_parsed_jitter_summary {
 	bool   valid;
 };
 
+#define ODL_PARSE_MAX_COMPRESS 4
+
+struct odl_parsed_compress_row {
+	char   name[32];
+	double in_bytes;
+	double wire_bytes;
+	double ratio; /* 0 = incompressible */
+};
+
+struct odl_parsed_compress {
+	char backend[64];
+	struct odl_parsed_compress_row rows[ODL_PARSE_MAX_COMPRESS];
+	int  nrows;
+	bool valid;
+};
+
 struct odl_parsed_test_result {
 	char test_type[32];
 
@@ -70,6 +86,7 @@ struct odl_parsed_test_result {
 	int                            num_histograms;
 	struct odl_parsed_load_comparison load_cmp;
 	struct odl_parsed_jitter_summary  jitter_summary;
+	struct odl_parsed_compress     compress;
 };
 
 /* Parse output text from daemon result JSON into structured metrics */

@@ -92,9 +92,21 @@ if(NOT ODL_ENABLE_NVCOMP STREQUAL "OFF")
 endif()
 
 # Always produce libodl_compress so NCCL can link unconditionally.
+# Host LZ4 (algo 4) is always compiled — that is the Mac-readable format.
 add_library(odl_compress SHARED
   src/odl_compress_common.c
+  src/odl_compress_lz4.c
+  third_party/lz4/lz4.c
 )
+
+target_include_directories(odl_compress
+  PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/lz4
+)
+
+if(APPLE)
+  target_link_libraries(odl_compress PRIVATE "-framework Compression")
+endif()
 
 target_include_directories(odl_compress
   PUBLIC
@@ -146,3 +158,9 @@ if(ODL_NVCOMP_FOUND)
   target_include_directories(odl_compress_bench PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include)
 endif()
+
+# Host LZ4 round-trip — no CUDA, runs on Linux and Mac CI.
+add_executable(odl_compress_host_test tests/odl_compress_host_test.c)
+target_link_libraries(odl_compress_host_test PRIVATE odl_compress)
+target_include_directories(odl_compress_host_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/include)

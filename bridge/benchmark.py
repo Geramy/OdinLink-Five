@@ -88,6 +88,24 @@ def main():
 
     cli = TBBridgeClient(args.host, args.port)
 
+    try:
+        from odl_compress import compress, looks_compressed
+    except ImportError:
+        from bridge.odl_compress import compress, looks_compressed
+    print("\nCompression (measured on this host, no cable):")
+    for name, arr in (
+        ("zeros", np.zeros(1 << 20, dtype=np.float32)),
+        ("randn", np.random.randn(1 << 20).astype(np.float32)),
+    ):
+        raw = arr.tobytes()
+        wire = compress(raw)
+        if wire and looks_compressed(wire):
+            ratio = len(raw) / len(wire)
+            print(f"  {name:8} {len(raw)/1e6:.1f} MB → {len(wire)/1e6:.2f} MB  "
+                  f"{ratio:.2f}x   1 GiB wire → {ratio:.2f} GiB payload")
+        else:
+            print(f"  {name:8} incompressible (sent raw)")
+
     print(f"\nLatency ({args.iters * 4} stat round-trips):")
     lat = bench_latency(cli, args.iters * 4)
     print(f"  median={lat['median_us']:.1f}µs  p99={lat['p99_us']:.1f}µs  min={lat['min_us']:.1f}µs")

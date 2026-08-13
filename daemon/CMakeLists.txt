@@ -58,6 +58,7 @@ set(DAEMON_SOURCES
     ${CMAKE_SOURCE_DIR}/cli/src/odl_tb5_cli_jitter.c
     ${CMAKE_SOURCE_DIR}/cli/src/odl_tb5_cli_server.c
     ${CMAKE_SOURCE_DIR}/cli/src/odl_tb5_cli_client.c
+    ${CMAKE_SOURCE_DIR}/cli/src/odl_tb5_cli_compress.c
 )
 
 # Include directories
@@ -67,6 +68,7 @@ set(DAEMON_INCLUDES
     ${CMAKE_SOURCE_DIR}/lib/include
     ${CMAKE_SOURCE_DIR}/driver/uapi
     ${CMAKE_SOURCE_DIR}/cli/src
+    ${CMAKE_SOURCE_DIR}/compress/include
     ${GLIB2_INCLUDE_DIRS}
     ${GIO2_INCLUDE_DIRS}
     ${GIOUNIX_INCLUDE_DIRS}
@@ -75,6 +77,7 @@ set(DAEMON_INCLUDES
 # Link libraries
 set(DAEMON_LIBS
     odl_tb5
+    odl_compress
     ${GLIB2_LIBRARIES}
     ${GIO2_LIBRARIES}
     ${GIOUNIX_LIBRARIES}

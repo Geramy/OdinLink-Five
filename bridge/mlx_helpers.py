@@ -145,5 +145,9 @@ def wrap_store(store) -> dict:
         if entry is None:
             continue
         meta, data = entry
-        out[key] = wrap_blob(meta, data)
+        try:
+            from odl_compress import maybe_decompress
+        except ImportError:
+            from bridge.odl_compress import maybe_decompress
+        out[key] = wrap_blob(meta, maybe_decompress(data))
     return out

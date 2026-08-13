@@ -1,15 +1,35 @@
 /* SPDX-License-Identifier: MIT */
 /**
- * OdinLink optional GPU compression (nvCOMP) for the TB link path.
+ * OdinLink optional compression for the TB link path.
  *
- * Wire format when compression is used:
- *   [odl_compress_header | compressed payload | optional padding to max]
+ * Wire (little-endian, packed):
+ *   [odl_compress_header | payload]
  *
- * Env (both peers should match):
+ * Two payload families share this header:
+ *
+ *   1) nvCOMP native (Linux CUDA only) — algo 1/2/3
+ *      GDeflate / batched LZ4 / Snappy from nvCOMP managers.
+ *      A Mac cannot decode these. Linux↔Linux NCCL only.
+ *
+ *   2) Portable LZ4 blocks — algo 4 (ODL_ALGO_LZ4_BLOCK)
+ *      This is what the Mac and the TB-bridge speak.
+ *
+ *      payload:
+ *        num_chunks × { u32 raw_bytes, u32 comp_bytes }   (LE)
+ *        then concatenated standard LZ4 raw blocks
+ *        (LZ4_compress_default / Apple COMPRESSION_LZ4_RAW)
+ *
+ *      compressed_bytes = table + all blocks. Chunks are 64 KiB
+ *      except the last. Empty input is never wrapped.
+ *
+ * Env:
  *   ODL_COMPRESS=1
- *   ODL_COMPRESS_ALGO=gdeflate|lz4|snappy
+ *   ODL_COMPRESS_ALGO=gdeflate|lz4|snappy|lz4_block
  *   ODL_COMPRESS_THRESHOLD=262144
  *   ODL_COMPRESS_LEVEL=1
+ *
+ * NCCL (CUDA) uses gdeflate/lz4/snappy when nvCOMP is linked.
+ * The Mac / bridge path always writes and reads lz4_block.
  */
 #pragma once
 
@@ -20,14 +40,16 @@
 extern "C" {
 #endif
 
-#define ODL_COMPRESS_MAGIC   0x4F444C43u /* 'ODLC' */
+#define ODL_COMPRESS_MAGIC   0x4F444C43u /* 'ODLC' as LE u32 */
 #define ODL_COMPRESS_VERSION 1
+#define ODL_COMPRESS_CHUNK   65536u
 
 enum odl_compress_algo {
-	ODL_ALGO_NONE     = 0,
-	ODL_ALGO_GDEFLATE = 1,
-	ODL_ALGO_LZ4      = 2,
-	ODL_ALGO_SNAPPY   = 3,
+	ODL_ALGO_NONE      = 0,
+	ODL_ALGO_GDEFLATE  = 1, /* nvCOMP only */
+	ODL_ALGO_LZ4       = 2, /* nvCOMP batched LZ4 — not Mac-readable */
+	ODL_ALGO_SNAPPY    = 3, /* nvCOMP only */
+	ODL_ALGO_LZ4_BLOCK = 4, /* portable, Mac + host */
 };
 
 struct odl_compress_header {
@@ -38,6 +60,11 @@ struct odl_compress_header {
 	uint64_t compressed_bytes;
 	uint32_t num_chunks;
 	uint32_t reserved;
+} __attribute__((packed));
+
+struct odl_lz4_chunk {
+	uint32_t raw_bytes;
+	uint32_t comp_bytes;
 } __attribute__((packed));
 
 /* ── config ──────────────────────────────────────────────────────── */
@@ -93,10 +120,45 @@ void *odl_compress_device_alloc(size_t bytes);
 void odl_compress_device_free(void *ptr);
 
 /**
- * Should this message try compression? (enabled + size >= threshold + backend).
- * type_is_cuda: 1 for GPU pointers, 0 for host (v1 host compress not implemented).
+ * Should this message try GPU compression? (enabled + size + nvCOMP).
+ * type_is_cuda: 1 for GPU pointers. Host always returns 0 here —
+ * use odl_compress_should_host() for the Mac/bridge path.
  */
 int odl_compress_should(size_t size, int type_is_cuda);
+
+/* ── Host / Mac portable LZ4 (algo 4) ────────────────────────────── */
+
+/** Always 1 — vendored LZ4, no nvCOMP required. */
+int odl_compress_host_available(void);
+
+/** 1 if ODL_COMPRESS is on and host LZ4 is available. */
+int odl_compress_host_enabled(void);
+
+/** 1 if size >= threshold and host compression is enabled. */
+int odl_compress_should_host(size_t size);
+
+/** Upper bound on an lz4_block wire blob for `original_bytes`. */
+size_t odl_compress_host_max_wire_bytes(size_t original_bytes);
+
+/**
+ * Compress host buffer into ODLC + lz4_block.
+ * Returns 0 on success (and *out_wire_bytes < in_bytes).
+ * Returns -1 to keep the raw payload (incompressible / error).
+ */
+int odl_compress_host(const void *in, size_t in_bytes,
+		      void *out, size_t out_capacity,
+		      size_t *out_wire_bytes);
+
+/**
+ * Decompress an ODLC lz4_block blob. Rejects nvCOMP algos (1/2/3).
+ * d_out must hold header.original_bytes.
+ */
+int odl_decompress_host(const void *wire, size_t wire_bytes,
+			void *out, size_t out_capacity,
+			size_t *out_original_bytes);
+
+/** 1 if buf starts with a valid ODLC header. */
+int odl_compress_looks_compressed(const void *buf, size_t n);
 
 #ifdef __cplusplus
 }
