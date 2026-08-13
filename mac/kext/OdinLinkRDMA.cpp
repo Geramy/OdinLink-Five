@@ -37,6 +37,7 @@
 #include <IOKit/IOBufferMemoryDescriptor.h>
 #include <IOKit/IODeviceTreeSupport.h>
 #include <libkern/OSAtomic.h>
+#include <libkern/libkern.h>
 
 #include "OdinLinkRDMA.h"
 
@@ -140,15 +141,56 @@ bool OdinLinkRDMA::start(IOService *provider)
 
 	fBufferReady = false;
 	fFrameCount = 0;
+	fRxHop = ODL_MAC_DEFAULT_RX_HOP;
+	fArmed = false;
+	fLastIdx = 0;
+	fRxDone = 0;
+	fNHIMap = NULL;
+	fNHIRegs = NULL;
+	fNHISize = 0;
+	fDescMemory = NULL;
+	fDescDMA = NULL;
+	fDescPhys = 0;
+	fDescVirt = NULL;
+	fWorkLoop = NULL;
+	fTimer = NULL;
+	fXdNotifier = NULL;
+	fXdService = NULL;
 	fLock = IOSimpleLockAlloc();
 	if (fLock)
 		IOSimpleLockInit(fLock);
 
+	mapNHI(provider);
+
+	fWorkLoop = IOWorkLoop::workLoop();
+	if (fWorkLoop) {
+		fTimer = IOTimerEventSource::timerEventSource(this, timerFired);
+		if (fTimer) {
+			fWorkLoop->addEventSource(fTimer);
+			fTimer->setTimeoutMS(1);
+		}
+	}
+
+	{
+		OSDictionary *matching =
+			IOService::serviceMatching("IOThunderboltXDomainService");
+		if (matching)
+			fXdNotifier = addMatchingNotification(
+				gIOFirstMatchNotification, matching,
+				xdomainAppeared, this);
+	}
+
 	registerService();
 
-	IOLog("OdinLinkRDMA: started — buffer at DART addr 0x%016llx, "
-	      "ready for DMA from Linux peer\n",
-	      (unsigned long long)fBufferPhysAddr);
+	IOLog("OdinLinkRDMA: started — buffer DART 0x%016llx (%llu x %u), "
+	      "NHI %s, hardware NOT armed. This kext does not yet publish "
+	      "an XDomain directory (Linux /dev appears only when the Mac "
+	      "advertises 0x4F4C). We watch for the Linux advertisement. "
+	      "Arm with odl_rdma_client -a only if you accept the "
+	      "unverified ACIO map.\n",
+	      (unsigned long long)fBufferPhysAddr,
+	      (unsigned long long)ODL_MAC_RX_SLOTS, ODL_MAC_SLOT_BYTES,
+	      fNHIRegs ? "mapped" : "missing");
 
 	return true;
 
@@ -169,6 +211,28 @@ err_free_buffer:
 void OdinLinkRDMA::stop(IOService *provider)
 {
 	IOLog("OdinLinkRDMA: stopping\n");
+
+	if (fXdNotifier) {
+		fXdNotifier->remove();
+		fXdNotifier = NULL;
+	}
+	if (fXdService) {
+		fXdService->release();
+		fXdService = NULL;
+	}
+	if (fTimer) {
+		fTimer->cancelTimeout();
+		if (fWorkLoop)
+			fWorkLoop->removeEventSource(fTimer);
+		fTimer->release();
+		fTimer = NULL;
+	}
+	if (fWorkLoop) {
+		fWorkLoop->release();
+		fWorkLoop = NULL;
+	}
+	stopRxRing();
+	unmapNHI();
 
 	if (fDMACommand) {
 		fDMACommand->clearMemoryDescriptor();
@@ -258,6 +322,14 @@ IOExternalMethodDispatch OdinLinkRDMAUserClient::sMethods[kOdinLinkClientNumMeth
 		(IOExternalMethodAction)&OdinLinkRDMAUserClient::externalGetFrameInfo,
 		0, 0, 2, 0,
 	},
+	{	/* kOdinLinkGetLinkInfo */
+		(IOExternalMethodAction)&OdinLinkRDMAUserClient::externalGetLinkInfo,
+		0, 0, 4, 0,
+	},
+	{	/* kOdinLinkArmHardware */
+		(IOExternalMethodAction)&OdinLinkRDMAUserClient::externalArmHardware,
+		1, 0, 1, 0,
+	},
 };
 
 OSDefineMetaClassAndStructors(OdinLinkRDMAUserClient, IOUserClient)
@@ -317,8 +389,8 @@ IOReturn OdinLinkRDMAUserClient::externalGetBufferInfo(
 
 	arguments->scalarOutput[0] = prov->getBufferPhysAddr();
 	arguments->scalarOutput[1] = prov->getBufferSize();
-	arguments->scalarOutput[2] = ODINLINK_RDMA_FRAME_SIZE;
-	arguments->scalarOutput[3] = ODINLINK_RDMA_FRAME_COUNT;
+	arguments->scalarOutput[2] = ODL_MAC_SLOT_BYTES;
+	arguments->scalarOutput[3] = ODL_MAC_RX_SLOTS;
 
 	return kIOReturnSuccess;
 }
@@ -366,4 +438,38 @@ IOReturn OdinLinkRDMAUserClient::externalGetFrameInfo(
 	arguments->scalarOutput[1] = frameSize;
 
 	return ready ? kIOReturnSuccess : kIOReturnNoResources;
+}
+
+IOReturn OdinLinkRDMAUserClient::externalGetLinkInfo(
+	OdinLinkRDMAUserClient *target, void *reference,
+	IOExternalMethodArguments *arguments)
+{
+	OdinLinkRDMA *prov = target->fProvider;
+
+	(void)reference;
+	if (!prov)
+		return kIOReturnNotReady;
+
+	prov->getLinkInfo(&arguments->scalarOutput[0],
+			  &arguments->scalarOutput[1],
+			  &arguments->scalarOutput[2],
+			  &arguments->scalarOutput[3]);
+	return kIOReturnSuccess;
+}
+
+IOReturn OdinLinkRDMAUserClient::externalArmHardware(
+	OdinLinkRDMAUserClient *target, void *reference,
+	IOExternalMethodArguments *arguments)
+{
+	OdinLinkRDMA *prov = target->fProvider;
+
+	(void)reference;
+	if (!prov)
+		return kIOReturnNotReady;
+	if (arguments->scalarInputCount < 1)
+		return kIOReturnBadArgument;
+
+	IOReturn ret = prov->armHardware(arguments->scalarInput[0] != 0);
+	arguments->scalarOutput[0] = (ret == kIOReturnSuccess) ? 1 : 0;
+	return ret;
 }

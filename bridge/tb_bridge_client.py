@@ -23,6 +23,7 @@ on TB5 IP is ~25-40 Gbps, latency 50-200 µs per round-trip.
 import json
 import socket
 import struct
+import threading
 from typing import Optional, Sequence
 
 import numpy as np
@@ -73,19 +74,51 @@ def _send_exact(sock: socket.socket, buf):
 
 
 class TBBridgeClient:
-    """One TCP connection per operation — simpler than pooling, fast enough
-    on TB5 where ~120 µs of TCP overhead is dwarfed by tensor copy time
-    for any tensor over a few MB."""
+    """One TCP connection, reused across operations.
+
+    The server keeps the socket open until the client closes. A dead
+    socket is dropped and the next call reconnects once.
+    """
 
     def __init__(self, host: str, port: int = 29800, timeout: float = 30.0):
         self.host = host
         self.port = port
         self.timeout = timeout
+        self._sock: Optional[socket.socket] = None
+        self._lock = threading.Lock()
+
+    def close(self) -> None:
+        with self._lock:
+            self._close_unlocked()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def _close_unlocked(self) -> None:
+        sock = self._sock
+        self._sock = None
+        if sock is None:
+            return
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
 
     def _connect(self) -> socket.socket:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(self.timeout)
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        except OSError:
+            pass
         try:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 16 << 20)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 16 << 20)
@@ -93,6 +126,20 @@ class TBBridgeClient:
             pass
         sock.connect((self.host, self.port))
         return sock
+
+    def _ensure_unlocked(self) -> socket.socket:
+        if self._sock is None:
+            self._sock = self._connect()
+        return self._sock
+
+    def _call(self, fn):
+        """Run fn(sock). Reconnect once if the cached socket is dead."""
+        with self._lock:
+            try:
+                return fn(self._ensure_unlocked())
+            except (OSError, ConnectionError):
+                self._close_unlocked()
+                return fn(self._ensure_unlocked())
 
     def put(self, key: str, tensor) -> None:
         """Offload a tensor. Works with torch.Tensor or numpy.ndarray.
@@ -115,32 +162,32 @@ class TBBridgeClient:
         if len(key_bytes) > 256:
             raise ValueError("key too long (max 256 bytes UTF-8)")
 
-        sock = self._connect()
-        try:
-            hdr = (
-                bytes([OP_PUT])
-                + struct.pack(">I", len(key_bytes))
-                + key_bytes
-                + struct.pack(">I", len(meta_bytes))
-                + meta_bytes
-                + struct.pack(">Q", len(arr_bytes))
-            )
+        hdr = (
+            bytes([OP_PUT])
+            + struct.pack(">I", len(key_bytes))
+            + key_bytes
+            + struct.pack(">I", len(meta_bytes))
+            + meta_bytes
+            + struct.pack(">Q", len(arr_bytes))
+        )
+
+        def do(sock):
             _send_exact(sock, hdr)
             _send_exact(sock, arr_bytes)
             status = _recv_exact(sock, 1)[0]
             if status != 0:
                 raise RuntimeError(f"server returned status {status}")
-        finally:
-            sock.close()
+
+        self._call(do)
 
     def get(self, key: str, device: Optional[str] = None):
         """Fetch a previously-put tensor. Returns the same kind it was
         stored as (torch on torch, numpy on numpy). For torch, an optional
         device= moves the result."""
         key_bytes = key.encode("utf-8")
-        sock = self._connect()
-        try:
-            hdr = bytes([OP_GET]) + struct.pack(">I", len(key_bytes)) + key_bytes
+        hdr = bytes([OP_GET]) + struct.pack(">I", len(key_bytes)) + key_bytes
+
+        def do(sock):
             _send_exact(sock, hdr)
             status = _recv_exact(sock, 1)[0]
             if status != 0:
@@ -149,8 +196,9 @@ class TBBridgeClient:
             meta = json.loads(_recv_exact(sock, meta_len))
             data_len = struct.unpack(">Q", _recv_exact(sock, 8))[0]
             data = _recv_exact(sock, data_len)
-        finally:
-            sock.close()
+            return meta, data
+
+        meta, data = self._call(do)
 
         if meta["kind"] == "torch":
             return self._bytes_to_torch(data, meta, device=device)
@@ -162,18 +210,16 @@ class TBBridgeClient:
 
     def delete(self, key: str) -> bool:
         key_bytes = key.encode("utf-8")
-        sock = self._connect()
-        try:
-            hdr = bytes([OP_DEL]) + struct.pack(">I", len(key_bytes)) + key_bytes
+        hdr = bytes([OP_DEL]) + struct.pack(">I", len(key_bytes)) + key_bytes
+
+        def do(sock):
             _send_exact(sock, hdr)
-            status = _recv_exact(sock, 1)[0]
-            return status == 0
-        finally:
-            sock.close()
+            return _recv_exact(sock, 1)[0] == 0
+
+        return self._call(do)
 
     def list(self) -> Sequence[str]:
-        sock = self._connect()
-        try:
+        def do(sock):
             _send_exact(sock, bytes([OP_LIST]) + struct.pack(">I", 0))
             status = _recv_exact(sock, 1)[0]
             if status != 0:
@@ -184,20 +230,19 @@ class TBBridgeClient:
                 kl = struct.unpack(">I", _recv_exact(sock, 4))[0]
                 keys.append(_recv_exact(sock, kl).decode("utf-8"))
             return keys
-        finally:
-            sock.close()
+
+        return self._call(do)
 
     def stat(self):
-        sock = self._connect()
-        try:
+        def do(sock):
             _send_exact(sock, bytes([OP_STAT]) + struct.pack(">I", 0))
             status = _recv_exact(sock, 1)[0]
             if status != 0:
                 raise RuntimeError(f"STAT failed: {status}")
             total, n = struct.unpack(">QI", _recv_exact(sock, 12))
             return {"total_bytes": total, "num_keys": n}
-        finally:
-            sock.close()
+
+        return self._call(do)
 
     # ── torch ↔ bytes helpers ────────────────────────────────────────────
     def _torch_to_bytes(self, t):
@@ -250,13 +295,16 @@ if __name__ == "__main__":
     d = sub.add_parser("delete"); d.add_argument("key")
     args = ap.parse_args()
     cli = TBBridgeClient(args.host, args.port)
-    if args.cmd == "list":
-        for k in cli.list():
-            print(k)
-    elif args.cmd == "stat":
-        s = cli.stat()
-        print(f"{s['total_bytes']/1e9:.2f} GB across {s['num_keys']} keys")
-    elif args.cmd == "delete":
-        ok = cli.delete(args.key)
-        print(f"deleted: {ok}")
-        sys.exit(0 if ok else 1)
+    try:
+        if args.cmd == "list":
+            for k in cli.list():
+                print(k)
+        elif args.cmd == "stat":
+            s = cli.stat()
+            print(f"{s['total_bytes']/1e9:.2f} GB across {s['num_keys']} keys")
+        elif args.cmd == "delete":
+            ok = cli.delete(args.key)
+            print(f"deleted: {ok}")
+            sys.exit(0 if ok else 1)
+    finally:
+        cli.close()

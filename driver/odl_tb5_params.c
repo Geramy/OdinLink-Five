@@ -57,3 +57,15 @@ int odl_max_devices = 0;
 module_param_named(max_devices, odl_max_devices, int, 0444);
 MODULE_PARM_DESC(max_devices,
 	"Bind at most N XDomain services (0 = unlimited; use 1 with two cables)");
+
+bool odl_bind_any = true;
+module_param_named(bind_any, odl_bind_any, bool, 0444);
+MODULE_PARM_DESC(bind_any,
+	"Also attach to Thunderbolt hosts that do not advertise OdinLink "
+	"(default=1). Needed for a Mac sink that has no XDomain directory.");
+
+bool odl_skip_login = false;
+module_param_named(skip_login, odl_skip_login, bool, 0444);
+MODULE_PARM_DESC(skip_login,
+	"Skip XDomain login and DMA-ping; bring the data path up on hop 1. "
+	"Use with bind_any against a Mac kext that cannot answer login.");

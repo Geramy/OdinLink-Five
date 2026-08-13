@@ -1,5 +1,8 @@
 # Cache directories
 .cache
+__pycache__/
+*.pyc
+*.pyo
 # Build directories
 build/
 cmake-build-*/
