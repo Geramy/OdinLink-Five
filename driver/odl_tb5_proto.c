@@ -508,6 +508,11 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 
 	dev->pong_received = false;   /* peer_ping_answered deliberately kept */
 
+	if (dev->skip_handshake) {
+		pr_info("odl_tb5: skipping DMA ping (Mac sink / bind_any)\n");
+		goto ready;
+	}
+
 	/* Use frame pool for RX during verify — each pool slot is
 	 * independent and auto-reposts after consumption, so we never
 	 * run out of RX frames.  The legacy submit_rx only posts 16
@@ -584,6 +589,7 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 		goto out_reset;
 	}
 
+ready:
 	pr_info("odl_tb5: DMA path verified, resetting rings for userspace\n");
 
 	flush_work(&dev->ctrl_reply_work);
@@ -666,6 +672,9 @@ static void odl_tb5_login_work_fn(struct work_struct *work)
 	unsigned long delay_ms;
 	int ret;
 
+	if (odl_skip_login || dev->skip_handshake)
+		goto skip_login;
+
 	ret = odl_tb5_proto_send_login(dev);
 	if (ret) {
 		dev->login_retries++;
@@ -687,6 +696,15 @@ static void odl_tb5_login_work_fn(struct work_struct *work)
 		 * firmware domain on Strix Halo) the GPU with it, ending in
 		 * amdgpu_irq_put/drm_buddy_fini NULL-deref and a hard freeze.
 		 * Give up and stay quiescent instead. */
+		if (dev->bind_any && dev->login_retries >= 3) {
+			pr_warn("odl_tb5: peer is not answering OdinLink "
+				"login after %d tries — continuing as a "
+				"Mac/bind_any sink on hop %d\n",
+				dev->login_retries,
+				ODL_TB5_DEFAULT_REMOTE_HOP);
+			goto skip_login;
+		}
+
 		if (odl_login_max_retries > 0 &&
 		    dev->login_retries >= odl_login_max_retries) {
 			pr_warn("odl_tb5: giving up after %d login attempts "
@@ -699,6 +717,19 @@ static void odl_tb5_login_work_fn(struct work_struct *work)
 		schedule_delayed_work(&dev->login_work,
 				      msecs_to_jiffies(delay_ms));
 	}
+	return;
+
+skip_login:
+	if (dev->remote_tx_hopid <= 0)
+		dev->remote_tx_hopid = ODL_TB5_DEFAULT_REMOTE_HOP;
+	dev->skip_handshake = true;
+	mutex_lock(&dev->state_lock);
+	dev->login_sent = true;
+	dev->login_received = true;
+	mutex_unlock(&dev->state_lock);
+	pr_info("odl_tb5: skipping XDomain login (remote hop %d)\n",
+		dev->remote_tx_hopid);
+	schedule_work(&dev->connect_work);
 }
 
 /* Send a logout notification to the peer. */

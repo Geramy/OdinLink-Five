@@ -70,7 +70,7 @@ export LD_LIBRARY_PATH=$PWD/rccl:$PWD/lib:$LD_LIBRARY_PATH
 # Confirm logs say:  Using network ODL_TB5   (NOT Socket)
 ```
 
-Full install guide → [`docs/INSTALL.md`](docs/INSTALL.md) · GPU → [`docs/GPU.md`](docs/GPU.md)
+Full install → [`docs/INSTALL.md`](docs/INSTALL.md) · GPU → [`docs/GPU.md`](docs/GPU.md) · **Ubuntu + PyTorch + Mac RAM** → [`docs/PYTORCH.md`](docs/PYTORCH.md) · **which TB card** → [`docs/HARDWARE.md`](docs/HARDWARE.md) (`scripts/tb-hw-check.sh`)
 
 ## Architecture
 

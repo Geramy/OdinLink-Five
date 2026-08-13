@@ -141,6 +141,9 @@ add_subdirectory(cli)
 # Test suite (odl_tb5_test)
 add_subdirectory(tests)
 
+# Linux → Mac sender (kext is built on macOS via mac/kext/Makefile)
+add_subdirectory(mac)
+
 # Optional: System daemon and tray application (options defined above)
 
 # Auto-disable if dependencies not found

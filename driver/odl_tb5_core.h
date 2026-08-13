@@ -358,6 +358,11 @@ struct odl_tb5_device {
 	int			login_retries;
 	bool			login_sent;
 	bool			login_received;
+	/* Bound from a generic Thunderbolt host (e.g. a Mac that does
+	 * not advertise 0x4F4C). After a few login timeouts we skip the
+	 * handshake and bring the data path up on the default hop. */
+	bool			bind_any;
+	bool			skip_handshake;
 
 	/* Connection state */
 	enum odl_tb5_conn_state	state;
@@ -573,6 +578,10 @@ extern int odl_protocol_mode;
 extern bool odl_e2e;
 extern unsigned int odl_busy_poll_us;
 extern int odl_max_devices;
+extern bool odl_bind_any;
+extern bool odl_skip_login;
+
+#define ODL_TB5_DEFAULT_REMOTE_HOP	1
 
 static inline bool odl_tb5_is_loopback(struct odl_tb5_device *dev)
 {

@@ -20,8 +20,12 @@
 #include <IOKit/IOMemoryDescriptor.h>
 #include <IOKit/IODMACommand.h>
 #include <IOKit/IOBufferMemoryDescriptor.h>
+#include <IOKit/IOTimerEventSource.h>
+#include <IOKit/IOWorkLoop.h>
 #include <libkern/OSAtomic.h>
 #endif
+
+#include "../include/odinlink_mac_proto.h"
 
 /* ── Buffer layout ──────────────────────────────────────────────── */
 
@@ -39,16 +43,18 @@
  * frame N, the Linux peer can write frame N+1 into the other half.
  */
 
-#define ODINLINK_RDMA_FRAME_SIZE       (1920ULL * 1080 * 4)  /* 1920x1080 RGBA8 = 8.25 MB */
-#define ODINLINK_RDMA_FRAME_COUNT      2                     /* double-buffered */
-#define ODINLINK_RDMA_BUFFER_SIZE      (ODINLINK_RDMA_FRAME_SIZE * ODINLINK_RDMA_FRAME_COUNT)
+#define ODINLINK_RDMA_FRAME_SIZE       ODL_MAC_SLOT_BYTES
+#define ODINLINK_RDMA_FRAME_COUNT      ODL_MAC_RX_SLOTS
+#define ODINLINK_RDMA_BUFFER_SIZE      ODL_MAC_RX_WINDOW_BYTES
 
 /* ── User client methods ─────────────────────────────────────────── */
 
 enum OdinLinkRDMAClientMethods {
-	kOdinLinkGetBufferInfo       = 0,  /* Out: phys_addr, size, frame_size, frame_count */
-	kOdinLinkGetFrameInfo        = 1,  /* Out: frame_count, frame_size (poll for new data) */
-	kOdinLinkClientNumMethods    = 2,
+	kOdinLinkGetBufferInfo       = 0,  /* Out: phys, bytes, slot, slots */
+	kOdinLinkGetFrameInfo        = 1,  /* Out: completed, slot_bytes */
+	kOdinLinkGetLinkInfo         = 2,  /* Out: hop, armed, rx_done, last_idx */
+	kOdinLinkArmHardware         = 3,  /* In: 1=arm RX ring (dangerous) */
+	kOdinLinkClientNumMethods    = 4,
 };
 
 /*
@@ -92,8 +98,25 @@ public:
 	uint64_t          getBufferPhysAddr() const;
 	uint64_t          getBufferSize() const;
 	bool              getFrameInfo(uint64_t *frameCount, uint64_t *frameSize);
+	void              getLinkInfo(uint64_t *hop, uint64_t *armed,
+				      uint64_t *rxDone, uint64_t *lastIdx);
+	IOReturn          armHardware(bool enable);
+
+	void              pollRx(void);
+	static void       timerFired(OSObject *owner, IOTimerEventSource *sender);
+	static bool       xdomainAppeared(void *target, void *refCon,
+					  IOService *newService,
+					  IONotifier *notifier);
 
 private:
+	bool              mapNHI(IOService *provider);
+	void              unmapNHI(void);
+	IOReturn          startRxRing(void);
+	void              stopRxRing(void);
+	void              writeNHI(uint32_t offset, uint32_t value);
+	uint32_t          readNHI(uint32_t offset);
+	void              logXDomain(IOService *svc);
+
 	IOBufferMemoryDescriptor  *fBufferMemory;
 	IODMACommand              *fDMACommand;
 	uint64_t                   fBufferPhysAddr;
@@ -102,6 +125,22 @@ private:
 	uint64_t                   fFrameCount;
 	bool                       fBufferReady;
 	IOSimpleLock              *fLock;
+
+	IOMemoryMap               *fNHIMap;
+	volatile uint32_t         *fNHIRegs;
+	uint32_t                   fNHISize;
+	IOBufferMemoryDescriptor  *fDescMemory;
+	IODMACommand              *fDescDMA;
+	uint64_t                   fDescPhys;
+	void                      *fDescVirt;
+	int                        fRxHop;
+	bool                       fArmed;
+	uint32_t                   fLastIdx;
+	uint64_t                   fRxDone;
+
+	IOWorkLoop                *fWorkLoop;
+	IOTimerEventSource        *fTimer;
+	IONotifier                *fXdNotifier;
 };
 
 class OdinLinkRDMAUserClient : public IOUserClient
@@ -128,6 +167,14 @@ public:
 		IOExternalMethodArguments *arguments);
 
 	static IOReturn externalGetFrameInfo(
+		OdinLinkRDMAUserClient *target, void *reference,
+		IOExternalMethodArguments *arguments);
+
+	static IOReturn externalGetLinkInfo(
+		OdinLinkRDMAUserClient *target, void *reference,
+		IOExternalMethodArguments *arguments);
+
+	static IOReturn externalArmHardware(
 		OdinLinkRDMAUserClient *target, void *reference,
 		IOExternalMethodArguments *arguments);
 

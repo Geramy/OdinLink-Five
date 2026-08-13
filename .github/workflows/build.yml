@@ -33,7 +33,7 @@ jobs:
           cd build
           make -j$(nproc) odl_tb5 odl_tb5_verbs odl_tb5_verbs_provider
           make -j$(nproc) odl_tb5_cli odl_tb5_daemon odl_tb5_tray
-          make -j$(nproc) odl_tb5_test odl_tb5_test_rccl_dmabuf
+          make -j$(nproc) odl_tb5_test odl_tb5_test_rccl_dmabuf odl_tensor_send
       # The other suites need /dev/odl_tb5_N, which no runner has. This one
       # is pure userspace and was being built but never executed.
       - name: Run plugin test suite
@@ -53,8 +53,9 @@ jobs:
             CONFIG_USB4= modules
       - name: Compile Linux-side Mac tensor sender
         run: |
+          test -x build/mac/odl_tensor_send
           gcc -Wall -c mac/linux_test/odl_tensor_send.c \
-            -Ilib/include -Idriver/uapi -o /tmp/odl_tensor_send.o
+            -Ilib/include -Imac/include -o /tmp/odl_tensor_send.o
       - name: Test with Docker Compose
         # The suite already exits non-zero on failure. It used to be piped
         # straight into grep, so the pipeline reported grep's status and a
@@ -127,7 +128,7 @@ jobs:
           mkdir build && cd build
           cmake .. -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_DAEMON=OFF -DBUILD_TRAY=OFF -DBUILD_VERBS=OFF
-          make -j$(nproc) odl_tb5 odl_tb5_cli odl_tb5_test
+          make -j$(nproc) odl_tb5 odl_tb5_cli odl_tb5_test odl_tensor_send
       - name: Run plugin test suite
         run: cd build && ./tests/odl_tb5_test plugin
       - name: Collect driver sources
@@ -165,7 +166,7 @@ jobs:
       - name: Compile RDMA client
         run: |
           clang -Wall -c mac/odl_rdma_client.c \
-            -Imac/kext -o /tmp/odl_rdma_client.o
+            -Imac/kext -Imac/include -o /tmp/odl_rdma_client.o
       # The kext had no build coverage at all and could rot unnoticed. Skip
       # rather than fail if a runner image drops the Kernel headers; a compile
       # error in our own source still fails the job.
@@ -177,11 +178,12 @@ jobs:
             echo "::warning::Kernel.framework headers absent from $SDK, skipping kext compile"
             exit 0
           fi
-          clang++ -c mac/kext/OdinLinkRDMA.cpp -o /tmp/OdinLinkRDMA.o \
-            -isysroot "$SDK" -I"$HDRS" -Imac/kext \
+          CXXFLAGS="-isysroot $SDK -I$HDRS -Imac/kext -Imac/include \
             -arch arm64 -std=c++17 -fno-builtin -fno-exceptions -fno-rtti \
             -fapple-kext -mkernel -nostdinc \
-            -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT
+            -DKERNEL -DKERNEL_PRIVATE -DDRIVER_PRIVATE -DAPPLE -DNeXT"
+          clang++ -c mac/kext/OdinLinkRDMA.cpp -o /tmp/OdinLinkRDMA.o $CXXFLAGS
+          clang++ -c mac/kext/OdinLinkNHI.cpp -o /tmp/OdinLinkNHI.o $CXXFLAGS
       - name: Upload macOS library
         if: always()
         uses: actions/upload-artifact@v4
