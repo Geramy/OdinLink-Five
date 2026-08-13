@@ -321,6 +321,40 @@ static struct tb_service_driver odl_tb5_driver = {
 	.remove		= odl_tb5_remove,
 	.id_table	= odl_tb5_ids,
 };
+
+/*
+ * Issue #4: "module loaded, no /dev" looks like success. The chardev is
+ * created in probe(), and probe() only runs when the other machine
+ * advertises the same XDomain protocol. thunderbolt-net / ThunderboltIP
+ * is a different protocol and can time out on its own.
+ *
+ * One delayed line if we are still unbound. Do not walk the thunderbolt
+ * bus — those structs are not a stable service-driver API.
+ */
+#define ODL_TB5_WAIT_PEER_SEC	15
+
+static void odl_tb5_wait_peer_fn(struct work_struct *work)
+{
+	bool empty;
+
+	mutex_lock(&odl_tb5_devices_lock);
+	empty = list_empty(&odl_tb5_devices_list);
+	mutex_unlock(&odl_tb5_devices_lock);
+
+	if (!empty)
+		return;
+
+	pr_info("odl_tb5: still no peer advertising protocol %s/0x%04x — "
+		"/dev/odl_tb5_* will not appear until the other machine "
+		"also loads odl_tb5 (thunderbolt-net / ThunderboltIP is a "
+		"different protocol)\n",
+		odl_protocol_mode == 1 ? ODL_TB5_PROTOCOL_KEY_APPLE
+				       : ODL_TB5_PROTOCOL_KEY,
+		odl_protocol_mode == 1 ? ODL_TB5_PROTOCOL_ID_APPLE
+				       : ODL_TB5_PROTOCOL_ID);
+}
+
+static DECLARE_DELAYED_WORK(odl_tb5_wait_peer_work, odl_tb5_wait_peer_fn);
 #endif /* CONFIG_USB4 */
 
 static int __init odl_tb5_init(void)
@@ -355,6 +389,7 @@ static int __init odl_tb5_init(void)
 #if IS_ENABLED(CONFIG_USB4)
 	odl_tb5_property_dir = tb_property_create_dir(&odl_tb5_proto_uuid);
 	if (!odl_tb5_property_dir) {
+		pr_err("odl_tb5: failed to create XDomain property directory\n");
 		ret = -ENOMEM;
 		goto err_chardev;
 	}
@@ -388,8 +423,11 @@ static int __init odl_tb5_init(void)
 
 	ret = tb_register_property_dir(protocol_key,
 				       odl_tb5_property_dir);
-	if (ret)
+	if (ret) {
+		pr_err("odl_tb5: tb_register_property_dir(%s) failed: %d\n",
+		       protocol_key, ret);
 		goto err_dir;
+	}
 
 	/* In Apple mode, also register under OdinLink's original key so we
 	 * can still talk to other OdinLink nodes. Need a separate directory
@@ -411,21 +449,44 @@ static int __init odl_tb5_init(void)
 					  "prtcstns", 0);
 		ret = tb_register_property_dir(ODL_TB5_PROTOCOL_KEY,
 					odl_tb5_apple_property_dir);
-		if (ret)
+		if (ret) {
+			pr_err("odl_tb5: tb_register_property_dir(%s) "
+			       "failed: %d\n", ODL_TB5_PROTOCOL_KEY, ret);
 			goto err_dir;
+		}
 	}
 
-	odl_tb5_proto_register();
+	ret = odl_tb5_proto_register();
+	if (ret) {
+		pr_err("odl_tb5: failed to register XDomain protocol handler: %d\n",
+		       ret);
+		goto err_dir;
+	}
 
 	ret = tb_register_service_driver(&odl_tb5_driver);
-	if (ret)
+	if (ret) {
+		pr_err("odl_tb5: tb_register_service_driver failed: %d\n", ret);
 		goto err_proto;
+	}
+
+	schedule_delayed_work(&odl_tb5_wait_peer_work,
+			      ODL_TB5_WAIT_PEER_SEC * HZ);
 #endif
 
 	odl_tb5_apple_init();
 
-	pr_info("odl_tb5: OdinLink TB5 driver loaded (odl_ring_size=%u)\n",
-		odl_ring_size);
+	pr_info("odl_tb5: OdinLink TB5 driver loaded (odl_ring_size=%u, "
+		"protocol=%s/0x%04x v%u)\n",
+		odl_ring_size,
+		odl_protocol_mode == 1 ? ODL_TB5_PROTOCOL_KEY_APPLE
+				       : ODL_TB5_PROTOCOL_KEY,
+		odl_protocol_mode == 1 ? ODL_TB5_PROTOCOL_ID_APPLE
+				       : ODL_TB5_PROTOCOL_ID,
+		ODL_TB5_PROTOCOL_VER);
+	pr_info("odl_tb5: /dev/odl_tb5_* appears after probe (peer must "
+		"advertise the same protocol). Look for "
+		"\"odl_tb5: probed device\", then "
+		"\"odl_tb5: entering READY state\"\n");
 
 	return 0;
 
@@ -447,6 +508,10 @@ err_chardev:
 static void __exit odl_tb5_exit(void)
 {
 	struct odl_tb5_device *dev, *tmp;
+
+#if IS_ENABLED(CONFIG_USB4)
+	cancel_delayed_work_sync(&odl_tb5_wait_peer_work);
+#endif
 
 	/* Clean up software loopback devices first (no NHI/hardware deps) */
 	if (odl_loopback_count > 0) {

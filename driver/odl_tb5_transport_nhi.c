@@ -93,10 +93,11 @@ static int nhi_ring_alloc(struct odl_tb5_device *dev)
 	}
 
 	pr_info("odl_tb5: rings allocated: TX hop=%d, RX hop=%d, "
-		"local_tx_hopid=%d (E2E enabled, e2e_tx_hop=%d)\n",
+		"local_tx_hopid=%d (E2E %s, e2e_tx_hop=%d)\n",
 		((struct tb_ring *)dev->tx.ring_handle)->hop,
 		((struct tb_ring *)dev->rx.ring_handle)->hop,
 		nhi_priv(dev)->local_tx_hopid,
+		odl_e2e ? "on" : "off",
 		((struct tb_ring *)dev->tx.ring_handle)->hop);
 
 	return 0;

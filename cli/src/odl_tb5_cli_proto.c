@@ -15,6 +15,40 @@
 
 static uint32_t g_sequence;
 
+void odl_cli_print_open_error(int index, int err)
+{
+	fprintf(stderr, "Failed to open device %d (/dev/odl_tb5_%d): %s\n",
+		index, index, strerror(-err));
+	if (-err == ENOENT)
+		fprintf(stderr,
+			"  /dev/odl_tb5_* appears only after probe — both "
+			"machines must load odl_tb5. A Thunderbolt host "
+			"(or thunderbolt-net / en05) is not enough.\n"
+			"  Check: dmesg | grep -E "
+			"'odl_tb5: (probed device|still no peer)'\n");
+	else if (-err == EACCES)
+		fprintf(stderr,
+			"  Permission denied. Install driver/71-odl-tb5.rules "
+			"or: sudo chmod 660 /dev/odl_tb5_%d\n", index);
+}
+
+void odl_cli_print_wait_error(odl_tb5_t handle, int err)
+{
+	struct odl_tb5_peer_info peer;
+	const char *st = "unknown";
+
+	memset(&peer, 0, sizeof(peer));
+	if (handle && odl_tb5_get_peer(handle, &peer) == 0)
+		st = odl_tb5_state_str(peer.state);
+
+	fprintf(stderr, "Peer connection failed: %s (state=%s)\n",
+		strerror(-err), st);
+	fprintf(stderr,
+		"  The link is usable only in READY. Look for "
+		"\"odl_tb5: entering READY state\" in dmesg "
+		"(DMA-ping can take tens of seconds after probe).\n");
+}
+
 int odl_cli_send_msg(odl_tb5_t handle, uint8_t stream_id, uint8_t dst_id,
 		     uint32_t type, uint32_t seq,
 		     const void *payload, size_t payload_len)

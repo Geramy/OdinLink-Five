@@ -22,6 +22,7 @@
 #include "odl_tb5_core.h"
 #include "odl_tb5_xd_proto.h"
 #include <linux/delay.h>
+#include <linux/errno.h>
 
 /* Stop retrying the XDomain login after this many failures (0 = forever).
  * See HAZARD note in odl_tb5_login_work_fn(). */
@@ -77,7 +78,9 @@ static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
 
 	if (!dev) {
 		mutex_unlock(&odl_tb5_devices_lock);
-		pr_warn("odl_tb5: incoming packet route %llx — no matching device\n",
+		pr_warn("odl_tb5: incoming packet route %llx — no matching "
+			"device (probe skipped or already removed; often "
+			"max_devices or a late unbind)\n",
 			route);
 		return 0;
 	}
@@ -107,6 +110,9 @@ static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
 			const u32 *payload = (const u32 *)(hdr + 1);
 			remote_tx_hopid = payload[1];
 			proto_ver = payload[0];
+			pr_info("odl_tb5: short login packet (%zu bytes) — "
+				"treating as Apple-style, skipping version "
+				"check\n", size);
 		}
 
 		pr_info("odl_tb5: received login from peer "
@@ -236,7 +242,14 @@ int odl_tb5_proto_send_login(struct odl_tb5_device *dev)
 	 * including PROTOCOL_VER mismatch → -ECONNREFUSED. */
 	ret = dev->transport->peer_send_login(dev);
 	if (ret) {
-		pr_warn("odl_tb5: login request failed: %d\n", ret);
+		if (ret == -ETIMEDOUT)
+			pr_warn("odl_tb5: login request timed out after %d ms "
+				"(peer is not answering OdinLink; "
+				"thunderbolt-net / ThunderboltIP is a "
+				"different protocol)\n",
+				ODL_TB5_LOGIN_TIMEOUT);
+		else if (ret != -ECONNREFUSED && ret != -EOPNOTSUPP)
+			pr_warn("odl_tb5: login request failed: %d\n", ret);
 		return ret;
 	}
 
@@ -332,10 +345,11 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 		pr_info("odl_tb5: connected to peer "
 			"(remote_tx_hopid=%d, "
 			"tx_ring_hop=%d, rx_ring_hop=%d, "
-			"ring_size=%d, E2E enabled)\n",
+			"ring_size=%d, E2E %s)\n",
 			dev->remote_tx_hopid,
 			tx_info.hop, rx_info.hop,
-			dev->tx.ring_size);
+			dev->tx.ring_size,
+			odl_e2e ? "on" : "off");
 	}
 
 	/* Allocate frame pool early so verify uses the non-blocking
@@ -554,8 +568,19 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 	}
 
 	if (!dev->pong_received && !dev->peer_ping_answered) {
-		pr_err("odl_tb5: DMA verify failed after %d attempts\n",
-		       attempt);
+		struct odl_tb5_transport_ring_info tx_info = { .hop = -1 };
+		struct odl_tb5_transport_ring_info rx_info = { .hop = -1 };
+
+		if (dev->transport && dev->transport->tx_ring_info)
+			tx_info = dev->transport->tx_ring_info(dev);
+		if (dev->transport && dev->transport->rx_ring_info)
+			rx_info = dev->transport->rx_ring_info(dev);
+		pr_err("odl_tb5: DMA verify failed after %d attempts "
+		       "(login_sent=%d login_received=%d "
+		       "remote_tx_hopid=%d tx_hop=%d rx_hop=%d). "
+		       "Peer never answered the DMA ping.\n",
+		       attempt, dev->login_sent, dev->login_received,
+		       dev->remote_tx_hopid, tx_info.hop, rx_info.hop);
 		goto out_reset;
 	}
 

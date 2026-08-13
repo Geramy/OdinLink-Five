@@ -12,6 +12,7 @@
 #include <odl_tb5/odl_tb5_ioctl.h>
 #include <stdio.h>
 #include <string.h>
+#include <errno.h>
 #include <unistd.h>
 
 struct odl_daemon_device_table g_device_table;
@@ -64,6 +65,7 @@ static gboolean odl_daemon_monitor_tick(gpointer user_data)
 				g_device_table.slots[i].present = false;
 				g_device_table.slots[i].state = ODL_TB5_STATE_DISCONNECTED;
 				g_device_table.slots[i].has_remote_sysinfo = false;
+				g_device_table.slots[i].open_warned = false;
 				memset(&g_device_table.slots[i].peer, 0,
 				       sizeof(g_device_table.slots[i].peer));
 				snprintf(g_device_table.slots[i].state_str,
@@ -80,8 +82,17 @@ static gboolean odl_daemon_monitor_tick(gpointer user_data)
 
 		odl_tb5_t handle;
 		int ret = odl_tb5_open(&handle, i);
-		if (ret < 0)
+		if (ret < 0) {
+			if (!g_device_table.slots[i].open_warned) {
+				g_printerr("monitor: %s exists but cannot open: %s "
+					   "(install driver/71-odl-tb5.rules or "
+					   "chmod 660)\n",
+					   path, strerror(-ret));
+				g_device_table.slots[i].open_warned = true;
+			}
 			continue;
+		}
+		g_device_table.slots[i].open_warned = false;
 
 		struct odl_tb5_peer_info info;
 		ret = odl_tb5_get_peer(handle, &info);

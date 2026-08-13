@@ -90,9 +90,10 @@ sudo insmod driver/odl_tb5.ko loopback=1
 # Apple-compatible protocol mode
 sudo insmod driver/odl_tb5.ko protocol=1
 
-# Verify — /dev appears only after READY
+# Verify — /dev appears at probe (peer advertised OdinLink).
+# Traffic waits for READY (DMA-ping can take tens of seconds).
 lsmod | grep odl_tb5
-dmesg | grep 'odl_tb5: entering READY'
+dmesg | grep -E 'odl_tb5: (probed device|still no peer|entering READY)'
 ls /dev/odl_tb5_*
 
 # Install udev rule for persistent permissions
