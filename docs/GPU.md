@@ -125,22 +125,36 @@ cmake .. -DODL_ENABLE_NVCOMP=OFF
 cmake .. -DODL_ENABLE_NVCOMP=ON -DNVCOMP_ROOT=/path/to/nvcomp
 ```
 
-**Optional install (Ubuntu):**
+**Optional install (Ubuntu).** Same local-repo .deb for both toolkits; the
+package name picks CUDA 12 or 13. Product page:
+[developer.nvidia.com/nvcomp](https://developer.nvidia.com/nvcomp) ·
+[install docs](https://docs.nvidia.com/cuda/nvcomp/installation.html)
 
 ```bash
 wget https://developer.download.nvidia.com/compute/nvcomp/5.3.0/local_installers/nvcomp-local-repo-ubuntu2604-5.3.0_5.3.0-1_amd64.deb
 sudo dpkg -i nvcomp-local-repo-ubuntu2604-5.3.0_5.3.0-1_amd64.deb
 sudo cp /var/nvcomp-local-repo-ubuntu2604-5.3.0/nvcomp-*-keyring.gpg /usr/share/keyrings/
 sudo apt-get update
-sudo apt-get -y install nvcomp
+# CUDA 12.x
+sudo apt-get -y install nvcomp-cuda-12
+# CUDA 13.x
+sudo apt-get -y install nvcomp-cuda-13
 ```
 
-Or pip wheel + hint:
+Or pip (C/C++ headers + lib, which CMake needs):
 
 ```bash
-pip install nvidia-nvcomp-cu12
+# CUDA 12
+pip install nvidia-libnvcomp-cu12
+# CUDA 13
+pip install nvidia-libnvcomp-cu13
+
 cmake .. -DNVCOMP_ROOT=$HOME/miniconda3/lib/python3.13/site-packages/nvidia/libnvcomp
 ```
+
+`nvidia-nvcomp-cu12` / `nvidia-nvcomp-cu13` pull the Python bindings and
+the lib package automatically. CMake still wants `NVCOMP_ROOT` pointed at
+`…/nvidia/libnvcomp`.
 
 **Runtime (both sides):**
 

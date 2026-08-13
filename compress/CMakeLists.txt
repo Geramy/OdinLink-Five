@@ -38,6 +38,8 @@ if(NOT ODL_ENABLE_NVCOMP STREQUAL "OFF")
     list(APPEND _nvcomp_hints
       "$ENV{HOME}/miniconda3/lib/python3.13/site-packages/nvidia/libnvcomp"
       "$ENV{HOME}/miniconda3/lib/python3.12/site-packages/nvidia/libnvcomp"
+      "$ENV{HOME}/miniconda3/lib/python3.13/site-packages/nvidia/libnvcomp_cu13"
+      "$ENV{HOME}/miniconda3/lib/python3.12/site-packages/nvidia/libnvcomp_cu13"
     )
   endif()
 
@@ -77,8 +79,8 @@ if(NOT ODL_ENABLE_NVCOMP STREQUAL "OFF")
       "nvcomp-local-repo-ubuntu2604-5.3.0_5.3.0-1_amd64.deb\n"
       "    sudo dpkg -i nvcomp-local-repo-ubuntu2604-5.3.0_5.3.0-1_amd64.deb\n"
       "    sudo cp /var/nvcomp-local-repo-ubuntu2604-5.3.0/nvcomp-*-keyring.gpg /usr/share/keyrings/\n"
-      "    sudo apt-get update && sudo apt-get -y install nvcomp\n"
-      "  Or: pip install nvidia-nvcomp-cu12  and set\n"
+      "    sudo apt-get update && sudo apt-get -y install nvcomp-cuda-12   # or nvcomp-cuda-13\n"
+      "  Or: pip install nvidia-libnvcomp-cu12   # or nvidia-libnvcomp-cu13\n"
       "    -DNVCOMP_ROOT=$CONDA_PREFIX/lib/python3.x/site-packages/nvidia/libnvcomp\n"
       "  Falling back to stub (compression disabled at runtime).")
   elseif(ODL_NVCOMP_FOUND)
