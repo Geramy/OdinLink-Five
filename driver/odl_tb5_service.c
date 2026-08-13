@@ -216,11 +216,17 @@ static int odl_tb5_attach(struct tb_xdomain *xd, struct tb_service *svc,
 	dev->svc = svc;
 	dev->xd  = tb_xdomain_get(xd);
 	dev->bind_any = bind_any;
-	if (bind_any && odl_skip_login)
+	/* skip_login is a Mac-sink escape hatch; honour it on advertised
+	 * services too, not only bind_any attachments. */
+	if (odl_skip_login)
 		dev->skip_handshake = true;
 
 	ret = ida_alloc_max(&odl_tb5_ida, ODL_TB5_MAX_DEVICES - 1, GFP_KERNEL);
 	if (ret < 0) {
+		if (dev->xd)
+			tb_xdomain_put(dev->xd);
+		if (odl_max_devices > 0)
+			atomic_dec(&odl_bound_count);
 		kfree(dev);
 		return ret;
 	}
@@ -228,6 +234,10 @@ static int odl_tb5_attach(struct tb_xdomain *xd, struct tb_service *svc,
 
 	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
 	if (!priv) {
+		if (dev->xd)
+			tb_xdomain_put(dev->xd);
+		if (odl_max_devices > 0)
+			atomic_dec(&odl_bound_count);
 		ida_free(&odl_tb5_ida, dev->index);
 		kfree(dev);
 		return -ENOMEM;

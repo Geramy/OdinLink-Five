@@ -55,9 +55,17 @@ mac = RemoteStore("tb5://<mac-tb-ip>")
 x = torch.randn(1024, 4096, dtype=torch.bfloat16, device="cuda")
 mac.put("kv.layer.42", x)                 # GPU → Mac RAM
 y = mac.get("kv.layer.42", device="cuda") # Mac RAM → GPU
+
+# Overlap the next fetch with compute (same TCP connection)
+with mac.prefetch_window(["kv.layer.41", "kv.layer.42"]):
+    y = mac.get("kv.layer.42", device="cuda")
 ```
 
 The copy is GPU → host → Thunderbolt IP → Mac, and back the same way.
+`prefetch_window` pulls listed keys in the background on that same
+socket; `get()` inside the window consumes the cached copy.
+
+Local check (no cable): `python3 tests/test_odinlink_remote.py`
 
 ## What is *not* ready
 

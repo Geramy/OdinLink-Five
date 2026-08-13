@@ -12,10 +12,14 @@ path and is not wired here until that path shows READY + rx_done.
     x = torch.randn(1024, 4096, dtype=torch.bfloat16, device="cuda")
     mac.put("kv.layer.42", x)
     y = mac.get("kv.layer.42", device="cuda")
+
+    with mac.prefetch_window(["kv.layer.41", "kv.layer.42"]):
+        y = mac.get("kv.layer.42", device="cuda")
 """
 from __future__ import annotations
 
 import sys
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional, Sequence
@@ -41,6 +45,15 @@ def _parse_url(url: str) -> tuple[str, int]:
     return host, port
 
 
+def _to_device(val, device: Optional[str]):
+    if device is None:
+        return val
+    to = getattr(val, "to", None)
+    if callable(to):
+        return to(device)
+    return val
+
+
 class RemoteStore:
     """One Mac (or other peer) used as extra RAM for a Linux trainer."""
 
@@ -50,15 +63,46 @@ class RemoteStore:
         self.host = host
         self.port = port
         self._cli = TBBridgeClient(host, port, timeout=timeout)
+        self._prefetch_lock = threading.Lock()
+        self._prefetch: dict = {}
+        self._prefetch_pending: dict = {}
+        self._prefetch_errors: dict = {}
+
+    def close(self) -> None:
+        self._cli.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
     def put(self, key: str, tensor) -> str:
         self._cli.put(key, tensor)
         return key
 
     def get(self, key: str, device: Optional[str] = None):
+        ev = None
+        with self._prefetch_lock:
+            if key in self._prefetch:
+                val = self._prefetch.pop(key)
+                return _to_device(val, device)
+            ev = self._prefetch_pending.get(key)
+        if ev is not None:
+            ev.wait()
+            with self._prefetch_lock:
+                err = self._prefetch_errors.pop(key, None)
+                if err is not None:
+                    raise err
+                if key in self._prefetch:
+                    val = self._prefetch.pop(key)
+                    return _to_device(val, device)
         return self._cli.get(key, device=device)
 
     def delete(self, key: str) -> bool:
+        with self._prefetch_lock:
+            self._prefetch.pop(key, None)
+            self._prefetch_errors.pop(key, None)
         return self._cli.delete(key)
 
     def list(self) -> Sequence[str]:
@@ -69,6 +113,51 @@ class RemoteStore:
 
     @contextmanager
     def prefetch_window(self, keys: Sequence[str]) -> Iterator[None]:
-        """API placeholder — fetches nothing extra on the IP path."""
-        del keys
-        yield
+        """Pull ``keys`` over the reused TCP link while the caller computes.
+
+        ``get()`` inside the window waits for an in-flight key and consumes
+        the cached copy (no second round-trip). Unused entries are dropped
+        when the window exits.
+        """
+        wanted = [k for k in keys if k]
+        events = {k: threading.Event() for k in wanted}
+        with self._prefetch_lock:
+            for k, ev in events.items():
+                if k not in self._prefetch_pending:
+                    self._prefetch_pending[k] = ev
+
+        def worker() -> None:
+            for k in wanted:
+                try:
+                    val = self._cli.get(k)
+                    with self._prefetch_lock:
+                        self._prefetch[k] = val
+                except BaseException as exc:
+                    with self._prefetch_lock:
+                        self._prefetch_errors[k] = exc
+                finally:
+                    ev = events[k]
+                    ev.set()
+                    with self._prefetch_lock:
+                        if self._prefetch_pending.get(k) is ev:
+                            self._prefetch_pending.pop(k, None)
+
+        if wanted:
+            thread = threading.Thread(
+                target=worker, name="odinlink-prefetch", daemon=True
+            )
+            thread.start()
+        else:
+            thread = None
+        try:
+            yield
+        finally:
+            if thread is not None:
+                thread.join()
+            with self._prefetch_lock:
+                for k in wanted:
+                    self._prefetch.pop(k, None)
+                    self._prefetch_errors.pop(k, None)
+                    ev = events.get(k)
+                    if ev is not None and self._prefetch_pending.get(k) is ev:
+                        self._prefetch_pending.pop(k, None)

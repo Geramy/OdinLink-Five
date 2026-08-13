@@ -30,7 +30,7 @@ Wire format (per request, all big-endian on the wire):
 Local storage: a flat dict {key: (meta_bytes, data_bytes)}. Memory is
 the OS-managed mapped bytes — on Apple Silicon this is unified memory
 visible to Metal, so Mac-side training code can mlx-import the buffer
-zero-copy if desired (see bridge/mlx_helpers.py — TODO).
+zero-copy if desired (see bridge/mlx_helpers.py).
 """
 import argparse
 import json
@@ -94,6 +94,17 @@ class TensorStore:
         with self._lock:
             return self._bytes, len(self._store)
 
+    def view(self, key: str):
+        """Local MLX (or NumPy) view of a stored blob. See mlx_helpers."""
+        entry = self.get(key)
+        if entry is None:
+            return None
+        try:
+            from mlx_helpers import wrap_blob
+        except ImportError:
+            from bridge.mlx_helpers import wrap_blob
+        return wrap_blob(entry[0], entry[1])
+
 
 def _recv_exact(sock: socket.socket, n: int) -> bytes:
     chunks = []
@@ -114,64 +125,71 @@ def _send_exact(sock: socket.socket, buf: memoryview):
         view = view[sent:]
 
 
-def handle_client(sock: socket.socket, addr, store: TensorStore, verbose: bool):
-    """One client = one request/response cycle, then close. Simple is fast."""
-    try:
-        op = _recv_exact(sock, 1)[0]
-        key_len = struct.unpack(">I", _recv_exact(sock, 4))[0]
-        if key_len > 256:
-            sock.sendall(bytes([STATUS_PROTOCOL]))
+def _handle_one(sock: socket.socket, op: int, store: TensorStore, verbose: bool):
+    """One request/response on an already-open socket."""
+    key_len = struct.unpack(">I", _recv_exact(sock, 4))[0]
+    if key_len > 256:
+        sock.sendall(bytes([STATUS_PROTOCOL]))
+        return
+    key = _recv_exact(sock, key_len).decode("utf-8")
+
+    if op == OP_PUT:
+        meta_len = struct.unpack(">I", _recv_exact(sock, 4))[0]
+        meta = _recv_exact(sock, meta_len)
+        data_len = struct.unpack(">Q", _recv_exact(sock, 8))[0]
+        data = _recv_exact(sock, data_len)
+        status = store.put(key, meta, data)
+        sock.sendall(bytes([status]))
+        if verbose:
+            print(f"[PUT] {key} meta={meta_len}B data={data_len/1e6:.1f}MB status={status}")
+
+    elif op == OP_GET:
+        entry = store.get(key)
+        if entry is None:
+            sock.sendall(bytes([STATUS_NOT_FOUND]))
             return
-        key = _recv_exact(sock, key_len).decode("utf-8")
+        meta, data = entry
+        hdr = bytes([STATUS_OK]) + struct.pack(">I", len(meta)) + meta + struct.pack(">Q", len(data))
+        _send_exact(sock, memoryview(hdr))
+        _send_exact(sock, memoryview(data))
+        if verbose:
+            print(f"[GET] {key} -> {len(data)/1e6:.1f}MB")
 
-        if op == OP_PUT:
-            meta_len = struct.unpack(">I", _recv_exact(sock, 4))[0]
-            meta = _recv_exact(sock, meta_len)
-            data_len = struct.unpack(">Q", _recv_exact(sock, 8))[0]
-            data = _recv_exact(sock, data_len)
-            status = store.put(key, meta, data)
-            sock.sendall(bytes([status]))
-            if verbose:
-                print(f"[PUT] {key} meta={meta_len}B data={data_len/1e6:.1f}MB status={status}")
+    elif op == OP_DEL:
+        ok = store.delete(key)
+        sock.sendall(bytes([STATUS_OK if ok else STATUS_NOT_FOUND]))
+        if verbose:
+            print(f"[DEL] {key} ok={ok}")
 
-        elif op == OP_GET:
-            entry = store.get(key)
-            if entry is None:
-                sock.sendall(bytes([STATUS_NOT_FOUND]))
+    elif op == OP_LIST:
+        keys = store.keys()
+        parts = [bytes([STATUS_OK]), struct.pack(">I", len(keys))]
+        for k in keys:
+            kb = k.encode("utf-8")
+            parts.append(struct.pack(">I", len(kb)))
+            parts.append(kb)
+        sock.sendall(b"".join(parts))
+        if verbose:
+            print(f"[LIST] -> {len(keys)} keys")
+
+    elif op == OP_STAT:
+        total, n = store.stat()
+        sock.sendall(bytes([STATUS_OK]) + struct.pack(">QI", total, n))
+        if verbose:
+            print(f"[STAT] {total/1e9:.2f}GB across {n} keys")
+
+    else:
+        sock.sendall(bytes([STATUS_BAD_OP]))
+
+
+def handle_client(sock: socket.socket, addr, store: TensorStore, verbose: bool):
+    """Serve requests on one TCP connection until the client hangs up."""
+    try:
+        while True:
+            op_b = sock.recv(1)
+            if not op_b:
                 return
-            meta, data = entry
-            hdr = bytes([STATUS_OK]) + struct.pack(">I", len(meta)) + meta + struct.pack(">Q", len(data))
-            _send_exact(sock, memoryview(hdr))
-            _send_exact(sock, memoryview(data))
-            if verbose:
-                print(f"[GET] {key} -> {len(data)/1e6:.1f}MB")
-
-        elif op == OP_DEL:
-            ok = store.delete(key)
-            sock.sendall(bytes([STATUS_OK if ok else STATUS_NOT_FOUND]))
-            if verbose:
-                print(f"[DEL] {key} ok={ok}")
-
-        elif op == OP_LIST:
-            keys = store.keys()
-            parts = [bytes([STATUS_OK]), struct.pack(">I", len(keys))]
-            for k in keys:
-                kb = k.encode("utf-8")
-                parts.append(struct.pack(">I", len(kb)))
-                parts.append(kb)
-            sock.sendall(b"".join(parts))
-            if verbose:
-                print(f"[LIST] -> {len(keys)} keys")
-
-        elif op == OP_STAT:
-            total, n = store.stat()
-            sock.sendall(bytes([STATUS_OK]) + struct.pack(">QI", total, n))
-            if verbose:
-                print(f"[STAT] {total/1e9:.2f}GB across {n} keys")
-
-        else:
-            sock.sendall(bytes([STATUS_BAD_OP]))
-
+            _handle_one(sock, op_b[0], store, verbose)
     except (ConnectionError, OSError) as e:
         if verbose:
             print(f"[client {addr}] dropped: {e}")

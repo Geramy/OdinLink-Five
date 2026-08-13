@@ -104,12 +104,12 @@ and only 5% need actual computation.
 
 | Component | Now | Later |
 |---|---|---|
-| Userspace bridge (TB5-IP transport) | ✅ working ([`bridge/`](../bridge/)) | connection pooling, mlx zero-copy |
+| Userspace bridge (TB5-IP transport) | ✅ working ([`bridge/`](../bridge/)) — one TCP connection, [`mlx_helpers.py`](../bridge/mlx_helpers.py) wrap | compression / encryption |
 | Mac↔Linux RDMA verbs handshake | partial (`protocol=1` lenient response) | `protocol=2` (Apple-format outbound) blocked on [capture](MAC_PROTOCOL_CAPTURE.md) |
 | Linux↔Linux CUDA-CUDA over TB5 | ✅ working (NCCL plugin) | — |
-| Unified `RemoteStore` Python API | sketched here | implement once Mac RDMA lands |
+| Unified `RemoteStore` Python API | ✅ shipped on `tb5-ip` ([`odinlink/remote.py`](../odinlink/remote.py)) | DMA transport once Mac RX shows `rx_done` |
 | Tensor-aware compute on remote (`mac.run("softmax", ...)`) | future | requires Metal/CUDA-side compute daemons |
-| Prefetch window / async streaming | future | layer on top once transports settle |
+| Prefetch window / async streaming | ✅ IP path (`prefetch_window`) | RDMA streaming |
 
 ## Why this beats "buy a bigger GPU"
 
