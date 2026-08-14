@@ -12,15 +12,12 @@
  * on any kernel; degrades gracefully when debugfs is unavailable.
  */
 #include "odl_tb5_cli.h"
-#include "odl_tb5_uapi.h"
 
 #include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -376,18 +373,25 @@ int odl_cli_run_diag(const struct odl_cli_params *params)
 		}
 	}
 
-	/* 6. Device nodes + userspace view */
+	/* 6. Device nodes + userspace view (through the library, exactly
+	 * like a real application) */
 	for (i = 0; i < 8; i++) {
 		struct odl_tb5_peer_info info;
 		char dev_path[32];
-		int fd;
+		odl_tb5_t handle;
+		int ret;
 
 		snprintf(dev_path, sizeof(dev_path), "/dev/odl_tb5_%d", i);
-		fd = open(dev_path, O_RDWR);
-		if (fd < 0)
+		if (!file_exists(dev_path))
 			continue;
 		devices++;
-		if (ioctl(fd, ODL_TB5_IOCTL_GET_PEER, &info) == 0) {
+		ret = odl_tb5_open(&handle, i);
+		if (ret) {
+			printf("[!!] %s exists but odl_tb5_open failed (%d)\n",
+			       dev_path, ret);
+			continue;
+		}
+		if (odl_tb5_get_peer(handle, &info) == 0) {
 			static const char *names[] = {
 				"DISCONNECTED", "HANDSHAKE", "CONNECTED",
 				"ERROR", "READY"
@@ -399,13 +403,13 @@ int odl_cli_run_diag(const struct odl_cli_params *params)
 			       info.state == ODL_TB5_STATE_READY ? "ok" : "!!",
 			       dev_path, st, info.link_speed);
 			if (info.state == ODL_TB5_STATE_READY) {
-				close(fd);
+				odl_tb5_close(handle);
 				printf("\nDiagnosis: all layers healthy — "
 				       "OdinLink is READY on %s.\n", dev_path);
 				return 0;
 			}
 		}
-		close(fd);
+		odl_tb5_close(handle);
 	}
 
 	if (!devices) {
