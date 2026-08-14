@@ -9,6 +9,7 @@ add_executable(odl_tb5_cli
     src/odl_tb5_cli_jitter.c
     src/odl_tb5_cli_proto.c
     src/odl_tb5_cli_stats.c
+    src/odl_tb5_cli_diag.c
 )
 
 target_include_directories(odl_tb5_cli PRIVATE

@@ -27,6 +27,8 @@ static int __init odl_tb5_init(void)
 	if (ret)
 		return ret;
 
+	odl_tb5_debugfs_init();
+
 	if (odl_loopback_count > 0) {
 		ret = odl_loopback_init();
 		if (ret)
@@ -44,6 +46,7 @@ static int __init odl_tb5_init(void)
 	return 0;
 
 err_chardev:
+	odl_tb5_debugfs_exit();
 	odl_tb5_chardev_exit();
 	return ret;
 }
@@ -51,6 +54,8 @@ err_chardev:
 static void __exit odl_tb5_exit(void)
 {
 	struct odl_tb5_device *dev, *tmp;
+
+	odl_tb5_debugfs_exit();
 
 	if (odl_loopback_count > 0) {
 		odl_loopback_exit();

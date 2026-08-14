@@ -1,6 +1,6 @@
 obj-m := odl_tb5.o
 
-odl_tb5-y := odl_tb5_params.o odl_tb5_ring_dma.o odl_tb5_chardev.o odl_tb5_proto.o odl_tb5_loopback.o odl_tb5_transport_apple.o
+odl_tb5-y := odl_tb5_params.o odl_tb5_ring_dma.o odl_tb5_chardev.o odl_tb5_proto.o odl_tb5_loopback.o odl_tb5_transport_apple.o odl_tb5_debugfs.o
 
 # The Thunderbolt/USB4 subsystem is CONFIG_USB4 (renamed from
 # CONFIG_THUNDERBOLT in 5.13), and distro kernels ship it as =m, not =y.

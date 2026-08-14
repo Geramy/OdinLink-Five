@@ -1,5 +1,26 @@
 # Troubleshooting
 
+## Start here: automatic diagnosis
+
+```bash
+sudo build/cli/odl_tb5_cli diag -v
+```
+
+Checks every layer — controller → cable → link training → peer discovery →
+driver bind → login → READY — and says in plain English which one is broken
+and what to do about it. Run it on **both** machines. The kernel side of the
+picture is also available raw at `/sys/kernel/debug/odl_tb5/status`.
+
+Two hard-won field notes it encodes:
+
+- A **host router reset** (done by default on every `thunderbolt` module
+  load/boot) can wedge the peer's connector state mid-link: ports then report
+  "unplugged" with the cable seated until a physical replug. Prevent it with
+  `options thunderbolt host_reset=false` in `/etc/modprobe.d/thunderbolt.conf`.
+- "Cable detected but training never completes" at every speed (Gen 2/3/4),
+  on more than one port pair, means the physical path — reseat or replace the
+  cable before suspecting the driver.
+
 ## Kernel Module
 
 | Problem | Solution |
