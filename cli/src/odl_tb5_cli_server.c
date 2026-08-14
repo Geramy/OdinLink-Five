@@ -26,15 +26,14 @@ int odl_cli_run_server(const struct odl_cli_params *params)
 
 	ret = odl_tb5_open(&handle, params->device_index);
 	if (ret < 0) {
-		fprintf(stderr, "Failed to open device %d: %s\n",
-			params->device_index, strerror(-ret));
+		odl_cli_print_open_error(params->device_index, ret);
 		return 1;
 	}
 
 	printf("Waiting for peer connection...\n");
 	ret = odl_tb5_wait_peer(handle, 0);
 	if (ret < 0) {
-		fprintf(stderr, "Peer connection failed: %s\n", strerror(-ret));
+		odl_cli_print_wait_error(handle, ret);
 		goto out;
 	}
 

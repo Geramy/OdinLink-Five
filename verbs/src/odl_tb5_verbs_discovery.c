@@ -85,7 +85,16 @@ static bool odl_local_ipv4(struct in_addr *out)
     if (!want) want = "bond0";
 
     struct ifaddrs *ifa = NULL;
-    if (getifaddrs(&ifa) != 0) return false;
+    if (getifaddrs(&ifa) != 0) {
+        static bool warned;
+        if (!warned) {
+            warned = true;
+            fprintf(stderr,
+                    "odl_tb5 verbs: getifaddrs failed: %s\n",
+                    strerror(errno));
+        }
+        return false;
+    }
 
     bool found = false;
     for (struct ifaddrs *p = ifa; p; p = p->ifa_next) {
@@ -96,6 +105,16 @@ static bool odl_local_ipv4(struct in_addr *out)
         break;
     }
     freeifaddrs(ifa);
+    if (!found) {
+        static bool warned;
+        if (!warned) {
+            warned = true;
+            fprintf(stderr,
+                    "odl_tb5 verbs: no IPv4 on interface \"%s\" "
+                    "(default bond0). Set ODL_RDMA_GID_IFACE=en05 "
+                    "or ODL_RDMA_GID_IP=a.b.c.d\n", want);
+        }
+    }
     return found;
 }
 

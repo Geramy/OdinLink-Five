@@ -5,11 +5,13 @@ add_library(nccl-net-ODL_TB5 SHARED
 target_include_directories(nccl-net-ODL_TB5 PRIVATE
     ${CMAKE_SOURCE_DIR}/third_party/nccl
     ${CMAKE_SOURCE_DIR}/lib/include
+    ${CMAKE_SOURCE_DIR}/compress/include
 )
 
 find_package(Threads REQUIRED)
 target_link_libraries(nccl-net-ODL_TB5
     odl_tb5
+    odl_compress
     Threads::Threads
 )
 

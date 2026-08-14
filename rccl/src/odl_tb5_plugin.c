@@ -134,6 +134,7 @@ struct odl_tb5_mr {
 
 static int comm_start_worker(struct odl_tb5_comm *comm);
 static void comm_stop_worker(struct odl_tb5_comm *comm);
+static void odl_scan_devices(void);
 
 static uint64_t clock_mono_ns(void)
 {
@@ -206,12 +207,23 @@ static rcclResult_t get_shared_handle(int dev, odl_tb5_t *out)
 
 	pthread_mutex_lock(&g_lock);
 	if (!g_handle) {
-		if (odl_tb5_open(&g_handle, dev) < 0) {
+		int rc = odl_tb5_open(&g_handle, dev);
+
+		if (rc < 0) {
+			WARN("open /dev/odl_tb5_%d failed: %s",
+			     dev, strerror(-rc));
 			g_handle = NULL;
 			res = rcclSystemError;
 			goto out;
 		}
 		if (odl_tb5_wait_peer(g_handle, 10000) < 0) {
+			struct odl_tb5_peer_info info;
+
+			memset(&info, 0, sizeof(info));
+			odl_tb5_get_peer(g_handle, &info);
+			WARN("wait READY on /dev/odl_tb5_%d failed after 10s "
+			     "(state=%s)",
+			     dev, odl_tb5_state_str(info.state));
 			odl_tb5_close(g_handle);
 			g_handle = NULL;
 			res = rcclSystemError;
@@ -242,13 +254,20 @@ static rcclResult_t odl_tb5_init(rcclDebugLogger_t logFunction)
 	odl_logger = logFunction;
 	odl_dbg_init();
 	DBG(1, "init: plugin loaded pid=%d", (int)getpid());
+	odl_scan_devices();
 	/* One-line confirmation so logs prove the fast path is active
 	 * (silent Socket fallback is the #1 footgun — issue #23). */
 	if (odl_logger)
 		odl_logger(3 /* INFO */,
-			   "ODL_TB5 net plugin loaded (use NET/ODL_TB5, not Socket)");
+			   "ODL_TB5 net plugin loaded (%d device(s); use NET/ODL_TB5, not Socket)",
+			   num_devices);
 	else
-		fprintf(stderr, "NCCL INFO ODL_TB5 net plugin loaded\n");
+		fprintf(stderr, "NCCL INFO ODL_TB5 net plugin loaded (%d device(s))\n",
+			num_devices);
+	if (num_devices == 0)
+		WARN("no /dev/odl_tb5_* — reporting 0 devices. "
+		     "Load odl_tb5 on both machines and wait for "
+		     "\"odl_tb5: probed device\"");
 
 	preload = getenv("LD_PRELOAD");
 	if (preload && strstr(preload, "odl_tb5_verbs"))
@@ -261,12 +280,26 @@ static rcclResult_t odl_tb5_init(rcclDebugLogger_t logFunction)
 	return rcclSuccess;
 }
 
+static void odl_scan_devices(void)
+{
+	num_devices = 0;
+	for (int i = 0; i < ODL_TB5_MAX_RCCL_DEVICES; i++) {
+		char path[64];
+
+		snprintf(path, sizeof(path), "/dev/odl_tb5_%d", i);
+		if (access(path, F_OK) != 0)
+			continue;
+		snprintf(hw_ids[num_devices], sizeof(hw_ids[0]),
+			 "odl_tb5_%d", i);
+		num_devices++;
+	}
+}
+
 static rcclResult_t odl_tb5_devices(int *ndev)
 {
-	/* Single point-to-point TB link => one usable net device. */
-	num_devices = 1;
-	snprintf(hw_ids[0], sizeof(hw_ids[0]), "odl_tb5_0");
-	*ndev = 1;
+	/* Re-scan so a node that appeared after init is visible. */
+	odl_scan_devices();
+	*ndev = num_devices;
 	return rcclSuccess;
 }
 

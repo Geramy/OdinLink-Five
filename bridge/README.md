@@ -50,8 +50,8 @@ print("round-trip OK")
 
 ## Wire protocol
 
-Length-prefixed binary over TCP, one request per connection. All integers
-big-endian.
+Length-prefixed binary over TCP. One connection is reused for many
+requests until the client hangs up. All integers big-endian.
 
 ```
 Request:
@@ -100,11 +100,13 @@ an extension of the training host's spill pool.
 
 ## What's missing
 
-- **Connection reuse**: every operation opens a fresh socket. Fine for
-  bulk transfers, painful for tight loops with sub-MB tensors.
 - **Compression**: bf16 + lz4 would help if you're often offloading
   near-zero activations. Out of scope for v1.
 - **Encryption**: zero. Run it on a private link only.
-- **MLX zero-copy**: Mac side should be able to import the resident buffer
-  into an `mlx.array` without a copy (unified memory). Hook stub exists
-  but not yet wired (`mlx_helpers.py`).
+
+Connection reuse and the Mac-side MLX wrap are in:
+`TBBridgeClient` keeps one TCP socket; `bridge/mlx_helpers.py` turns a
+stored blob into `mlx.array` (`copy=False` when mlx allows it) or a
+NumPy view. `TensorStore.view(key)` is the server-side hook.
+
+Local check (no cable): `python3 tests/test_odinlink_remote.py`

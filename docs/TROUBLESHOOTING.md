@@ -27,7 +27,9 @@ Two hard-won field notes it encodes:
 |---------|----------|
 | Build fails with unknown GCC flags | GCC is too old. Install version matching kernel (`cat /proc/version`) |
 | Module won't load | Check `dmesg \| grep odl_tb5`. Ensure TB5 hardware is present (`lspci \| grep Thunderbolt`) |
-| No `/dev/odl_tb5_*` devices | Device appears only when a TB5 peer connects and the link reaches **READY**. After plug or reload wait for `odl_tb5: entering READY state` (DMA-ping can take ~tens of seconds). Use `loopback=1` for no-cable testing |
+| Module loaded, no `/dev/odl_tb5_*`, no `probed device` line | The other machine is not advertising OdinLink. Load `odl_tb5` on **both** sides, or `insmod odl_tb5.ko bind_any=1` (default) to attach to any Thunderbolt host (Mac sink). A live host without bind_any is not enough — `thunderbolt-net` / ThunderboltIP is a different protocol. After 15 s the driver prints `still no peer advertising protocol`. Use `loopback=1` for no-cable testing |
+| Linux→Mac: `/dev` exists but login retries forever | Mac kext cannot answer XDomain login. Load with `skip_login=1` (or wait 3 bind_any timeouts) so the data path comes up on hop 1. Arm the Mac RX ring with `odl_rdma_client -a` |
+| `/dev/odl_tb5_*` exists but link not usable | Wait for `odl_tb5: entering READY state` (DMA-ping can take tens of seconds after probe) |
 | Permission denied | Install udev rule or `sudo chmod 660 /dev/odl_tb5_*` |
 | Probe fails with `failed to alloc TX DMA buf` / `-12` | Identity IOMMU (`iommu=pt`). Load with `odl_ring_size=1024`, or use a translated IOMMU domain. Recent drivers auto-downgrade ring size |
 | `insmod ... ring_size=1024` ignored | Parameter is named **`odl_ring_size`**, not `ring_size` |
@@ -54,8 +56,16 @@ Two hard-won field notes it encodes:
 | Problem | Solution |
 |---------|----------|
 | Collectives work but are ~4× too slow | Silent Socket fallback. Check logs for `Using network Socket` vs `Using network ODL_TB5`. Put `librccl-net.so` on `LD_LIBRARY_PATH` / `RCCL_PLUGIN_DIR` |
+| Plugin says `ODL_TB5 net plugin loaded (0 device(s))` | No `/dev/odl_tb5_*` yet. Same as the “no probe” row above — both sides must load the module |
 | `NET/IB : No device found` with RCCL | Expected without the net plugin — RCCL bypasses `LD_PRELOAD` verbs. Use `rccl_net_odl_tb5` / `librccl-net.so` |
 | Built artifact name vs probe name | Build produces `librccl_net_odl_tb5.so`; RCCL probes `librccl-net.so`. CMake creates a symlink in the build tree and installs both names |
+
+## Hardware (which card / which port)
+
+| Problem | Solution |
+|---------|----------|
+| Which add-in card for my board? | `scripts/tb-hw-check.sh` and [`HARDWARE.md`](HARDWARE.md). Cards are **brand-locked** (ASUS card ≠ MSI board). |
+| Ubuntu + PyTorch using a Mac as extra RAM | Thunderbolt Bridge + [`bridge/`](../bridge/) today. See [`PYTORCH.md`](PYTORCH.md). Not NCCL, not `cuda:1`. |
 
 ## GRUB
 

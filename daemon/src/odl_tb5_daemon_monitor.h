@@ -21,6 +21,7 @@ struct odl_daemon_device_slot {
 	uint32_t state;
 	struct odl_tb5_peer_info peer;
 	char     state_str[16];
+	bool     open_warned;
 
 	struct odl_sysinfo remote_sysinfo;
 	bool              has_remote_sysinfo;

@@ -213,6 +213,9 @@ int odl_cli_recv_msg(odl_tb5_t handle, uint8_t stream_id,
 int odl_cli_send_hello(odl_tb5_t handle, uint8_t stream_id, uint8_t dst_id);
 int odl_cli_recv_hello(odl_tb5_t handle, uint8_t stream_id);
 
+void odl_cli_print_open_error(int index, int err);
+void odl_cli_print_wait_error(odl_tb5_t handle, int err);
+
 int  odl_stats_init(struct odl_stats *stats, size_t capacity);
 void odl_stats_free(struct odl_stats *stats);
 void odl_stats_add(struct odl_stats *stats, uint64_t sample_ns);

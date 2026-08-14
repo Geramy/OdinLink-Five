@@ -15,6 +15,10 @@
  */
 
 #include "odl_tb5_core.h"
+#if IS_ENABLED(CONFIG_USB4)
+#include <linux/pci.h>
+#include <linux/device.h>
+#endif
 
 static atomic_t odl_bound_count = ATOMIC_INIT(0);
 
@@ -43,8 +47,153 @@ struct nhi_priv {
 	int			local_tx_hopid;
 };
 
+static struct odl_tb5_device *odl_tb5_find_by_xd(struct tb_xdomain *xd)
+{
+	struct odl_tb5_device *dev;
+
+	if (!xd)
+		return NULL;
+	list_for_each_entry(dev, &odl_tb5_devices_list, list) {
+		if (dev->xd == xd)
+			return dev;
+	}
+	return NULL;
+}
+
+static void odl_tb5_destroy(struct odl_tb5_device *dev)
+{
+	enum odl_tb5_conn_state saved_state;
+
+	if (!dev || atomic_xchg(&dev->removing, 1))
+		return;
+
+	mutex_lock(&dev->state_lock);
+	saved_state = dev->state;
+	dev->state = ODL_TB5_STATE_DISCONNECTED;
+	wake_up_all(&dev->state_waitq);
+	mutex_unlock(&dev->state_lock);
+
+	if (saved_state == ODL_TB5_STATE_CONNECTED ||
+	    saved_state == ODL_TB5_STATE_READY)
+		odl_tb5_proto_send_logout(dev);
+
+	hrtimer_cancel(&dev->rx_poll_timer);
+	cancel_work_sync(&dev->verify_work);
+	cancel_work_sync(&dev->ctrl_reply_work);
+	cancel_work_sync(&dev->restart_work);
+	cancel_work_sync(&dev->connect_work);
+	cancel_delayed_work_sync(&dev->login_work);
+	cancel_work_sync(&dev->tx_drain_work);
+
+	odl_tb5_rings_stop(dev);
+	synchronize_rcu();
+
+	mutex_lock(&odl_tb5_devices_lock);
+	list_del_rcu(&dev->list);
+	mutex_unlock(&odl_tb5_devices_lock);
+
+	odl_tb5_streams_destroy_all(dev);
+	ida_destroy(&dev->stream_ida);
+	odl_tb5_frame_pool_free(dev);
+	odl_tb5_batch_pool_free(dev);
+	odl_tb5_dma_bufs_free(dev);
+	odl_tb5_rings_free(dev);
+
+	if (dev->in_hopid_valid && dev->transport) {
+		if (dev->transport->path_disable)
+			dev->transport->path_disable(dev, dev->in_hopid);
+		if (dev->transport->path_release_hopid)
+			dev->transport->path_release_hopid(dev, dev->in_hopid);
+		dev->in_hopid_valid = false;
+	}
+
+	odl_tb5_chardev_destroy(dev);
+
+	if (odl_max_devices > 0)
+		atomic_dec(&odl_bound_count);
+
+	pr_info("odl_tb5: removed device index %d\n", dev->index);
+
+	if (dev->xd)
+		tb_xdomain_put(dev->xd);
+
+	kfree(dev->transport_priv);
+	ida_free(&odl_tb5_ida, dev->index);
+	kfree(dev);
+}
+
+static void odl_tb5_xd_detach(void *data)
+{
+	odl_tb5_destroy(data);
+}
+
+static int odl_tb5_attach(struct tb_xdomain *xd, struct tb_service *svc,
+			  bool bind_any);
+
+static int odl_tb5_bind_xdomain(struct tb_xdomain *xd)
+{
+	if (!xd || xd->is_unplugged)
+		return -ENODEV;
+
+	mutex_lock(&odl_tb5_devices_lock);
+	if (odl_tb5_find_by_xd(xd)) {
+		mutex_unlock(&odl_tb5_devices_lock);
+		return -EEXIST;
+	}
+	mutex_unlock(&odl_tb5_devices_lock);
+
+	return odl_tb5_attach(xd, NULL, true);
+}
+
+static int odl_walk_tb(struct device *dev, void *data)
+{
+	struct tb_xdomain *xd = tb_to_xdomain(dev);
+
+	(void)data;
+	if (xd && odl_bind_any)
+		odl_tb5_bind_xdomain(xd);
+	device_for_each_child(dev, data, odl_walk_tb);
+	return 0;
+}
+
+static int odl_scan_nhi(struct device *dev, void *data)
+{
+	struct pci_dev *pdev = to_pci_dev(dev);
+
+	if (!pdev)
+		return 0;
+	/* USB4 / Thunderbolt NHI (class 0x0c0340). */
+	if (pdev->class != 0x0c0340)
+		return 0;
+	device_for_each_child(dev, data, odl_walk_tb);
+	return 0;
+}
+
+static void odl_tb5_scan_xdomains(struct work_struct *work);
+
+static DECLARE_DELAYED_WORK(odl_tb5_scan_work, odl_tb5_scan_xdomains);
+
+static void odl_tb5_scan_xdomains(struct work_struct *work)
+{
+	(void)work;
+	bus_for_each_dev(&pci_bus_type, NULL, NULL, odl_scan_nhi);
+	if (odl_bind_any)
+		schedule_delayed_work(&odl_tb5_scan_work, 2 * HZ);
+}
+
 static int odl_tb5_probe(struct tb_service *svc,
 			 const struct tb_service_id *id)
+{
+	struct tb_xdomain *xd = tb_service_parent(svc);
+
+	(void)id;
+	if (!xd)
+		return -ENODEV;
+	return odl_tb5_attach(xd, svc, false);
+}
+
+static int odl_tb5_attach(struct tb_xdomain *xd, struct tb_service *svc,
+			  bool bind_any)
 {
 	if (odl_max_devices > 0 &&
 	    atomic_inc_return(&odl_bound_count) > odl_max_devices) {
@@ -58,14 +207,26 @@ static int odl_tb5_probe(struct tb_service *svc,
 	int ret;
 
 	dev = kzalloc(sizeof(*dev), GFP_KERNEL);
-	if (!dev)
+	if (!dev) {
+		if (odl_max_devices > 0)
+			atomic_dec(&odl_bound_count);
 		return -ENOMEM;
+	}
 
 	dev->svc = svc;
-	dev->xd  = tb_service_parent(svc);
+	dev->xd  = tb_xdomain_get(xd);
+	dev->bind_any = bind_any;
+	/* skip_login is a Mac-sink escape hatch; honour it on advertised
+	 * services too, not only bind_any attachments. */
+	if (odl_skip_login)
+		dev->skip_handshake = true;
 
 	ret = ida_alloc_max(&odl_tb5_ida, ODL_TB5_MAX_DEVICES - 1, GFP_KERNEL);
 	if (ret < 0) {
+		if (dev->xd)
+			tb_xdomain_put(dev->xd);
+		if (odl_max_devices > 0)
+			atomic_dec(&odl_bound_count);
 		kfree(dev);
 		return ret;
 	}
@@ -73,6 +234,10 @@ static int odl_tb5_probe(struct tb_service *svc,
 
 	priv = kzalloc(sizeof(*priv), GFP_KERNEL);
 	if (!priv) {
+		if (dev->xd)
+			tb_xdomain_put(dev->xd);
+		if (odl_max_devices > 0)
+			atomic_dec(&odl_bound_count);
 		ida_free(&odl_tb5_ida, dev->index);
 		kfree(dev);
 		return -ENOMEM;
@@ -209,12 +374,24 @@ static int odl_tb5_probe(struct tb_service *svc,
 	list_add_tail(&dev->list, &odl_tb5_devices_list);
 	mutex_unlock(&odl_tb5_devices_lock);
 
-	tb_service_set_drvdata(svc, dev);
+	if (svc)
+		tb_service_set_drvdata(svc, dev);
+	else {
+		ret = devm_add_action(&xd->dev, odl_tb5_xd_detach, dev);
+		if (ret) {
+			pr_err("odl_tb5: devm_add_action failed: %d\n", ret);
+			goto err_listed;
+		}
+	}
 
-	pr_info("odl_tb5: probed device index %d (transport=%s)\n",
-		dev->index, dev->transport->name);
+	pr_info("odl_tb5: probed device index %d (transport=%s, bind_any=%d)\n",
+		dev->index, dev->transport->name, bind_any);
 
 	return 0;
+
+err_listed:
+	odl_tb5_destroy(dev);
+	return ret;
 
 err_dma:
 	odl_tb5_dma_bufs_free(dev);
@@ -223,6 +400,9 @@ err_rings:
 err_chardev:
 	odl_tb5_chardev_destroy(dev);
 err_free_dev:
+	if (dev->xd)
+		tb_xdomain_put(dev->xd);
+	kfree(dev->transport_priv);
 	if (odl_max_devices > 0)
 		atomic_dec(&odl_bound_count);
 	ida_free(&odl_tb5_ida, dev->index);
@@ -233,86 +413,11 @@ err_free_dev:
 static void odl_tb5_remove(struct tb_service *svc)
 {
 	struct odl_tb5_device *dev = tb_service_get_drvdata(svc);
-	enum odl_tb5_conn_state saved_state;
 
 	if (!dev)
 		return;
-
-	atomic_set(&dev->removing, 1);
-
-	mutex_lock(&dev->state_lock);
-	saved_state = dev->state;
-	dev->state = ODL_TB5_STATE_DISCONNECTED;
-	wake_up_all(&dev->state_waitq);
-	mutex_unlock(&dev->state_lock);
-
-	if (saved_state == ODL_TB5_STATE_CONNECTED ||
-	    saved_state == ODL_TB5_STATE_READY)
-		odl_tb5_proto_send_logout(dev);
-
-	hrtimer_cancel(&dev->rx_poll_timer);
-
-	cancel_work_sync(&dev->verify_work);
-	cancel_work_sync(&dev->ctrl_reply_work);
-	cancel_work_sync(&dev->restart_work);
-	cancel_work_sync(&dev->connect_work);
-	cancel_delayed_work_sync(&dev->login_work);
-	cancel_work_sync(&dev->tx_drain_work);
-
-	odl_tb5_rings_stop(dev);
-
-	synchronize_rcu();
-
-	mutex_lock(&odl_tb5_devices_lock);
-	list_del_rcu(&dev->list);
-	mutex_unlock(&odl_tb5_devices_lock);
-
-	odl_tb5_streams_destroy_all(dev);
-	ida_destroy(&dev->stream_ida);
-
-	odl_tb5_frame_pool_free(dev);
-	odl_tb5_batch_pool_free(dev);
-	odl_tb5_dma_bufs_free(dev);
-	odl_tb5_rings_free(dev);
-
-	/* BUG1 fix: release regardless of connection state.  The original code
-	 * released only from CONNECTED/READY, so removal during HANDSHAKE
-	 * (login retrying, peer gone, admin unbind) leaked the hop-ID until
-	 * enable_paths returned -ENOMEM on every later load.  Ordering is kept
-	 * exactly as upstream: this runs AFTER rings_stop()/bufs_free() above. */
-	if (dev->in_hopid_valid && dev->transport) {
-		if (dev->transport->path_disable)
-			dev->transport->path_disable(dev, dev->in_hopid);
-		if (dev->transport->path_release_hopid)
-			dev->transport->path_release_hopid(dev, dev->in_hopid);
-		dev->in_hopid_valid = false;
-	}
-
-	odl_tb5_chardev_destroy(dev);
-
-	/*
-	 * Give the slot back. odl_tb5_probe() takes one from odl_bound_count
-	 * and the probe error path returns it, but this — the normal removal
-	 * path — did not. With max_devices=1 that leaks the only slot the
-	 * moment the peer goes away, so every later probe is rejected with
-	 * "max_devices reached, skipping service" and the link can never come
-	 * back on its own.
-	 *
-	 * Observed exactly that: peer restarted, this node logged "removed
-	 * device index 0", then refused the replacement service two seconds
-	 * later and sat printing "incoming packet route 2 — no matching
-	 * device" indefinitely. The only escape was reloading the module,
-	 * which on this hardware is the risky operation this leak forces you
-	 * into.
-	 */
-	if (odl_max_devices > 0)
-		atomic_dec(&odl_bound_count);
-
-	pr_info("odl_tb5: removed device index %d\n", dev->index);
-
-	kfree(dev->transport_priv);
-	ida_free(&odl_tb5_ida, dev->index);
-	kfree(dev);
+	tb_service_set_drvdata(svc, NULL);
+	odl_tb5_destroy(dev);
 }
 
 static struct tb_service_driver odl_tb5_driver = {
@@ -321,6 +426,40 @@ static struct tb_service_driver odl_tb5_driver = {
 	.remove		= odl_tb5_remove,
 	.id_table	= odl_tb5_ids,
 };
+
+/*
+ * Issue #4: "module loaded, no /dev" looks like success. The chardev is
+ * created in probe(), and probe() only runs when the other machine
+ * advertises the same XDomain protocol. thunderbolt-net / ThunderboltIP
+ * is a different protocol and can time out on its own.
+ *
+ * One delayed line if we are still unbound. Do not walk the thunderbolt
+ * bus — those structs are not a stable service-driver API.
+ */
+#define ODL_TB5_WAIT_PEER_SEC	15
+
+static void odl_tb5_wait_peer_fn(struct work_struct *work)
+{
+	bool empty;
+
+	mutex_lock(&odl_tb5_devices_lock);
+	empty = list_empty(&odl_tb5_devices_list);
+	mutex_unlock(&odl_tb5_devices_lock);
+
+	if (!empty)
+		return;
+
+	pr_info("odl_tb5: still no peer advertising protocol %s/0x%04x — "
+		"/dev/odl_tb5_* will not appear until the other machine "
+		"also loads odl_tb5 (thunderbolt-net / ThunderboltIP is a "
+		"different protocol)\n",
+		odl_protocol_mode == 1 ? ODL_TB5_PROTOCOL_KEY_APPLE
+				       : ODL_TB5_PROTOCOL_KEY,
+		odl_protocol_mode == 1 ? ODL_TB5_PROTOCOL_ID_APPLE
+				       : ODL_TB5_PROTOCOL_ID);
+}
+
+static DECLARE_DELAYED_WORK(odl_tb5_wait_peer_work, odl_tb5_wait_peer_fn);
 #endif /* CONFIG_USB4 */
 
 static int __init odl_tb5_init(void)
@@ -357,6 +496,7 @@ static int __init odl_tb5_init(void)
 #if IS_ENABLED(CONFIG_USB4)
 	odl_tb5_property_dir = tb_property_create_dir(&odl_tb5_proto_uuid);
 	if (!odl_tb5_property_dir) {
+		pr_err("odl_tb5: failed to create XDomain property directory\n");
 		ret = -ENOMEM;
 		goto err_chardev;
 	}
@@ -390,8 +530,11 @@ static int __init odl_tb5_init(void)
 
 	ret = tb_register_property_dir(protocol_key,
 				       odl_tb5_property_dir);
-	if (ret)
+	if (ret) {
+		pr_err("odl_tb5: tb_register_property_dir(%s) failed: %d\n",
+		       protocol_key, ret);
 		goto err_dir;
+	}
 
 	/* In Apple mode, also register under OdinLink's original key so we
 	 * can still talk to other OdinLink nodes. Need a separate directory
@@ -413,21 +556,46 @@ static int __init odl_tb5_init(void)
 					  "prtcstns", 0);
 		ret = tb_register_property_dir(ODL_TB5_PROTOCOL_KEY,
 					odl_tb5_apple_property_dir);
-		if (ret)
+		if (ret) {
+			pr_err("odl_tb5: tb_register_property_dir(%s) "
+			       "failed: %d\n", ODL_TB5_PROTOCOL_KEY, ret);
 			goto err_dir;
+		}
 	}
 
-	odl_tb5_proto_register();
+	ret = odl_tb5_proto_register();
+	if (ret) {
+		pr_err("odl_tb5: failed to register XDomain protocol handler: %d\n",
+		       ret);
+		goto err_dir;
+	}
 
 	ret = tb_register_service_driver(&odl_tb5_driver);
-	if (ret)
+	if (ret) {
+		pr_err("odl_tb5: tb_register_service_driver failed: %d\n", ret);
 		goto err_proto;
+	}
+
+	schedule_delayed_work(&odl_tb5_wait_peer_work,
+			      ODL_TB5_WAIT_PEER_SEC * HZ);
+	if (odl_bind_any)
+		schedule_delayed_work(&odl_tb5_scan_work, 0);
 #endif
 
 	odl_tb5_apple_init();
 
-	pr_info("odl_tb5: OdinLink TB5 driver loaded (odl_ring_size=%u)\n",
-		odl_ring_size);
+	pr_info("odl_tb5: OdinLink TB5 driver loaded (odl_ring_size=%u, "
+		"protocol=%s/0x%04x v%u)\n",
+		odl_ring_size,
+		odl_protocol_mode == 1 ? ODL_TB5_PROTOCOL_KEY_APPLE
+				       : ODL_TB5_PROTOCOL_KEY,
+		odl_protocol_mode == 1 ? ODL_TB5_PROTOCOL_ID_APPLE
+				       : ODL_TB5_PROTOCOL_ID,
+		ODL_TB5_PROTOCOL_VER);
+	pr_info("odl_tb5: /dev/odl_tb5_* appears after probe (peer must "
+		"advertise the same protocol). Look for "
+		"\"odl_tb5: probed device\", then "
+		"\"odl_tb5: entering READY state\"\n");
 
 	return 0;
 
@@ -452,6 +620,11 @@ static void __exit odl_tb5_exit(void)
 	struct odl_tb5_device *dev, *tmp;
 
 	odl_tb5_debugfs_exit();
+
+#if IS_ENABLED(CONFIG_USB4)
+	cancel_delayed_work_sync(&odl_tb5_wait_peer_work);
+	cancel_delayed_work_sync(&odl_tb5_scan_work);
+#endif
 
 	/* Clean up software loopback devices first (no NHI/hardware deps) */
 	if (odl_loopback_count > 0) {

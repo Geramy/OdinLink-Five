@@ -25,7 +25,8 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOKitLib.h>
 
-#include "OdinLinkRDMA.h"
+#include "kext/OdinLinkRDMA.h"
+#include "include/odinlink_mac_proto.h"
 
 static volatile int g_running = 1;
 
@@ -51,15 +52,18 @@ int main(int argc, char **argv)
 {
 	const char *dump_path = NULL;
 	int poll_count = 0;
+	int do_arm = 0;
 	int opt;
 
-	while ((opt = getopt(argc, argv, "d:p:")) != -1) {
+	while ((opt = getopt(argc, argv, "d:p:a")) != -1) {
 		switch (opt) {
 		case 'd': dump_path = optarg; break;
 		case 'p': poll_count = atoi(optarg); break;
+		case 'a': do_arm = 1; break;
 		default:
 			fprintf(stderr,
-				"Usage: %s [-d dump.rgba] [-p poll_count]\n",
+				"Usage: %s [-d dump.bin] [-p poll_count] [-a]\n"
+				"  -a  arm the unverified ACIO RX ring\n",
 				argv[0]);
 			return 1;
 		}
@@ -133,8 +137,38 @@ int main(int argc, char **argv)
 		printf("  Frame size:     %llu bytes (%.1f MB)\n",
 		       (unsigned long long)frame_size,
 		       (double)frame_size / (1 << 20));
-		printf("  Frame count:    %llu (double-buffered)\n",
+		printf("  Slot count:     %llu\n",
 		       (unsigned long long)frame_count);
+	}
+
+	{
+		uint64_t output[4] = {};
+		uint32_t output_count = 4;
+
+		kr = IOConnectCallScalarMethod(conn, kOdinLinkGetLinkInfo,
+					       NULL, 0, output, &output_count);
+		if (kr == KERN_SUCCESS)
+			printf("  hop=%llu armed=%llu rx_done=%llu last_idx=%llu\n",
+			       (unsigned long long)output[0],
+			       (unsigned long long)output[1],
+			       (unsigned long long)output[2],
+			       (unsigned long long)output[3]);
+	}
+
+	if (do_arm) {
+		uint64_t in = 1;
+		uint64_t out = 0;
+		uint32_t out_count = 1;
+
+		printf("Arming ACIO RX ring (unverified map)...\n");
+		kr = IOConnectCallScalarMethod(conn, kOdinLinkArmHardware,
+					       &in, 1, &out, &out_count);
+		if (kr != KERN_SUCCESS) {
+			fprintf(stderr, "ArmHardware failed: %s\n",
+				mach_error_string(kr));
+			goto err_close;
+		}
+		printf("Armed.\n");
 	}
 
 	/*

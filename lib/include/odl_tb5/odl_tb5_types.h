@@ -21,6 +21,18 @@ enum odl_tb5_conn_state {
 	ODL_TB5_STATE_READY        = 4,
 };
 
+static inline const char *odl_tb5_state_str(uint32_t state)
+{
+	switch (state) {
+	case ODL_TB5_STATE_DISCONNECTED: return "disconnected";
+	case ODL_TB5_STATE_HANDSHAKE:    return "handshake";
+	case ODL_TB5_STATE_CONNECTED:    return "connected";
+	case ODL_TB5_STATE_ERROR:        return "error";
+	case ODL_TB5_STATE_READY:        return "ready";
+	default:                         return "unknown";
+	}
+}
+
 /* Peer information */
 struct odl_tb5_peer_info {
 	uint8_t  uuid[16];

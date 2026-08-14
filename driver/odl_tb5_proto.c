@@ -22,6 +22,7 @@
 #include "odl_tb5_core.h"
 #include "odl_tb5_xd_proto.h"
 #include <linux/delay.h>
+#include <linux/errno.h>
 
 /* Stop retrying the XDomain login after this many failures (0 = forever).
  * See HAZARD note in odl_tb5_login_work_fn(). */
@@ -77,7 +78,9 @@ static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
 
 	if (!dev) {
 		mutex_unlock(&odl_tb5_devices_lock);
-		pr_warn("odl_tb5: incoming packet route %llx — no matching device\n",
+		pr_warn("odl_tb5: incoming packet route %llx — no matching "
+			"device (probe skipped or already removed; often "
+			"max_devices or a late unbind)\n",
 			route);
 		return 0;
 	}
@@ -107,6 +110,9 @@ static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
 			const u32 *payload = (const u32 *)(hdr + 1);
 			remote_tx_hopid = payload[1];
 			proto_ver = payload[0];
+			pr_info("odl_tb5: short login packet (%zu bytes) — "
+				"treating as Apple-style, skipping version "
+				"check\n", size);
 		}
 
 		pr_info("odl_tb5: received login from peer "
@@ -236,7 +242,14 @@ int odl_tb5_proto_send_login(struct odl_tb5_device *dev)
 	 * including PROTOCOL_VER mismatch → -ECONNREFUSED. */
 	ret = dev->transport->peer_send_login(dev);
 	if (ret) {
-		pr_warn("odl_tb5: login request failed: %d\n", ret);
+		if (ret == -ETIMEDOUT)
+			pr_warn("odl_tb5: login request timed out after %d ms "
+				"(peer is not answering OdinLink; "
+				"thunderbolt-net / ThunderboltIP is a "
+				"different protocol)\n",
+				ODL_TB5_LOGIN_TIMEOUT);
+		else if (ret != -ECONNREFUSED && ret != -EOPNOTSUPP)
+			pr_warn("odl_tb5: login request failed: %d\n", ret);
 		return ret;
 	}
 
@@ -332,10 +345,11 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 		pr_info("odl_tb5: connected to peer "
 			"(remote_tx_hopid=%d, "
 			"tx_ring_hop=%d, rx_ring_hop=%d, "
-			"ring_size=%d, E2E enabled)\n",
+			"ring_size=%d, E2E %s)\n",
 			dev->remote_tx_hopid,
 			tx_info.hop, rx_info.hop,
-			dev->tx.ring_size);
+			dev->tx.ring_size,
+			odl_e2e ? "on" : "off");
 	}
 
 	/* Allocate frame pool early so verify uses the non-blocking
@@ -494,6 +508,11 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 
 	dev->pong_received = false;   /* peer_ping_answered deliberately kept */
 
+	if (dev->skip_handshake) {
+		pr_info("odl_tb5: skipping DMA ping (Mac sink / bind_any)\n");
+		goto ready;
+	}
+
 	/* Use frame pool for RX during verify — each pool slot is
 	 * independent and auto-reposts after consumption, so we never
 	 * run out of RX frames.  The legacy submit_rx only posts 16
@@ -554,11 +573,23 @@ static void odl_tb5_verify_work_fn(struct work_struct *work)
 	}
 
 	if (!dev->pong_received && !dev->peer_ping_answered) {
-		pr_err("odl_tb5: DMA verify failed after %d attempts\n",
-		       attempt);
+		struct odl_tb5_transport_ring_info tx_info = { .hop = -1 };
+		struct odl_tb5_transport_ring_info rx_info = { .hop = -1 };
+
+		if (dev->transport && dev->transport->tx_ring_info)
+			tx_info = dev->transport->tx_ring_info(dev);
+		if (dev->transport && dev->transport->rx_ring_info)
+			rx_info = dev->transport->rx_ring_info(dev);
+		pr_err("odl_tb5: DMA verify failed after %d attempts "
+		       "(login_sent=%d login_received=%d "
+		       "remote_tx_hopid=%d tx_hop=%d rx_hop=%d). "
+		       "Peer never answered the DMA ping.\n",
+		       attempt, dev->login_sent, dev->login_received,
+		       dev->remote_tx_hopid, tx_info.hop, rx_info.hop);
 		goto out_reset;
 	}
 
+ready:
 	pr_info("odl_tb5: DMA path verified, resetting rings for userspace\n");
 
 	flush_work(&dev->ctrl_reply_work);
@@ -641,6 +672,9 @@ static void odl_tb5_login_work_fn(struct work_struct *work)
 	unsigned long delay_ms;
 	int ret;
 
+	if (odl_skip_login || dev->skip_handshake)
+		goto skip_login;
+
 	ret = odl_tb5_proto_send_login(dev);
 	if (ret) {
 		dev->login_retries++;
@@ -662,6 +696,15 @@ static void odl_tb5_login_work_fn(struct work_struct *work)
 		 * firmware domain on Strix Halo) the GPU with it, ending in
 		 * amdgpu_irq_put/drm_buddy_fini NULL-deref and a hard freeze.
 		 * Give up and stay quiescent instead. */
+		if (dev->bind_any && dev->login_retries >= 3) {
+			pr_warn("odl_tb5: peer is not answering OdinLink "
+				"login after %d tries — continuing as a "
+				"Mac/bind_any sink on hop %d\n",
+				dev->login_retries,
+				ODL_TB5_DEFAULT_REMOTE_HOP);
+			goto skip_login;
+		}
+
 		if (odl_login_max_retries > 0 &&
 		    dev->login_retries >= odl_login_max_retries) {
 			pr_warn("odl_tb5: giving up after %d login attempts "
@@ -674,6 +717,19 @@ static void odl_tb5_login_work_fn(struct work_struct *work)
 		schedule_delayed_work(&dev->login_work,
 				      msecs_to_jiffies(delay_ms));
 	}
+	return;
+
+skip_login:
+	if (dev->remote_tx_hopid <= 0)
+		dev->remote_tx_hopid = ODL_TB5_DEFAULT_REMOTE_HOP;
+	dev->skip_handshake = true;
+	mutex_lock(&dev->state_lock);
+	dev->login_sent = true;
+	dev->login_received = true;
+	mutex_unlock(&dev->state_lock);
+	pr_info("odl_tb5: skipping XDomain login (remote hop %d)\n",
+		dev->remote_tx_hopid);
+	schedule_work(&dev->connect_work);
 }
 
 /* Send a logout notification to the peer. */

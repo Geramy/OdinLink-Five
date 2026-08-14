@@ -126,6 +126,10 @@ add_custom_target(driver
 # Userspace library (libodl_tb5.so)
 add_subdirectory(lib)
 
+# Optional nvCOMP compression (never hard-fails; stub if nvCOMP missing)
+# See compress/CMakeLists.txt and docs/GPU.md §Compression
+add_subdirectory(compress)
+
 # RCCL plugin (librccl_net_odl_tb5.so)
 add_subdirectory(rccl)
 
@@ -140,6 +144,9 @@ add_subdirectory(cli)
 
 # Test suite (odl_tb5_test)
 add_subdirectory(tests)
+
+# Linux → Mac sender (kext is built on macOS via mac/kext/Makefile)
+add_subdirectory(mac)
 
 # Optional: System daemon and tray application (options defined above)
 
