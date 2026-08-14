@@ -9,11 +9,13 @@ add_executable(odl_tb5_cli
     src/odl_tb5_cli_jitter.c
     src/odl_tb5_cli_proto.c
     src/odl_tb5_cli_stats.c
+    src/odl_tb5_cli_diag.c
 )
 
 target_include_directories(odl_tb5_cli PRIVATE
     src
     ${CMAKE_SOURCE_DIR}/lib/include
+    ${CMAKE_SOURCE_DIR}/driver/uapi
 )
 target_link_libraries(odl_tb5_cli odl_tb5 pthread m)
 

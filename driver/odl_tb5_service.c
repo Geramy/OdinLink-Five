@@ -340,6 +340,8 @@ static int __init odl_tb5_init(void)
 	if (ret)
 		return ret;
 
+	odl_tb5_debugfs_init();
+
 	/* If loopback=1 or more, create software-only devices.
 	 * Loopback devices work without Thunderbolt hardware and
 	 * don't need property directories or service registration. */
@@ -440,6 +442,7 @@ err_dir:
 	tb_property_free_dir(odl_tb5_property_dir);
 #endif
 err_chardev:
+	odl_tb5_debugfs_exit();
 	odl_tb5_chardev_exit();
 	return ret;
 }
@@ -447,6 +450,8 @@ err_chardev:
 static void __exit odl_tb5_exit(void)
 {
 	struct odl_tb5_device *dev, *tmp;
+
+	odl_tb5_debugfs_exit();
 
 	/* Clean up software loopback devices first (no NHI/hardware deps) */
 	if (odl_loopback_count > 0) {

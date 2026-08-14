@@ -21,6 +21,7 @@ static void print_usage(const char *prog)
 		"Modes:\n"
 		"  server          Wait for peer and respond to tests\n"
 		"  client          Connect to peer and run tests\n"
+		"  diag            Check every layer of the link and report what is broken\n"
 		"\n"
 		"Common options:\n"
 		"  -d <N>          Device index (default: 0)\n"
@@ -122,8 +123,9 @@ int main(int argc, char *argv[])
 	const char *mode = argv[1];
 	bool is_server = (strcmp(mode, "server") == 0);
 	bool is_client = (strcmp(mode, "client") == 0);
+	bool is_diag   = (strcmp(mode, "diag") == 0);
 
-	if (!is_server && !is_client) {
+	if (!is_server && !is_client && !is_diag) {
 		fprintf(stderr, "Unknown mode: %s\n", mode);
 		print_usage(argv[0]);
 		return 1;
@@ -206,6 +208,8 @@ int main(int argc, char *argv[])
 		return 1;
 	}
 
+	if (is_diag)
+		return odl_cli_run_diag(&params);
 	if (is_server)
 		return odl_cli_run_server(&params);
 	else

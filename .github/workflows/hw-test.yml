@@ -48,6 +48,9 @@ jobs:
           test -e /dev/odl_tb5_0
       - name: Run full test suite (device, lib_api, plugin)
         run: cd build && ./tests/odl_tb5_test
+      - name: Full link diagnosis
+        if: failure()
+        run: sudo build/cli/odl_tb5_cli diag -v || true
       - name: Unload driver
         if: always()
         run: sudo rmmod odl_tb5 2>/dev/null || true
@@ -117,6 +120,9 @@ jobs:
             sleep 10
           done
           exit 1
+      - name: Full link diagnosis
+        if: failure()
+        run: sudo build/cli/odl_tb5_cli diag -v || true
       - name: Unload driver
         if: always()
         run: sudo rmmod odl_tb5 2>/dev/null || true

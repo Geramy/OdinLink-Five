@@ -566,6 +566,11 @@ void odl_tb5_xd_header_init(struct odl_tb5_xd_header *hdr,
 			     size_t total_size);
 #endif
 
+/* ── Self-diagnosis (odl_tb5_debugfs.c) ─────────────────────────────── */
+
+void odl_tb5_debugfs_init(void);
+void odl_tb5_debugfs_exit(void);
+
 /* ── Module parameters (defined in odl_tb5_params.c) ────────────────── */
 
 extern int odl_loopback_count;
