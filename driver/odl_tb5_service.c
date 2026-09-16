@@ -132,7 +132,7 @@ static int odl_tb5_attach(struct tb_xdomain *xd, struct tb_service *svc,
 
 static int odl_tb5_bind_xdomain(struct tb_xdomain *xd)
 {
-	if (!xd || xd->is_unplugged)
+	if (!xd || xd->is_unplugged || !xd->remote_uuid)
 		return -ENODEV;
 
 	mutex_lock(&odl_tb5_devices_lock);
@@ -185,10 +185,38 @@ static int odl_tb5_probe(struct tb_service *svc,
 			 const struct tb_service_id *id)
 {
 	struct tb_xdomain *xd = tb_service_parent(svc);
+	struct odl_tb5_device *existing;
 
 	(void)id;
 	if (!xd)
 		return -ENODEV;
+
+	/*
+	 * bind_any walks every USB4 NHI and can attach to this xdomain
+	 * before the OdinLink tb_service is enumerated. A second attach
+	 * then fails ring alloc with -ENOMEM all the way down to 64
+	 * (issue #31 on dual-NHI Strix Halo). Adopt the existing device
+	 * so rmmod goes through remove() instead of the orphan path.
+	 */
+	mutex_lock(&odl_tb5_devices_lock);
+	existing = odl_tb5_find_by_xd(xd);
+	if (existing) {
+		if (existing->svc) {
+			mutex_unlock(&odl_tb5_devices_lock);
+			pr_info("odl_tb5: xdomain already bound, skipping duplicate service\n");
+			return -ENODEV;
+		}
+		existing->svc = svc;
+		existing->bind_any = false;
+		tb_service_set_drvdata(svc, existing);
+		mutex_unlock(&odl_tb5_devices_lock);
+		devm_release_action(&xd->dev, odl_tb5_xd_detach, existing);
+		pr_info("odl_tb5: adopted bind_any device index %d under service\n",
+			existing->index);
+		return 0;
+	}
+	mutex_unlock(&odl_tb5_devices_lock);
+
 	return odl_tb5_attach(xd, svc, false);
 }
 
@@ -371,6 +399,13 @@ static int odl_tb5_attach(struct tb_xdomain *xd, struct tb_service *svc,
 	}
 
 	mutex_lock(&odl_tb5_devices_lock);
+	if (odl_tb5_find_by_xd(xd)) {
+		mutex_unlock(&odl_tb5_devices_lock);
+		pr_info("odl_tb5: lost attach race on xdomain, dropping index %d\n",
+			dev->index);
+		odl_tb5_proto_exit(dev);
+		goto err_dma;
+	}
 	list_add_tail(&dev->list, &odl_tb5_devices_list);
 	mutex_unlock(&odl_tb5_devices_lock);
 
@@ -578,8 +613,16 @@ static int __init odl_tb5_init(void)
 
 	schedule_delayed_work(&odl_tb5_wait_peer_work,
 			      ODL_TB5_WAIT_PEER_SEC * HZ);
+	/*
+	 * Delay bind_any until after service matching has had a chance.
+	 * Scanning at t=0 races the OdinLink tb_service on Linux-Linux
+	 * (especially dual-NHI AMD USB4) and allocates the only NHI rings
+	 * before probe() runs. Mac sinks that never advertise still get
+	 * picked up at the same 15 s mark as the "no peer" notice.
+	 */
 	if (odl_bind_any)
-		schedule_delayed_work(&odl_tb5_scan_work, 0);
+		schedule_delayed_work(&odl_tb5_scan_work,
+				      ODL_TB5_WAIT_PEER_SEC * HZ);
 #endif
 
 	odl_tb5_apple_init();
@@ -617,8 +660,6 @@ err_chardev:
 
 static void __exit odl_tb5_exit(void)
 {
-	struct odl_tb5_device *dev, *tmp;
-
 	odl_tb5_debugfs_exit();
 
 #if IS_ENABLED(CONFIG_USB4)
@@ -639,33 +680,29 @@ static void __exit odl_tb5_exit(void)
 
 	odl_tb5_apple_exit();
 
-	mutex_lock(&odl_tb5_devices_lock);
-	list_for_each_entry_safe(dev, tmp, &odl_tb5_devices_list, list) {
-		pr_warn("odl_tb5: cleaning up orphaned device at exit\n");
-		list_del_rcu(&dev->list);
-		atomic_set(&dev->removing, 1);
-		hrtimer_cancel(&dev->rx_poll_timer);
-		cancel_work_sync(&dev->verify_work);
-		cancel_work_sync(&dev->ctrl_reply_work);
-		cancel_work_sync(&dev->restart_work);
-		cancel_work_sync(&dev->connect_work);
-		cancel_delayed_work_sync(&dev->login_work);
-		cancel_work_sync(&dev->tx_drain_work);
-		odl_tb5_rings_stop(dev);
-		synchronize_rcu();
-		odl_tb5_streams_destroy_all(dev);
-		ida_destroy(&dev->stream_ida);
-		odl_tb5_frame_pool_free(dev);
-		odl_tb5_batch_pool_free(dev);
-		odl_tb5_dma_bufs_free(dev);
-		odl_tb5_rings_free(dev);
-		odl_tb5_chardev_destroy(dev);
-		ida_free(&odl_tb5_ida, dev->index);
-		kfree(dev);
-	}
-	mutex_unlock(&odl_tb5_devices_lock);
-
 #if IS_ENABLED(CONFIG_USB4)
+	{
+	struct odl_tb5_device *dev;
+
+	/*
+	 * bind_any devices are not tb_service-bound, so unregister did not
+	 * destroy them. Use odl_tb5_destroy() -- rings_stop while the device
+	 * is still on the list — not list_del first. The old orphan walk
+	 * unlinked then stopped, so tb_ring_stop's canceled RX callback
+	 * hit WARN_ON(!ctx) and left the peer handshake wedged (issue #31).
+	 */
+	for (;;) {
+		mutex_lock(&odl_tb5_devices_lock);
+		dev = list_first_entry_or_null(&odl_tb5_devices_list,
+					       struct odl_tb5_device, list);
+		mutex_unlock(&odl_tb5_devices_lock);
+		if (!dev)
+			break;
+		pr_info("odl_tb5: destroying leftover device index %d at exit\n",
+			dev->index);
+		odl_tb5_destroy(dev);
+	}
+
 	odl_tb5_proto_unregister();
 
 	/* Unregister property dirs: main dir under its protocol key,
@@ -680,6 +717,7 @@ static void __exit odl_tb5_exit(void)
 		tb_unregister_property_dir(ODL_TB5_PROTOCOL_KEY,
 					   odl_tb5_apple_property_dir);
 		tb_property_free_dir(odl_tb5_apple_property_dir);
+	}
 	}
 #endif
 out:
