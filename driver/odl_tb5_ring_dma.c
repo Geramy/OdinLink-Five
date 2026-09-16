@@ -115,14 +115,12 @@ void odl_tb5_tx_callback(struct tb_ring *ring,
 	struct odl_tb5_device *dev;
 
 	ctx = odl_tb5_ring_to_ctx(ring);
-	if (WARN_ON_ONCE(!ctx))
+	if (!ctx)
 		return;
 
 	/* Check if this is a frame pool slot (new stream path) */
 	dev = container_of(ctx, struct odl_tb5_device, tx);
 
-	if (atomic_read(&dev->removing))
-		return;
 	slot = container_of(frame, struct odl_tb5_frame_slot, frame);
 
 	if (slot >= dev->frame_pool.slots &&
@@ -169,13 +167,10 @@ void odl_tb5_tx_batch_callback(struct tb_ring *ring,
 	int b;
 
 	ctx = odl_tb5_ring_to_ctx(ring);
-	if (WARN_ON_ONCE(!ctx))
+	if (!ctx)
 		return;
 
 	dev = container_of(ctx, struct odl_tb5_device, tx);
-
-	if (atomic_read(&dev->removing))
-		return;
 
 	/* Identify which batch buffer owns this frame (8 entries max) */
 	for (b = 0; b < ODL_TB5_BATCH_BUF_COUNT; b++) {
@@ -217,12 +212,11 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 	struct odl_tb5_frame_slot *slot;
 
 	ctx = odl_tb5_ring_to_ctx(ring);
-	if (WARN_ON_ONCE(!ctx))
+	if (!ctx)
 		return;
 
 	dev = odl_tb5_rx_ring_to_dev(ring);
-
-	if (!dev || atomic_read(&dev->removing))
+	if (!dev)
 		return;
 
 	/* Check if this is a frame pool slot (new stream path) */
@@ -237,6 +231,11 @@ void odl_tb5_rx_callback(struct tb_ring *ring,
 
 			if (canceled) {
 				atomic_inc(&dev->rx_canceled);
+				odl_tb5_frame_pool_put(&dev->frame_pool, slot);
+				return;
+			}
+
+			if (atomic_read(&dev->removing)) {
 				odl_tb5_frame_pool_put(&dev->frame_pool, slot);
 				return;
 			}
@@ -479,7 +478,7 @@ rx_frame_done:
 	}
 
 	/* Legacy path for proto layer direct ring submissions */
-	if (canceled) {
+	if (canceled || atomic_read(&dev->removing)) {
 		pr_debug("odl_tb5: RX callback canceled\n");
 		return;
 	}
