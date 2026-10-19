@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <limits.h>
 #include <errno.h>
 #include <dirent.h>
 #include <unistd.h>
@@ -258,7 +259,7 @@ static rcclResult_t odl_tb5_init(rcclDebugLogger_t logFunction)
 	/* One-line confirmation so logs prove the fast path is active
 	 * (silent Socket fallback is the #1 footgun — issue #23). */
 	if (odl_logger)
-		odl_logger(3 /* INFO */,
+		odl_logger(3 /* NCCL_LOG_INFO */, 16 /* NCCL_NET */, __FILE__, __LINE__,
 			   "ODL_TB5 net plugin loaded (%d device(s); use NET/ODL_TB5, not Socket)",
 			   num_devices);
 	else
@@ -829,3 +830,111 @@ static void odl_tb5_export_nccl_symbol(void)
 #else
 extern rcclNet_v7_t ncclNetPlugin_v7 __attribute__((alias("rcclNetPlugin_v7")));
 #endif
+
+/* ── NCCL net plugin API v8 ────────────────────────────────────────────
+ * RCCL 2.30 (ROCm 10 vLLM toolboxes, 2026-09) probes ncclNetPlugin_v11 …
+ * _v8 before falling back to _v7, and that fallback is unreliable. (The
+ * engine-start segfault in odl_tb5_init itself was the logger signature —
+ * see rcclDebugLogger_t in net_v7.h.) v8 differs from v7 in two places only: the
+ * properties gain regIsGlobal (after ptrSupport), and regMr takes a size_t.
+ * The device-handle types are identical (NCCL: typedef …_v7_t …_v8_t), as is
+ * every other slot, so v8 is the v7 table with two adapters. The v7 export
+ * above stays for older RCCLs, which never look for _v8.
+ */
+typedef struct {
+	char *name;
+	char *pciPath;
+	uint64_t guid;
+	int ptrSupport;
+	int regIsGlobal;
+	int speed;
+	int port;
+	float latency;
+	int maxComms;
+	int maxRecvs;
+	int netDeviceType;
+	int netDeviceVersion;
+} odl_tb5_netProperties_v8_t;
+
+typedef struct {
+	const char *name;
+	rcclResult_t (*init)(rcclDebugLogger_t logFunction);
+	rcclResult_t (*devices)(int *ndev);
+	rcclResult_t (*getProperties)(int dev, odl_tb5_netProperties_v8_t *props);
+	rcclResult_t (*listen)(int dev, void *handle, void **listenComm);
+	rcclResult_t (*connect)(int dev, void *handle, void **sendComm,
+				rcclNetDeviceHandle_v7_t **sendDevComm);
+	rcclResult_t (*accept)(void *listenComm, void **recvComm,
+			       rcclNetDeviceHandle_v7_t **recvDevComm);
+	rcclResult_t (*regMr)(void *comm, void *data, size_t size, int type,
+			      void **mhandle);
+	rcclResult_t (*regMrDmaBuf)(void *comm, void *data, size_t size, int type,
+				    uint64_t offset, int fd, void **mhandle);
+	rcclResult_t (*deregMr)(void *comm, void *mhandle);
+	rcclResult_t (*isend)(void *sendComm, void *data, int size, int tag,
+			      void *mhandle, void **request);
+	rcclResult_t (*irecv)(void *recvComm, int n, void **data, int *sizes,
+			      int *tags, void **mhandles, void **request);
+	rcclResult_t (*iflush)(void *recvComm, int n, void **data, int *sizes,
+			       void **mhandles, void **request);
+	rcclResult_t (*test)(void *request, int *done, int *sizes);
+	rcclResult_t (*closeSend)(void *sendComm);
+	rcclResult_t (*closeRecv)(void *recvComm);
+	rcclResult_t (*closeListen)(void *listenComm);
+	rcclResult_t (*getDeviceMr)(void *comm, void *mhandle, void **dptr_mhandle);
+	rcclResult_t (*irecvConsumed)(void *recvComm, int n, void *request);
+} odl_tb5_net_v8_t;
+
+static rcclResult_t odl_tb5_getProperties_v8(int dev,
+					     odl_tb5_netProperties_v8_t *props)
+{
+	rcclNetProperties_v7_t v7;
+	rcclResult_t r = odl_tb5_getProperties(dev, &v7);
+
+	if (r != rcclSuccess)
+		return r;
+	props->name             = v7.name;
+	props->pciPath          = v7.pciPath;
+	props->guid             = v7.guid;
+	props->ptrSupport       = v7.ptrSupport;
+	props->regIsGlobal      = 0;	/* host staging: per-comm registration */
+	props->speed            = v7.speed;
+	props->port             = v7.port;
+	props->latency          = v7.latency;
+	props->maxComms         = v7.maxComm;
+	props->maxRecvs         = v7.maxRecvs;
+	props->netDeviceType    = v7.netDeviceType;
+	props->netDeviceVersion = v7.netDeviceVersion;
+	return rcclSuccess;
+}
+
+static rcclResult_t odl_tb5_regMr_v8(void *comm, void *data, size_t size,
+				     int type, void **mhandle)
+{
+	if (size > INT_MAX)	/* v7 core takes int; refuse rather than truncate */
+		return rcclInvalidArgument;
+	return odl_tb5_regMr(comm, data, (int)size, type, mhandle);
+}
+
+__attribute__((visibility("default")))
+odl_tb5_net_v8_t ncclNetPlugin_v8 = {
+	.name          = "ODL_TB5",
+	.init          = odl_tb5_init,
+	.devices       = odl_tb5_devices,
+	.getProperties = odl_tb5_getProperties_v8,
+	.listen        = odl_tb5_listen,
+	.connect       = odl_tb5_connect,
+	.accept        = odl_tb5_accept,
+	.regMr         = odl_tb5_regMr_v8,
+	.regMrDmaBuf   = odl_tb5_regMrDmaBuf,
+	.deregMr       = odl_tb5_deregMr,
+	.isend         = odl_tb5_isend,
+	.irecv         = odl_tb5_irecv,
+	.iflush        = odl_tb5_iflush,
+	.test          = odl_tb5_test,
+	.closeSend     = odl_tb5_closeSend,
+	.closeRecv     = odl_tb5_closeRecv,
+	.closeListen   = odl_tb5_closeListen,
+	.getDeviceMr   = odl_tb5_getDeviceMr,
+	.irecvConsumed = odl_tb5_irecvConsumed,
+};
