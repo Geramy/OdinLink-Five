@@ -16,7 +16,13 @@ typedef enum {
   rcclNumResults = 6
 } rcclResult_t;
 
-typedef void (*rcclDebugLogger_t)(int level, const char* fmt, ...);
+/* NCCL's real logger (nccl/common.h ncclDebugLogger_t): level, subsystem
+ * flags, file, line, then the format. The old (level, fmt, ...) shape made
+ * NCCL read the format string as `flags` and a vararg as `file`, and the
+ * plugin's first log call crashed in vsnprintf (RCCL 2.30, 2026-09). */
+typedef void (*rcclDebugLogger_t)(int level, unsigned long flags,
+                                  const char* file, int line,
+                                  const char* fmt, ...);
 
 /* Memory pointer types (bitmask in properties.ptrSupport). */
 #define NCCL_PTR_HOST 0x1
