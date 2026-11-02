@@ -381,6 +381,24 @@ static int odl_tb5_complete_connection(struct odl_tb5_device *dev)
 	if (dev->transport->path_alloc_hopid) {
 		ret = dev->transport->path_alloc_hopid(dev,
 						       dev->remote_tx_hopid);
+		if (ret < 0 && dev->skip_handshake) {
+			/* Mac/bind_any sink: no usable peer TX HopID was learned,
+			 * so remote_tx_hopid is the guess 1 -- below
+			 * TB_PATH_MIN_HOPID (8) on current kernels, which
+			 * tb_xdomain_alloc_in_hopid() rejects with -EINVAL. Take any
+			 * free in-HopID rather than failing the connection, and
+			 * keep the peer's TX HopID at the value that works. */
+			int hop = dev->transport->path_alloc_hopid(dev, -1);
+
+			if (hop >= 0) {
+				pr_info("odl_tb5: sink hop %d unusable (%d), "
+					"using in-HopID %d instead\n",
+					dev->remote_tx_hopid, ret, hop);
+				if (hop > 0)
+					dev->remote_tx_hopid = hop;
+				ret = 0;
+			}
+		}
 		if (ret < 0) {
 			pr_err("odl_tb5: failed to allocate input HopID: %d\n",
 			       ret);
@@ -491,11 +509,40 @@ static void odl_tb5_connect_work_fn(struct work_struct *work)
 		dev->login_received = false;
 		mutex_unlock(&dev->state_lock);
 
-		pr_warn("odl_tb5: connection completion failed (%d), "
-			"retrying handshake\n", ret);
+		dev->connect_retries++;
+
+		/* HAZARD: the login succeeded, so odl_tb5_login_work_fn()'s retry
+		 * counter never moves while this path keeps failing. Unbounded,
+		 * it re-handshakes at 1 Hz forever and hammers tb_cfg_*() against
+		 * a router that may already be wedged -- observed to take the
+		 * USB4 controller (and, sharing the power/firmware domain on
+		 * Strix Halo, the GPU) down with it. Bound it exactly like the
+		 * login path and stay quiescent instead. */
+		if (odl_login_max_retries > 0 &&
+		    dev->connect_retries >= odl_login_max_retries) {
+			pr_warn("odl_tb5: giving up after %d connection attempts "
+				"(last err %d); staying idle. The peer answers "
+				"login but its DMA paths cannot be established -- "
+				"reload odl_tb5 once the link is idle.\n",
+				dev->connect_retries, ret);
+			return;
+		}
+
+		if (dev->connect_retries <= 3 ||
+		    dev->connect_retries % 10 == 0)
+			pr_warn("odl_tb5: connection completion failed (%d), "
+				"retrying handshake (attempt %d/%d)\n",
+				ret, dev->connect_retries,
+				odl_login_max_retries);
+
 		schedule_delayed_work(&dev->login_work,
-				      msecs_to_jiffies(1000));
+			msecs_to_jiffies(min_t(int,
+				1000 << min_t(int, dev->connect_retries, 3),
+				5000)));
+		return;
 	}
+
+	dev->connect_retries = 0;
 }
 
 /* Write a kernel DMA control message (ping or pong) via frame pool. */
@@ -748,6 +795,7 @@ static void odl_tb5_restart_work_fn(struct work_struct *work)
 	wake_up_all(&dev->state_waitq);
 	dev->login_sent = false;
 	dev->login_retries = 0;
+	dev->connect_retries = 0;
 	mutex_unlock(&dev->state_lock);
 
 	pr_info("odl_tb5: connection restarted, beginning handshake\n");
@@ -851,6 +899,7 @@ int odl_tb5_proto_init(struct odl_tb5_device *dev)
 	init_waitqueue_head(&dev->verify_waitq);
 
 	dev->login_retries  = 0;
+	dev->connect_retries = 0;
 	dev->login_sent     = false;
 	dev->login_received = false;
 	dev->pong_received  = false;
