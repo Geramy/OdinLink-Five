@@ -60,28 +60,39 @@ static struct odl_tb5_device *odl_tb5_find_device_by_route(u64 route)
 	return NULL;
 }
 
-static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
-				       void *data)
+#ifdef TB_PROTOCOL_HANDLER_HAS_XDOMAIN
+/* Source-XDomain demux: with two point-to-point cables both peers sit at the
+ * same route string in their respective domains, so route alone cannot say
+ * which controller a packet arrived on. The patched thunderbolt core resolves
+ * the source XDomain per receiving controller and hands it to callback_xd; it
+ * is the same kernel object each device holds a reference to, so a pointer
+ * match is exact. */
+static struct odl_tb5_device *odl_tb5_find_device_by_xd(struct tb_xdomain *xd)
+{
+	struct odl_tb5_device *dev;
+
+	if (!xd)
+		return NULL;
+	list_for_each_entry(dev, &odl_tb5_devices_list, list) {
+		if (dev->transport->type == ODL_TB5_TRANSPORT_NHI &&
+		    dev->xd == xd)
+			return dev;
+	}
+	return NULL;
+}
+#endif /* TB_PROTOCOL_HANDLER_HAS_XDOMAIN */
+
+/* Process an incoming XDomain protocol packet for an already-resolved device.
+ * Caller holds odl_tb5_devices_lock; every exit path releases it, exactly as
+ * the monolithic handler this was extracted from did. */
+static int odl_tb5_proto_dispatch(struct odl_tb5_device *dev,
+				  const void *buf, size_t size)
 {
 	const struct odl_tb5_xd_header *hdr = buf;
-	struct odl_tb5_device *dev;
-	u64 route;
 	bool need_complete = false;
 
-	if (size < sizeof(*hdr))
-		return 0;
-
-	route = (((u64)hdr->route_hi << 32) | hdr->route_lo) & ~BIT_ULL(63);
-
-	mutex_lock(&odl_tb5_devices_lock);
-	dev = odl_tb5_find_device_by_route(route);
-
-	if (!dev) {
+	if (size < sizeof(*hdr)) {
 		mutex_unlock(&odl_tb5_devices_lock);
-		pr_warn("odl_tb5: incoming packet route %llx — no matching "
-			"device (probe skipped or already removed; often "
-			"max_devices or a late unbind)\n",
-			route);
 		return 0;
 	}
 
@@ -203,19 +214,98 @@ static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
 	}
 }
 
+#ifndef TB_PROTOCOL_HANDLER_HAS_XDOMAIN
+/* Legacy route demux (stock thunderbolt core): unambiguous only with a single
+ * point-to-point cable — the reason two cables never converged before the
+ * source-XDomain API existed. Only compiled when the patched core is absent. */
+static int odl_tb5_proto_handle_packet(const void *buf, size_t size,
+				       void *data)
+{
+	const struct odl_tb5_xd_header *hdr = buf;
+	struct odl_tb5_device *dev;
+	u64 route;
+
+	(void)data;
+	if (size < sizeof(*hdr))
+		return 0;
+
+	route = (((u64)hdr->route_hi << 32) | hdr->route_lo) & ~BIT_ULL(63);
+
+	mutex_lock(&odl_tb5_devices_lock);
+	dev = odl_tb5_find_device_by_route(route);
+
+	if (!dev) {
+		mutex_unlock(&odl_tb5_devices_lock);
+		pr_warn("odl_tb5: incoming packet route %llx — no matching "
+			"device (probe skipped or already removed; often "
+			"max_devices or a late unbind)\n",
+			route);
+		return 0;
+	}
+
+	return odl_tb5_proto_dispatch(dev, buf, size);
+}
+#endif /* !TB_PROTOCOL_HANDLER_HAS_XDOMAIN */
+
+#ifdef TB_PROTOCOL_HANDLER_HAS_XDOMAIN
+/* Source-XDomain demux (patched thunderbolt core). A NULL xd (no XDomain at
+ * that route in this domain) cannot be attributed safely, so drop the packet
+ * rather than guess via route. */
+static int odl_tb5_proto_handle_packet_xd(struct tb_xdomain *xd,
+					  const void *buf, size_t size,
+					  void *data)
+{
+	struct odl_tb5_device *dev;
+
+	(void)data;
+	mutex_lock(&odl_tb5_devices_lock);
+	dev = odl_tb5_find_device_by_xd(xd);
+	if (!dev) {
+		mutex_unlock(&odl_tb5_devices_lock);
+		pr_warn_ratelimited("odl_tb5: incoming packet from xd %p — "
+				"no matching device (probe pending or the peer "
+				"relogged in; login retries)\n", xd);
+		return 0;
+	}
+
+	return odl_tb5_proto_dispatch(dev, buf, size);
+}
+
+/* Distinct struct, NOT extra fields in tb_protocol_handler: that struct is
+ * embedded in thunderbolt_net's private data, so changing its layout would
+ * corrupt the stock driver. The core keeps a separate list for this type. */
+static struct tb_protocol_handler_xd odl_tb5_handler = {
+	.base.uuid	= &odl_tb5_proto_uuid,
+	.callback_xd	= odl_tb5_proto_handle_packet_xd,
+	.owner		= THIS_MODULE,
+};
+#else
 static struct tb_protocol_handler odl_tb5_handler = {
 	.uuid     = &odl_tb5_proto_uuid,
 	.callback = odl_tb5_proto_handle_packet,
 };
+#endif
 
 int odl_tb5_proto_register(void)
 {
+#ifdef TB_PROTOCOL_HANDLER_HAS_XDOMAIN
+	pr_info("odl_tb5: source-XDomain protocol demux; multi-cable links "
+		"supported\n");
+	return tb_register_protocol_handler_xd(&odl_tb5_handler);
+#else
+	pr_info("odl_tb5: route-based protocol demux (stock thunderbolt core); "
+		"single cable only\n");
 	return tb_register_protocol_handler(&odl_tb5_handler);
+#endif
 }
 
 void odl_tb5_proto_unregister(void)
 {
+#ifdef TB_PROTOCOL_HANDLER_HAS_XDOMAIN
+	tb_unregister_protocol_handler_xd(&odl_tb5_handler);
+#else
 	tb_unregister_protocol_handler(&odl_tb5_handler);
+#endif
 }
 #endif /* CONFIG_USB4 */
 
