@@ -356,6 +356,11 @@ struct odl_tb5_device {
 	bool			peer_ping_answered;
 	int			verify_rx_type;
 	int			login_retries;
+	/* Failed odl_tb5_complete_connection() attempts.  The login itself can
+	 * succeed on every round while DMA path setup keeps failing, which
+	 * leaves login_retries frozen -- without a counter of its own this
+	 * path retries at 1 Hz forever. */
+	int			connect_retries;
 	bool			login_sent;
 	bool			login_received;
 	/* Bound from a generic Thunderbolt host (e.g. a Mac that does
